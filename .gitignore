@@ -8,3 +8,4 @@ dist/
 coverage/
 .secrets/
 *.enc.yaml.bak
+tmp-speech-probe/

@@ -25,6 +25,10 @@ import {
   gradeQuestion,
   type GradeQuestionPorts,
 } from "./grade-question.js";
+import {
+  scoreSpeechTool,
+  type ScoreEnSentPorts,
+} from "./clio-speech.js";
 import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -56,7 +60,8 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<UploadAnswerAudioPorts> &
   Partial<SubmitAnswerPorts> &
   Partial<SpeakAndSubmitPorts> &
-  Partial<GradeQuestionPorts> & {
+  Partial<GradeQuestionPorts> &
+  Partial<ScoreEnSentPorts> & {
     loadPaperUrl?: string;
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
@@ -270,8 +275,8 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     "Args: taskId, questionInstanceId (string snowflake), questionContent (answer JSON),",
     "optional ansVersion / isObjective / openId.",
     "CDN-url-only oral record often returns score=0; prefer EN_SENT_SCORE shape",
-    "(type/text/url/isDone) from buildEnSentScoreQuestionContent — server mostly persists",
-    "client-SDK scores; pre-submit speech scoring SDK is not wired yet.",
+    "(type/text/url/isDone) from buildEnSentScoreQuestionContent or score_speech.",
+    "Pre-submit scoring: use score_speech (Clio WSS en.sent.score); do not invent scores.",
     "After submit, results can be read via /api/uls/user/loadGradedQuestions (no MCP tool yet).",
     "Does not accept credentials (JWT from env/CLI only).",
   ].join(" ");
@@ -314,6 +319,51 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           ansVersion: args.ansVersion,
           isObjective: args.isObjective,
           openId: args.openId,
+        }),
+      ),
+  );
+
+
+  const SCORE_SPEECH_DESCRIPTION = [
+    "Headless Clio / speech.unipus.cn en.sent.score over WSS.",
+    "Args: transcript + wavPath (16 kHz mono WAV); optional userId.",
+    "Credentials: UNIPUS_CLIO_APP_ID / UNIPUS_CLIO_APP_SECRET (default = SPA phoneme pair);",
+    "WSS: UNIPUS_CLIO_WSS_URL (default wss://speech.unipus.cn/speech/proxy/wss).",
+    "Returns overall/total, audio_url (clio-audios CDN), and en_sent_score_content for grade/submit.",
+    "Does not fake scores; silence may yield total=0. Keep grade_question separate.",
+  ].join(" ");
+
+  const scorePorts: ScoreEnSentPorts = {
+    env: ports?.env,
+    readFile: ports?.readFile,
+    createWebSocket: ports?.createWebSocket,
+    nowMs: ports?.nowMs,
+    randomUUID: ports?.randomUUID,
+  };
+
+  server.registerTool(
+    "score_speech",
+    {
+      title: "Score speech (Clio)",
+      description: SCORE_SPEECH_DESCRIPTION,
+      inputSchema: {
+        transcript: z
+          .string()
+          .min(1)
+          .describe("Reference transcript for en.sent.score"),
+        wavPath: z
+          .string()
+          .min(1)
+          .describe("Local 16 kHz mono WAV path"),
+        userId: z.string().optional().describe("Clio userId; default unipus-mcp"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await scoreSpeechTool(scorePorts, {
+          transcript: args.transcript,
+          wavPath: args.wavPath,
+          userId: args.userId,
         }),
       ),
   );

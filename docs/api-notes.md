@@ -183,9 +183,65 @@ Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
 - **`questionInstanceId` must be a string** end-to-end. Never `JSON.parse` bare snowflake numbers (e.g. `1984905701219868673` → corrupted). MCP uses `parseJsonPreservingLargeInts` / `asExactIdString`.
 - **CDN-url-only** short answer (`children[].record.url` or `{record:{url}}`) → grade may succeed but **`score=0`** / empty userAnswer.
 - Real ~76-score body uses rich `record`: `{ "type":"EN_SENT_SCORE", "text", "url", "replayUrl"?, "path"?, "isDone":true }` (`path` may be clio speech-proxy). Helper: `buildEnSentScoreQuestionContent`.
-- Scoring engine is **client SDK** (`speech.cdn`); server grade mostly **persists** already-computed scores. **Pre-submit score** cannot rely on upload-then-grade alone without that SDK/proxy — or accept submit → `loadGradedQuestions` with 0-score risk.
+- Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists** already-computed scores. Pre-submit: use MCP `score_speech` (Clio `en.sent.score`) then `buildEnSentScoreQuestionContent` / `grade_question`. CDN-url-only still often score=0.
 - After submit: **`/api/uls/user/loadGradedQuestions`** can read results (URL helper in config; **no MCP tool yet**).
 - Paid week quota 5/3 still **unverified**.
 
 MCP: `grade_question`; `start_listening_training` returns `instance_ids` as exact strings.
 
+## Clio / speech.unipus.cn scoring (2026-09-21 verified)
+
+Headless **en.sent.score** for real `EN_SENT_SCORE` payloads (do **not** invent scores client-side).
+
+### WSS protocol
+
+| Item | Value |
+|------|-------|
+| Prod WSS | `wss://speech.unipus.cn/speech/proxy/wss` (**not** bare `/wss` for business) |
+| Sig | `SHA1(hex)` of `applicationId + secret + timestamp` |
+| timestamp | `Math.floor(Date.now()/1000).toString()` (= `String(Date.now()).slice(0,-3)`) |
+
+On open, send frames **in order**:
+
+1. `{sdk:{version:16777216,source:4,protocol:"websocket"},app:{applicationId,sig,timestamp,userId,alg:"sha1"}}`
+2. `{tokenId:uuid, audio:{audioType:"wav",channel:1,sampleRate:16000,sampleBytes:2}, request:{apiName:"en.sent.score", transcript, userId, sig, parameters:{details:{adjust:0}}}}`
+3. binary audio (WAV/PCM bytes)
+4. `{"stop":true}`
+
+Success response shape: `{code:0, finalResult:{result:{…scores…}, url:"https://clio-audios.unipus.cn/…"}}`.
+Silence → `total=0` is OK for smoke; use TTS WAV for non-zero attempts.
+
+### Credentials
+
+SPA phoneme helper (`mobile/core.js`) hardcodes:
+
+- `applicationId`: `162787294610001`
+- `secret`: `8da79f23cff822c84a64d231fa5f7e28c5319896` (public in SPA bundle)
+
+Env overrides: `UNIPUS_CLIO_APP_ID` / `UNIPUS_CLIO_APP_SECRET` / `UNIPUS_CLIO_WSS_URL`.
+MCP tool: `score_speech` (transcript + wavPath). Helper maps result → `buildEnSentScoreQuestionContent`.
+
+### SOE initialize/v2 (optional rotation; document only)
+
+Full product path (soe-sdk):
+
+1. `POST https://zt.unipus.cn/soe/api/initialize/v2` with header  
+   `auth = btoa(appKey + ':' + ts.slice(0,7) + hashStr(appKey+':'+appSecret+':'+ts.slice(-10)) + ts.slice(-6))`  
+   where `ts = String(Date.now())` and `hashStr` is the SDK’s Murmur-style hasher (`Tt.hashStr`) — **not** MD5 despite some notes.
+2. Response `data[].config` is hex ciphertext; AES-CBC decrypt with  
+   `key = TextEncoder(appSecret)`, `IV = [1..16]` → `engineKey:engineSecret:appId`.
+3. Default Clio engine uses those `engineKey`/`engineSecret` for the same WSS sig.
+
+SPA passes `appKey`/`appSecret` into SOE `initConfig` — **not present in main `index.js`**. Without device capture of those keys, keep env overrides and default to the verified phoneme pair. Production may rotate via initialize/v2.
+
+### Chivox / aiengine.provision (native TBD)
+
+- Chivox H5 path: `Html5Recorder` + `https://zt.unipus.cn/soe/api/csAuth` + `wss://cloud.chivox.com`.
+- **`aiengine.provision` is NOT in soe-sdk JS.**
+- On-device APK (`cn.unipus.cloud`, jadx under `/workspace/unipus-apk`):  
+  - asset `resources/assets/aiengine.provision` (112-byte obfuscated blob)  
+  - native `libaiengine.so` exports `aiengine_new/start/feed/stop/…` (Chivox-style)  
+  - **no Java/Kotlin string refs** in jadx sources (IJM-packed) — reverse **not** complete.
+- Leftover for unipus: treat `aiengine.provision` as **native/Chivox stub**; do not fake `EN_SENT_SCORE`. CDN-url-only grade still often score=0 without Clio scores.
+
+MCP: `score_speech` ships the Clio WSS path; `grade_question` stays separate (persist).

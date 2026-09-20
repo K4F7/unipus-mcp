@@ -216,6 +216,38 @@ export function okGradeQuestion(input: {
   };
 }
 
+export type ScoreSpeechResult = ToolResult & {
+  overall?: number | null;
+  total?: number | null;
+  audio_url?: string | null;
+  result?: Record<string, unknown>;
+  en_sent_score_content?: string;
+  en_sent_score_record?: Record<string, unknown>;
+};
+
+export function okScoreSpeech(input: {
+  message: string;
+  overall: number | null;
+  total: number | null;
+  audio_url: string | null;
+  result: Record<string, unknown>;
+  en_sent_score_content: string;
+  en_sent_score_record: Record<string, unknown>;
+}): ScoreSpeechResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    overall: input.overall,
+    total: input.total,
+    audio_url: input.audio_url,
+    result: input.result,
+    en_sent_score_content: input.en_sent_score_content,
+    en_sent_score_record: input.en_sent_score_record,
+  };
+}
+
 export function toMcpToolResponse(result: ToolResult) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(result) }],
