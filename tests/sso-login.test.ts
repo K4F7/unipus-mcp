@@ -56,7 +56,11 @@ describe("saveJwtToDefaultPath", () => {
     await writeFile(path, "old.jwt\n", { mode: 0o644 });
     await chmod(path, 0o644);
 
-    const saved = await saveJwtToDefaultPath("new.jwt.token", { home });
+    // Clear XDG so home override wins (CI often sets XDG_CONFIG_HOME).
+    const saved = await saveJwtToDefaultPath("new.jwt.token", {
+      home,
+      env: {},
+    });
     assert.equal(saved, path);
     assert.equal((await readFile(path, "utf8")).trim(), "new.jwt.token");
     const mode = (await stat(path)).mode & 0o777;
