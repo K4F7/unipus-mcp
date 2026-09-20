@@ -15,6 +15,7 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 3. `start_listening_training` — 开始训练 / loadPaper（返回 `instance_ids` 精确字符串）
 4. `upload_answer_audio` / `submit_answer` / `speak_and_submit` — 静默口语上传与提交
 5. `grade_question` — `gradeQuestion` 评分（BigInt-safe instance id；CDN-only 常 0 分）
+6. `score_speech` — Clio WSS `en.sent.score`（真实口语分；勿伪造）
 
 `auth_status` 已接入：从 `UNIPUS_JWT` / `UNIPUS_JWT_FILE`（或 `~/.config/unipus-mcp/jwt`）读取 JWT，探活 `ucloud.unipus.cn/api/uls/`。
 `list_week_progress` 已接入 activation/status（本周试用进度）。静默上传 / submit / grade 见 `docs/mcp.md` 与 `docs/api-notes.md`。

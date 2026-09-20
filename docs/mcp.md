@@ -17,6 +17,7 @@
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
 | `grade_question` | `POST /api/uls/rate/gradeQuestion`；`questionInstanceId` 必须字符串；CDN-only 常 score=0 |
+| `score_speech` | Clio WSS `en.sent.score`（transcript + wavPath）→ overall/total + `en_sent_score_content`；凭据走 env |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
 
@@ -185,6 +186,16 @@ Headless grade via `POST /api/uls/rate/gradeQuestion` (raw JWT, no Bearer).
 
 - Args: `taskId`, `questionInstanceId` (**exact string** snowflake), `questionContent` (answer JSON string), optional `ansVersion` / `isObjective` / `openId`.
 - Override URL: `UNIPUS_ULS_GRADE_QUESTION_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
-- **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer rich `EN_SENT_SCORE` (`type`/`text`/`url`/`isDone`, optional `path`/`replayUrl`) — see `buildEnSentScoreQuestionContent`. Server mostly persists client-SDK scores; **pre-submit speech scoring SDK is not wired**.
+- **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer rich `EN_SENT_SCORE` from `score_speech` / `buildEnSentScoreQuestionContent`. Server mostly persists client scores — do **not** invent them.
 - After `submit_answer`, results may be readable at `/api/uls/user/loadGradedQuestions` (config URL helper only; **no MCP tool yet**).
 - Paid week quota 5/3 path still **unverified**.
+
+## `score_speech`
+
+Headless Clio sentence score over `wss://speech.unipus.cn/speech/proxy/wss` (`en.sent.score`).
+
+- Args: `transcript`, `wavPath` (16 kHz mono WAV); optional `userId`.
+- Env: `UNIPUS_CLIO_APP_ID` / `UNIPUS_CLIO_APP_SECRET` (default = SPA phoneme pair from `mobile/core.js`), `UNIPUS_CLIO_WSS_URL`.
+- Returns `overall` / `total`, `audio_url` (clio-audios CDN), `en_sent_score_content` / `en_sent_score_record` for `grade_question` / `submit_answer`.
+- Live smoke: `UNIPUS_CLIO_LIVE_SMOKE=1 npx tsx scripts/clio-score-smoke.ts ["hello world"]`.
+- initialize/v2 appKey rotation and native `aiengine.provision` — see `docs/api-notes.md` (provision = native TBD; not in soe-sdk JS).

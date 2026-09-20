@@ -174,3 +174,37 @@ export function resolveLoadGradedQuestionsUrl(
 ): string {
   return `${resolveAdaptiveOrigin(env)}${resolveLoadGradedQuestionsPath(env)}`;
 }
+
+/** Clio / speech.unipus.cn WSS (prod business path — NOT bare /wss). */
+export const DEFAULT_CLIO_WSS_URL =
+  "wss://speech.unipus.cn/speech/proxy/wss";
+
+/**
+ * SPA phoneme-helper defaults hardcoded in mobile/core.js
+ * (`applicationId` + `secret` for getSig). Production apps may rotate
+ * engineKey/engineSecret via SOE `initialize/v2`; override with env.
+ */
+export const DEFAULT_CLIO_APPLICATION_ID = "162787294610001";
+export const DEFAULT_CLIO_SECRET =
+  "8da79f23cff822c84a64d231fa5f7e28c5319896";
+
+export function resolveClioWssUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return envTrim(env.UNIPUS_CLIO_WSS_URL) ?? DEFAULT_CLIO_WSS_URL;
+}
+
+/**
+ * Prefer UNIPUS_CLIO_APP_ID + UNIPUS_CLIO_APP_SECRET when both set;
+ * otherwise null (caller falls back to SPA phoneme pair).
+ */
+export function resolveClioCredentials(
+  env: NodeJS.ProcessEnv = process.env,
+): { applicationId: string; secret: string } | null {
+  const applicationId = envTrim(env.UNIPUS_CLIO_APP_ID);
+  const secret = envTrim(env.UNIPUS_CLIO_APP_SECRET);
+  if (applicationId == null || secret == null) {
+    return null;
+  }
+  return { applicationId, secret };
+}
