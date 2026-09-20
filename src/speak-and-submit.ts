@@ -12,6 +12,7 @@ import {
   submitAnswer,
   type SubmitAnswerPorts,
 } from "./submit-answer.js";
+import { asExactIdString } from "./safe-json.js";
 
 export type SpeakAndSubmitInput = {
   text: string;
@@ -49,9 +50,11 @@ export async function speakAndSubmit(
   if (text.length === 0) {
     return toolError("INVALID_ARGUMENT", "text 不能为空");
   }
-  const taskId = input.taskId.trim();
+  const taskId = (asExactIdString(input.taskId) ?? input.taskId).trim();
   const paperToken = input.paperToken.trim();
-  const instanceId = input.instanceId.trim();
+  const instanceId = (
+    asExactIdString(input.instanceId) ?? input.instanceId
+  ).trim();
   if (!taskId || !paperToken || !instanceId) {
     return toolError(
       "INVALID_ARGUMENT",

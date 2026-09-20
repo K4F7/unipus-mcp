@@ -38,6 +38,8 @@ export type StartListeningResult = ToolResult & {
   task_id?: string;
   paper_token?: string | null;
   raw_code?: number | null;
+  /** Exact q_qinstid / instanceId strings from paperJson (never Number-coerced). */
+  instance_ids?: string[];
 };
 
 export function notImplemented(feature: string): ToolResult {
@@ -122,6 +124,7 @@ export function okStartListening(input: {
   task_id: string;
   paper_token: string | null;
   raw_code: number | null;
+  instance_ids?: string[];
 }): StartListeningResult {
   return {
     isError: false,
@@ -131,9 +134,9 @@ export function okStartListening(input: {
     task_id: input.task_id,
     paper_token: input.paper_token,
     raw_code: input.raw_code,
+    instance_ids: input.instance_ids ?? [],
   };
 }
-
 
 export type UploadAnswerAudioResult = ToolResult & {
   file_name?: string;
@@ -161,7 +164,6 @@ export function okUploadAnswerAudio(input: {
   };
 }
 
-
 export type SubmitAnswerResult = ToolResult & {
   task_id?: string;
   instance_id?: string;
@@ -182,6 +184,35 @@ export function okSubmitAnswer(input: {
     task_id: input.task_id,
     instance_id: input.instance_id,
     raw_code: input.raw_code,
+  };
+}
+
+export type GradeQuestionResult = ToolResult & {
+  task_id?: string;
+  question_instance_id?: string;
+  score?: number | null;
+  raw_code?: number | null;
+  raw_value?: unknown;
+};
+
+export function okGradeQuestion(input: {
+  message: string;
+  task_id: string;
+  question_instance_id: string;
+  score: number | null;
+  raw_code: number | null;
+  raw_value?: unknown;
+}): GradeQuestionResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    task_id: input.task_id,
+    question_instance_id: input.question_instance_id,
+    score: input.score,
+    raw_code: input.raw_code,
+    raw_value: input.raw_value,
   };
 }
 

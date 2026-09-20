@@ -12,7 +12,11 @@
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_week_progress` | 本周试用听+口：`listen_done`/`listen_total`、`speak_done`/`speak_total`（activation `*TrialUsed`/`trialUsageLimit`；试用已对齐）；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
-| `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` |
+| `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
+| `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
+| `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
+| `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
+| `grade_question` | `POST /api/uls/rate/gradeQuestion`；`questionInstanceId` 必须字符串；CDN-only 常 score=0 |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
 
@@ -34,7 +38,8 @@
 - `openId`：可选；存在时作为 `openId` 请求头发送。
 - 请求体为 `{ taskId, ansVersion }`，`Authorization` 使用**原始 JWT**，不加 `Bearer ` 前缀。
 - 默认地址为 `https://uadaptive.unipus.cn/api/uls/user/loadPaper`；可用 `UNIPUS_ULS_ADAPTIVE_ORIGIN` / `UNIPUS_ULS_LOAD_PAPER_PATH` 覆盖。
-- 业务成功码接受 `0`、`1`、`200`；成功结果带 `task_id` 与 `paper_token`（若响应提供）。
+- 业务成功码接受 `0`、`1`、`200`；成功结果带 `task_id`、`paper_token`，以及从 paperJson 提取的 **`instance_ids`（精确字符串）**。
+- 所有雪花 id（`q_qinstid` / `questionInstanceId`）**禁止** `Number()` / 裸 `JSON.parse`；内部用 `parseJsonPreservingLargeInts`。
 
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
@@ -173,3 +178,13 @@ One-shot silent oral path: Edge TTS → 16 kHz mono WAV → `upload_answer_audio
 - Args: `text`, `taskId`, `paperToken`, `instanceId`; optional `voice` (default `en-US-JennyNeural`), `ansVersion`, `durationSec`, `openId`.
 - Needs `ffmpeg` on PATH and network for Edge TTS + Qiniu.
 - Prefer this over speaker/mic inject.
+
+## `grade_question`
+
+Headless grade via `POST /api/uls/rate/gradeQuestion` (raw JWT, no Bearer).
+
+- Args: `taskId`, `questionInstanceId` (**exact string** snowflake), `questionContent` (answer JSON string), optional `ansVersion` / `isObjective` / `openId`.
+- Override URL: `UNIPUS_ULS_GRADE_QUESTION_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
+- **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer rich `EN_SENT_SCORE` (`type`/`text`/`url`/`isDone`, optional `path`/`replayUrl`) — see `buildEnSentScoreQuestionContent`. Server mostly persists client-SDK scores; **pre-submit speech scoring SDK is not wired**.
+- After `submit_answer`, results may be readable at `/api/uls/user/loadGradedQuestions` (config URL helper only; **no MCP tool yet**).
+- Paid week quota 5/3 path still **unverified**.

@@ -10,6 +10,12 @@ import {
   toolError,
   type StartListeningResult,
 } from "./result.js";
+import {
+  asExactIdString,
+  collectQuestionInstanceIds,
+  extractParsedPaperJson,
+  parseJsonPreservingLargeInts,
+} from "./safe-json.js";
 
 export type StartListeningInput = {
   taskId: string;
@@ -32,7 +38,7 @@ export async function startListeningTraining(
   ports: StartListeningPorts,
   input: StartListeningInput,
 ): Promise<StartListeningResult> {
-  const taskId = input.taskId.trim();
+  const taskId = (asExactIdString(input.taskId) ?? input.taskId).trim();
   if (taskId.length === 0) {
     return toolError("INVALID_ARGUMENT", "taskId 不能为空");
   }
@@ -104,6 +110,7 @@ export async function startListeningTraining(
     task_id: parsed.task_id,
     paper_token: parsed.paper_token,
     raw_code: parsed.raw_code,
+    instance_ids: parsed.instance_ids,
   });
 }
 
@@ -111,6 +118,7 @@ type ParsedLoadPaper = {
   task_id: string;
   paper_token: string | null;
   raw_code: number | null;
+  instance_ids: string[];
 };
 
 /** Accept common uls envelopes until live schema is pinned. */
@@ -124,7 +132,8 @@ export function parseLoadPaperBody(
   }
   let value: unknown;
   try {
-    value = JSON.parse(trimmed);
+    // Preserve snowflake ids in paperJson / q_qinstid (see safe-json.ts).
+    value = parseJsonPreservingLargeInts(trimmed);
   } catch {
     return null;
   }
@@ -141,7 +150,10 @@ export function parseLoadPaperBody(
   const data = nestedRecord(root, "data") ?? nestedRecord(root, "value") ?? root;
 
   const taskId =
-    firstString(data, ["taskId", "task_id", "id"]) ?? fallbackTaskId;
+    asExactIdString(data.taskId) ??
+    asExactIdString(data.task_id) ??
+    asExactIdString(data.id) ??
+    fallbackTaskId;
   const paperToken = firstString(data, [
     "token",
     "paperToken",
@@ -149,13 +161,19 @@ export function parseLoadPaperBody(
     "ansToken",
   ]);
 
+  const paper = extractParsedPaperJson(data);
+  // collectQuestionInstanceIds already de-dupes; pass both roots in one walk.
+  const instance_ids = collectQuestionInstanceIds(
+    paper != null ? [data, paper] : data,
+  );
+
   return {
     task_id: taskId,
     paper_token: paperToken,
     raw_code: code,
+    instance_ids,
   };
 }
-
 
 function nestedRecord(
   root: Record<string, unknown>,
@@ -188,7 +206,7 @@ function firstString(
     if (typeof value === "string" && value.trim().length > 0) {
       return value.trim();
     }
-    if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof value === "number" && Number.isSafeInteger(value)) {
       return String(value);
     }
   }

@@ -137,3 +137,40 @@ export function resolveSubmitAnswerUrl(
 ): string {
   return `${resolveAdaptiveOrigin(env)}${resolveSubmitAnswerPath(env)}`;
 }
+
+/** SPA grade-before-submit path (2026-09-21). */
+export const DEFAULT_ULS_GRADE_QUESTION_PATH = "/api/uls/rate/gradeQuestion";
+
+export function resolveGradeQuestionPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_GRADE_QUESTION_PATH) ??
+    DEFAULT_ULS_GRADE_QUESTION_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveGradeQuestionUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveGradeQuestionPath(env)}`;
+}
+
+/** Read graded results after submit (2026-09-21 device). Not an MCP tool yet. */
+export const DEFAULT_ULS_LOAD_GRADED_QUESTIONS_PATH =
+  "/api/uls/user/loadGradedQuestions";
+
+export function resolveLoadGradedQuestionsPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_LOAD_GRADED_QUESTIONS_PATH) ??
+    DEFAULT_ULS_LOAD_GRADED_QUESTIONS_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveLoadGradedQuestionsUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveLoadGradedQuestionsPath(env)}`;
+}

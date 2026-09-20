@@ -165,3 +165,27 @@ Progress probe: prefer `GET /api/uls/user/activation/status` on uadaptive with *
 ```
 
 Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
+
+### gradeQuestion + BigInt ids (2026-09-21 device)
+
+`POST /api/uls/rate/gradeQuestion` (SPA `J()`), raw JWT (no Bearer):
+
+```json
+{
+  "taskId": "<string>",
+  "questionInstanceId": "<string snowflake q_qinstid>",
+  "ansVersion": 1,
+  "questionContent": "<answer JSON string>",
+  "isObjective": false
+}
+```
+
+- **`questionInstanceId` must be a string** end-to-end. Never `JSON.parse` bare snowflake numbers (e.g. `1984905701219868673` → corrupted). MCP uses `parseJsonPreservingLargeInts` / `asExactIdString`.
+- **CDN-url-only** short answer (`children[].record.url` or `{record:{url}}`) → grade may succeed but **`score=0`** / empty userAnswer.
+- Real ~76-score body uses rich `record`: `{ "type":"EN_SENT_SCORE", "text", "url", "replayUrl"?, "path"?, "isDone":true }` (`path` may be clio speech-proxy). Helper: `buildEnSentScoreQuestionContent`.
+- Scoring engine is **client SDK** (`speech.cdn`); server grade mostly **persists** already-computed scores. **Pre-submit score** cannot rely on upload-then-grade alone without that SDK/proxy — or accept submit → `loadGradedQuestions` with 0-score risk.
+- After submit: **`/api/uls/user/loadGradedQuestions`** can read results (URL helper in config; **no MCP tool yet**).
+- Paid week quota 5/3 still **unverified**.
+
+MCP: `grade_question`; `start_listening_training` returns `instance_ids` as exact strings.
+
