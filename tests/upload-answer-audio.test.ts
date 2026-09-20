@@ -83,14 +83,18 @@ describe("uploadAnswerAudio", () => {
       }),
     }));
 
-    let uploaded = false;
+    let uploadedBytes = -1;
     const result = await uploadAnswerAudio(
       {
         credentials: { getJwt: async () => "hdr.pay.sig" },
         http,
         readFile: async () => Buffer.from("RIFF"),
-        uploadFetch: async () => {
-          uploaded = true;
+        uploadFetch: async (_url, init) => {
+          const body = init?.body;
+          assert.ok(body instanceof FormData);
+          const file = body.get("file");
+          assert.ok(file instanceof Blob);
+          uploadedBytes = file.size;
           return new Response(JSON.stringify({ hash: "h1" }), { status: 200 });
         },
       },
@@ -102,7 +106,7 @@ describe("uploadAnswerAudio", () => {
     assert.equal(result.storage_key, "ans-prod/t.wav");
     assert.equal(result.cdn_url, "https://birdflock.unipus.cn/ans-prod/t.wav");
     assert.equal(result.upload_hash, "h1");
-    assert.equal(uploaded, true);
+    assert.equal(uploadedBytes, 4);
     assert.equal(http.calls.length, 1);
     assert.match(http.calls[0]!.body ?? "", /fileName/);
   });

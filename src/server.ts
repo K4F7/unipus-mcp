@@ -133,6 +133,9 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     ...authPorts,
     env: ports?.env,
     queryUploadUrl: ports?.queryUploadUrl,
+    qiniuUploadUrl: ports?.qiniuUploadUrl,
+    uploadFetch: ports?.uploadFetch,
+    readFile: ports?.readFile,
   };
 
   server.registerTool(
@@ -159,7 +162,6 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         }),
       ),
   );
-
 
   const SUBMIT_ANSWER_DESCRIPTION = [
     "Submit U听力/U口语 answers via POST /api/uls/user/submitAnswer.",
@@ -208,7 +210,6 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       ),
   );
 
-
   const SPEAK_AND_SUBMIT_DESCRIPTION = [
     "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
     "Requires paperToken from start_listening_training / loadPaper.",
@@ -217,10 +218,10 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   ].join(" ");
 
   const speakPorts: SpeakAndSubmitPorts = {
-    ...authPorts,
-    env: ports?.env,
-    queryUploadUrl: ports?.queryUploadUrl,
+    ...uploadPorts,
     submitAnswerUrl: ports?.submitAnswerUrl,
+    synthesizeMp3: ports?.synthesizeMp3,
+    ffmpegPath: ports?.ffmpegPath,
   };
 
   server.registerTool(
@@ -253,7 +254,6 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         }),
       ),
   );
-
 
   return server;
 }

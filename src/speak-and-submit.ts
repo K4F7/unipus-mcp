@@ -93,6 +93,13 @@ export async function speakAndSubmit(
       return toolError("UPLOAD_ERROR", "上传成功但缺少 cdn_url");
     }
 
+    const uploadedMeta = {
+      wav_path: wavPath,
+      storage_key: uploaded.storage_key,
+      cdn_url: cdn,
+      upload_hash: uploaded.upload_hash ?? null,
+    };
+
     const submitted = await submitAnswer(ports, {
       taskId,
       paperToken,
@@ -102,13 +109,7 @@ export async function speakAndSubmit(
       userData: [{ instanceId, answer: cdn }],
     });
     if (submitted.isError) {
-      return {
-        ...submitted,
-        wav_path: wavPath,
-        storage_key: uploaded.storage_key,
-        cdn_url: cdn,
-        upload_hash: uploaded.upload_hash ?? null,
-      };
+      return { ...submitted, ...uploadedMeta };
     }
 
     return {
@@ -116,22 +117,16 @@ export async function speakAndSubmit(
       status: "ok",
       code: "OK",
       message: `TTS+上传+提交完成 instance=${instanceId}`,
-      wav_path: wavPath,
-      storage_key: uploaded.storage_key,
-      cdn_url: cdn,
-      upload_hash: uploaded.upload_hash ?? null,
+      ...uploadedMeta,
       task_id: taskId,
       instance_id: instanceId,
     };
   } finally {
-    if (cleanup) {
-      try {
-        await cleanup();
-      } catch {
-        // ignore temp cleanup errors
-      }
+    try {
+      await cleanup?.();
+    } catch {
+      // ignore temp cleanup errors
     }
   }
 }
 
-// silence unused import warning if authRequired unused

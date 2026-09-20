@@ -53,10 +53,11 @@ export async function uploadAnswerAudio(
     return loaded.result;
   }
 
-  const bytes = await readAudioBytes(ports, filePath);
-  if (!bytes.ok) {
-    return bytes.result;
+  const audio = await readAudioBytes(ports, filePath);
+  if (!audio.ok) {
+    return audio.result;
   }
+  const audioBytes = audio.buffer;
 
   const queryUrl = ports.queryUploadUrl ?? resolveQueryUploadUrl(ports.env);
   const headers: Record<string, string> = {
@@ -114,9 +115,11 @@ export async function uploadAnswerAudio(
   const form = new FormData();
   form.append("token", cred.token);
   form.append("key", cred.path);
+  // Copy into a standalone Uint8Array — Buffer.buffer may be a pooled/shared
+  // ArrayBuffer larger than this view (empty/truncated Qiniu uploads).
   form.append(
     "file",
-    new Blob([bytes], { type: guessAudioMime(fileName) }),
+    new Blob([new Uint8Array(audioBytes)], { type: guessAudioMime(fileName) }),
     fileName,
   );
 

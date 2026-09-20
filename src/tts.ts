@@ -41,8 +41,13 @@ export async function synthesizeSpeechWav(
       await tts.ttsPromise(t, out);
     });
 
-  await synthesize(text, voice, mp3Path);
-  await runFfmpeg(ports.ffmpegPath ?? "ffmpeg", mp3Path, wavPath);
+  try {
+    await synthesize(text, voice, mp3Path);
+    await runFfmpeg(ports.ffmpegPath ?? "ffmpeg", mp3Path, wavPath);
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 
   return {
     wavPath,

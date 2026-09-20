@@ -30,7 +30,7 @@ describe("speakAndSubmit", () => {
   test("TTS → upload → submit with injected mp3 + real ffmpeg", async () => {
     // tiny but valid-enough mp3 from prior probe if present; else skip-friendly stub
     const seed = "/tmp/tts-raw.mp3";
-    const http = mockHttp(async ({ url, body }) => {
+    const http = mockHttp(async ({ url }) => {
       if (url.includes("query-upload-url")) {
         return {
           statusCode: 200,
@@ -44,13 +44,7 @@ describe("speakAndSubmit", () => {
           }),
         };
       }
-      if (url.includes("submitAnswer") || url.includes("submit-answer") || body?.includes("paper-tok") || body?.includes("ptok")) {
-        return {
-          statusCode: 200,
-          body: JSON.stringify({ code: 1, value: true }),
-        };
-      }
-      if (url.includes("submitAnswer") || url.includes("/submitAnswer")) {
+      if (url.includes("submitAnswer")) {
         return {
           statusCode: 200,
           body: JSON.stringify({ code: 1, value: true }),
