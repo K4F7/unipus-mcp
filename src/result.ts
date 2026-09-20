@@ -24,9 +24,20 @@ export type AuthStatusResult = ToolResult & {
 };
 
 export type WeekProgressResult = ToolResult & {
+  /** Backward-compatible alias of listen_done */
   progress_done?: number;
   progress_total?: number;
   level?: string | null;
+  listen_done?: number | null;
+  listen_total?: number | null;
+  speak_done?: number | null;
+  speak_total?: number | null;
+};
+
+export type StartListeningResult = ToolResult & {
+  task_id?: string;
+  paper_token?: string | null;
+  raw_code?: number | null;
 };
 
 export function notImplemented(feature: string): ToolResult {
@@ -84,18 +95,42 @@ export function okAuthStatus(input: {
 
 export function okWeekProgress(input: {
   message: string;
-  progress_done: number;
-  progress_total: number;
   level: string | null;
+  listen_done: number;
+  listen_total: number;
+  speak_done: number | null;
+  speak_total: number | null;
 }): WeekProgressResult {
   return {
     isError: false,
     status: "ok",
     code: "OK",
     message: input.message,
-    progress_done: input.progress_done,
-    progress_total: input.progress_total,
+    // progress_* aliases listen_* for callers that predate twin fields
+    progress_done: input.listen_done,
+    progress_total: input.listen_total,
     level: input.level,
+    listen_done: input.listen_done,
+    listen_total: input.listen_total,
+    speak_done: input.speak_done,
+    speak_total: input.speak_total,
+  };
+}
+
+export function okStartListening(input: {
+  message: string;
+  task_id: string;
+  paper_token: string | null;
+  raw_code: number | null;
+}): StartListeningResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    task_id: input.task_id,
+    paper_token: input.paper_token,
+    raw_code: input.raw_code,
   };
 }
 
