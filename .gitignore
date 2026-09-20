@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+*.pem
+*.p12
+.DS_Store
+coverage/
+.secrets/
+*.enc.yaml.bak

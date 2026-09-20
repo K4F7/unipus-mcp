@@ -1,0 +1,18 @@
+{
+  "name": "unipus-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "U校园AI / U听说 local stdio MCP",
+  "bin": {
+    "unipus-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/**/*.test.js 2>/dev/null || node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
