@@ -31,17 +31,24 @@ export type GradeQuestionPorts = AuthPorts & {
 
 export type EnSentScoreRecordInput = {
   text: string;
+  /** Birdflock ans-prod (or Clio CDN when upload skipped). */
   url: string;
-  /** Optional clio / speech-proxy path seen on device. */
+  /** Clio speech-proxy / clio-audios URL (device sample). */
   path?: string;
+  /** Usually same as url (birdflock). */
   replayUrl?: string;
+  list?: unknown[];
 };
 
 /**
- * Rich oral `record` that scored ~76 on-device.
- * CDN-url-only `{ record: { url } }` grades successfully but score stays 0.
- * Full scoring still needs the client speech SDK (speech.cdn); this shape
- * matches the persist payload, not a guarantee of a non-zero score.
+ * Oral `record` matching a device-persisted ~76-score answer.
+ *
+ * Shape (fields only): type / text / url / path? / replayUrl? / list.
+ * Scores (`recordDetail` / `specific_scores`) live in **gradeResult.review**
+ * after grade — never in questionContent.
+ *
+ * CDN-url-only `{ record: { url } }` may grade but score stays 0; prefer this
+ * EN_SENT_SCORE shape after Clio score + (optional) Qiniu upload.
  */
 export function buildEnSentScoreRecord(
   input: EnSentScoreRecordInput,
@@ -50,27 +57,36 @@ export function buildEnSentScoreRecord(
     type: "EN_SENT_SCORE",
     text: input.text,
     url: input.url,
-    isDone: true,
+    list: Array.isArray(input.list) ? input.list : [],
   };
-  const replayUrl = input.replayUrl?.trim();
-  if (replayUrl != null && replayUrl.length > 0) {
-    record.replayUrl = replayUrl;
-  }
   const path = input.path?.trim();
   if (path != null && path.length > 0) {
     record.path = path;
   }
+  const replayUrl = input.replayUrl?.trim();
+  if (replayUrl != null && replayUrl.length > 0) {
+    record.replayUrl = replayUrl;
+  }
   return record;
 }
 
-/** questionContent / submit answer JSON with EN_SENT_SCORE record. */
+/**
+ * questionContent / submit answer JSON.
+ * Device sample: `{ children:[{ record, value:[], isDone:true }], value:[] }`
+ * — record is under children[0], isDone on the child (not inside record).
+ */
 export function buildEnSentScoreQuestionContent(
   input: EnSentScoreRecordInput,
 ): string {
   return JSON.stringify({
+    children: [
+      {
+        record: buildEnSentScoreRecord(input),
+        value: [],
+        isDone: true,
+      },
+    ],
     value: [],
-    children: [],
-    record: buildEnSentScoreRecord(input),
   });
 }
 

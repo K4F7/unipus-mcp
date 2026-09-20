@@ -268,29 +268,87 @@ export async function scoreSpeechTool(
   }
 }
 
-/** Map Clio finalResult → buildEnSentScore* fields for grade/submit. */
+/**
+ * Optional URLs after production upload:
+ * - `qiniuUrl` / birdflock ans-prod → `url` + `replayUrl`
+ * - Clio `audioUrl` → `path` (speech-proxy / clio-audios)
+ * Without `qiniuUrl`, url/replayUrl/path all default to Clio audioUrl.
+ */
+export type ClioEnSentScoreOptions = {
+  /** Birdflock / Qiniu ans-prod URL after upload_answer_audio. */
+  qiniuUrl?: string;
+  /** Override replayUrl (defaults to qiniuUrl or Clio audioUrl). */
+  replayUrl?: string;
+  /** Override path (defaults to Clio audioUrl). */
+  path?: string;
+};
+
+/** formatData-style review scores (0–100). Only fields present on Clio result. */
+export type ClioReviewScores = {
+  score?: number;
+  smooth?: number;
+  completed?: number;
+  correctness?: number;
+  relevance?: number;
+};
+
+/**
+ * Map Clio finalResult → device answer JSON + optional review-side scores.
+ * Answer record never includes recordDetail / specific_scores (those appear
+ * in gradeResult.review after the server grades).
+ */
 export function clioToEnSentScoreFields(
   transcript: string,
   scored: Pick<ClioScorePayload, "audioUrl" | "result">,
+  options: ClioEnSentScoreOptions = {},
 ): {
   record: Record<string, unknown>;
   questionContent: string;
   input: EnSentScoreRecordInput;
+  /** Mapped from Clio result for review helpers — not embedded in answer. */
+  reviewScores?: ClioReviewScores;
 } {
-  const url = scored.audioUrl?.trim() || "";
-  const input: EnSentScoreRecordInput = {
-    text: transcript,
-    url,
-  };
-  // Preserve clio CDN path hint when url is clio-audios.
-  if (url.includes("clio-audios.unipus.cn")) {
-    input.path = url;
-  }
+  const clioUrl = scored.audioUrl?.trim() || "";
+  const qiniu = options.qiniuUrl?.trim() || "";
+  const url = qiniu || clioUrl;
+  const replayUrl = options.replayUrl?.trim() || url || undefined;
+  const path = options.path?.trim() || clioUrl || undefined;
+
+  const input: EnSentScoreRecordInput = { text: transcript, url };
+  if (path) input.path = path;
+  if (replayUrl) input.replayUrl = replayUrl;
+
+  const reviewScores = mapClioResultToReviewScores(scored.result);
   return {
     input,
     record: buildEnSentScoreRecord(input),
     questionContent: buildEnSentScoreQuestionContent(input),
+    ...(reviewScores != null ? { reviewScores } : {}),
   };
+}
+
+/**
+ * SOE/Clio formatData mapping (no invented zeros):
+ * score←overall, smooth←fluency, completed←integrity,
+ * correctness←pronunciation, relevance←relevance.
+ */
+export function mapClioResultToReviewScores(
+  result: Record<string, unknown> | null | undefined,
+): ClioReviewScores | undefined {
+  if (result == null || typeof result !== "object") return undefined;
+  const pairs: Array<[keyof ClioReviewScores, unknown]> = [
+    ["score", result.overall],
+    ["smooth", result.fluency],
+    ["completed", result.integrity],
+    ["correctness", result.pronunciation],
+    ["relevance", result.relevance],
+  ];
+  const out: ClioReviewScores = {};
+  for (const [key, raw] of pairs) {
+    const n = pickFiniteNumber(raw);
+    if (n != null) out[key] = n;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function resolveAudioBytes(
