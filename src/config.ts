@@ -1,11 +1,19 @@
 import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
- * Default ULS week-progress path until mitm capture fills the real subpath.
+ * Live week/trial progress (2026-09-21 probe): GET activation/status returns
+ * listenTrialUsed / speakTrialUsed / trialUsageLimit (App 当前进度 x/3 for trial).
  * Override with UNIPUS_ULS_WEEK_PROGRESS_PATH; base with UNIPUS_ULS_ORIGIN.
- * Capture later should only need to change this constant (or the env).
  */
-export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/week-progress";
+export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/user/activation/status";
+
+/**
+ * Recommended speak week-progress path (same activation/status body already has
+ * speakTrialUsed). Optional second fetch via UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH;
+ * no automatic second request when unset.
+ */
+export const RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH =
+  "/api/uls/user/activation/status";
 
 /** Enter-training path from uadaptive SPA preload (2026-09-21). */
 export const DEFAULT_ULS_LOAD_PAPER_PATH = "/api/uls/user/loadPaper";
@@ -29,9 +37,10 @@ export function resolveWeekProgressUrl(
 }
 
 /**
- * Speak week-progress path is **not captured** yet.
- * Only builds a URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set;
- * returns null otherwise (do not invent a default path).
+ * Speak week-progress path: optional second URL.
+ * Prefer parsing speakTrialUsed from the primary activation/status response;
+ * set UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH only if you need a dedicated fetch
+ * (recommended value: RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH).
  */
 export function resolveSpeakWeekProgressPath(
   env: NodeJS.ProcessEnv = process.env,

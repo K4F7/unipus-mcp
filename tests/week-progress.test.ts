@@ -39,7 +39,7 @@ function mockHttp(
 }
 
 describe("resolveWeekProgressUrl", () => {
-  test("defaults to documented uls placeholder path", () => {
+  test("defaults to activation/status week-progress path", () => {
     assert.equal(
       resolveWeekProgressUrl({}),
       `https://ucloud.unipus.cn${DEFAULT_ULS_WEEK_PROGRESS_PATH}`,
@@ -245,7 +245,7 @@ describe("listWeekProgress twin listen/speak fields", () => {
     assert.equal(result.speak_done, 0);
     assert.equal(result.speak_total, 3);
     assert.equal(calls.length, 2);
-    assert.ok(calls.some((u) => u.endsWith("/api/uls/week-progress")));
+    assert.ok(calls.some((u) => u.endsWith(DEFAULT_ULS_WEEK_PROGRESS_PATH)));
     assert.ok(calls.some((u) => u.endsWith("/api/uls/speak-week")));
   });
 
@@ -262,6 +262,60 @@ describe("listWeekProgress twin listen/speak fields", () => {
     });
     assert.equal(result.isError, false);
     assert.equal(http.calls.length, 1);
+    assert.equal(result.speak_done, null);
+    assert.equal(result.speak_total, null);
+  });
+
+  test("parses activation/status listenTrialUsed + speakTrialUsed + trialUsageLimit", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 1,
+        msg: "SUCCESS",
+        value: {
+          listenTrialUsed: 2,
+          speakTrialUsed: 0,
+          trialUsageLimit: 3,
+          listenTrialExceeded: false,
+          speakTrialExceeded: false,
+          status: 0,
+        },
+        success: true,
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 2);
+    assert.equal(result.listen_total, 3);
+    assert.equal(result.speak_done, 0);
+    assert.equal(result.speak_total, 3);
+    assert.equal(result.progress_done, 2);
+    assert.equal(result.progress_total, 3);
+    assert.equal(http.calls.length, 1);
+  });
+
+  test("parses listen trainingReport weeklyCompleted/weeklyTarget", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 1,
+        value: { weeklyCompleted: 1, weeklyTarget: 5, weeklyProgress: "1/5" },
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 1);
+    assert.equal(result.listen_total, 5);
     assert.equal(result.speak_done, null);
     assert.equal(result.speak_total, null);
   });

@@ -4,7 +4,7 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 用同一套 JWT 拉本周听+口进度（听力默认占位 `/api/uls/week-progress`；口语 path 未捕获，需 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`）。`start_listening_training` 已实现：调用 uadaptive 的 `POST /api/uls/user/loadPaper`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 用同一套 JWT 拉本周听+口进度（默认 `GET /api/uls/user/activation/status` → `listenTrialUsed`/`speakTrialUsed`/`trialUsageLimit`）。`start_listening_training` 已实现：调用 uadaptive 的 `POST /api/uls/user/loadPaper`。
 
 ## 工具
 
@@ -38,7 +38,7 @@
 
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
-`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`（口语未知时为 `null`），以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。听力默认 path 仍为占位 `/api/uls/week-progress`；口语 path **未抓到**，仅当设置 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` 时才二次请求。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
+`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`（口语未知时为 `null`），以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。默认 path 为 `/api/uls/user/activation/status`（一次响应含听+口）；仅当设置 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` 时才二次请求。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
 
 ## 安装
 
@@ -140,7 +140,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 
 - 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
 - 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
-- 本周进度路径（可选）：`UNIPUS_ULS_ORIGIN`（默认 `https://ucloud.unipus.cn`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认占位 `/api/uls/week-progress`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（**无默认**；未设置则不请求口语周进度 URL）。
+- 本周进度路径（可选）：`UNIPUS_ULS_ORIGIN`（默认 `https://ucloud.unipus.cn`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认 `/api/uls/user/activation/status`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（可选二次请求；推荐同为 activation/status，通常不必设）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。
 

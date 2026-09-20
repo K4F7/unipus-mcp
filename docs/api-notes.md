@@ -56,8 +56,9 @@ SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capt
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Listen path | **Placeholder** `/api/uls/week-progress` | Override `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN`. Not claimed as mitm-captured. |
-| Speak path | **Unknown** | No default URL invented. Set `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` when captured (same origin helper). |
+| Primary path | **`GET /api/uls/user/activation/status`** | Live 2026-09-21: `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` (trial App 当前进度 x/3). Hosts: uadaptive / ucloud / uai. Override `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN`. |
+| Speak dedicated path | Same body (optional env) | Recommended `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH=/api/uls/user/activation/status` only if a second fetch is desired; usually unnecessary. |
+| Listen report fields | `POST /api/uls/report/listen/trainingReport` | `weeklyCompleted` / `weeklyTarget` after a finished listen paper (parser also accepts these). |
 
 MCP `list_week_progress` fields:
 
@@ -136,7 +137,7 @@ MCP tool: `upload_answer_audio` (filePath → storage_key + cdn_url). Does **not
 
 SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-login.ts` writes `~/.config/unipus-mcp/jwt`.
 
-Week progress: `POST /api/uls/report/listen/trainingReport` returns `weeklyCompleted` / `weeklyTarget` (often 0 until a paper is finished). Speak week path still unset.
+Week progress: prefer `GET /api/uls/user/activation/status` (`*TrialUsed` / `trialUsageLimit`). Listen report still returns `weeklyCompleted` / `weeklyTarget` after a finished paper.
 
 ### submitAnswer (2026-09-21 live)
 

@@ -72,7 +72,7 @@ export async function listWeekProgress(
   const speakSuffix =
     speakDone != null && speakTotal != null
       ? `；口语 ${speakDone}/${speakTotal}`
-      : "；口语进度未知（未配置 UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH 且响应无 speak_*）";
+      : "；口语进度未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）";
   const levelSuffix = level != null ? `，级别 ${level}` : "";
 
   return okWeekProgress({
@@ -160,22 +160,42 @@ type ParsedProgress = {
   level: string | null;
 };
 
-const EXPLICIT_LISTEN_DONE = ["listen_done", "listenDone", "listeningDone"] as const;
-const EXPLICIT_LISTEN_TOTAL = ["listen_total", "listenTotal", "listeningTotal"] as const;
+const EXPLICIT_LISTEN_DONE = [
+  "listen_done",
+  "listenDone",
+  "listeningDone",
+  "listenTrialUsed",
+] as const;
+const EXPLICIT_LISTEN_TOTAL = [
+  "listen_total",
+  "listenTotal",
+  "listeningTotal",
+  "listenTrialLimit",
+] as const;
 const LEGACY_DONE = [
   "progress_done",
   "progressDone",
   "done",
   "completed",
   "finished",
+  "weeklyCompleted",
 ] as const;
-const LEGACY_TOTAL = ["progress_total", "progressTotal", "total", "target", "goal"] as const;
+const LEGACY_TOTAL = [
+  "progress_total",
+  "progressTotal",
+  "total",
+  "target",
+  "goal",
+  "weeklyTarget",
+  "trialUsageLimit",
+] as const;
 const SPEAK_DONE_KEYS = [
   "speak_done",
   "speakDone",
   "oralDone",
   "oral_done",
   "speakingDone",
+  "speakTrialUsed",
 ] as const;
 const SPEAK_TOTAL_KEYS = [
   "speak_total",
@@ -183,16 +203,21 @@ const SPEAK_TOTAL_KEYS = [
   "oralTotal",
   "oral_total",
   "speakingTotal",
+  "speakTrialLimit",
 ] as const;
+/** Shared trial cap from activation/status (applies to both listen + speak). */
+const TRIAL_LIMIT_KEYS = ["trialUsageLimit"] as const;
 const LEVEL_KEYS = ["level", "levelName", "grade", "band"] as const;
 const RATIO_KEYS = ["progress", "weekProgress", "ratio"] as const;
 const SPEAK_RATIO_KEYS = ["speakProgress", "oralProgress", "speak_ratio"] as const;
-const NEST_KEYS = ["data", "result", "payload", "listen", "speak", "oral"] as const;
+const NEST_KEYS = ["data", "result", "payload", "value", "listen", "speak", "oral"] as const;
 
 /**
- * Map stable MCP fields from known aliases until the real uls schema is captured.
- * Legacy `progress_*` / generic done+total map to listen_*; speak_* only from
- * speak-specific keys so a single-progress body does not invent speak counts.
+ * Map stable MCP fields from known aliases.
+ * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit
+ * - listen trainingReport: weeklyCompleted / weeklyTarget
+ * - Legacy progress_* / generic done+total map to listen_*; speak_* only from
+ *   speak-specific keys so a single-progress body does not invent speak counts.
  */
 export function parseWeekProgressBody(body: string): ParsedProgress | null {
   const record = parseJsonRecord(body);
@@ -225,11 +250,24 @@ export function parseWeekProgressBody(body: string): ParsedProgress | null {
       speakTotal ??= speakRatio.total;
     }
 
+    const trialLimit = firstNumber(candidate, TRIAL_LIMIT_KEYS);
+    if (trialLimit != null) {
+      // activation/status: one cap for both trial flows
+      if (speakDone != null) {
+        speakTotal ??= trialLimit;
+      }
+      // also available as listen total when listenTrialUsed present
+    }
+
     const explicitDone = firstNumber(candidate, EXPLICIT_LISTEN_DONE);
-    const explicitTotal = firstNumber(candidate, EXPLICIT_LISTEN_TOTAL);
+    const explicitTotal =
+      firstNumber(candidate, EXPLICIT_LISTEN_TOTAL) ?? trialLimit;
     if (explicitDone != null && explicitTotal != null) {
       listenDone ??= explicitDone;
       listenTotal ??= explicitTotal;
+      if (speakDone != null) {
+        speakTotal ??= trialLimit ?? speakTotal;
+      }
       continue;
     }
 
