@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import type { UnipusHttp } from "../src/http.js";
 import {
   DEFAULT_ULS_WEEK_PROGRESS_PATH,
+  resolveSpeakWeekProgressUrl,
   resolveWeekProgressUrl,
 } from "../src/config.js";
 import { listWeekProgress } from "../src/week-progress.js";
@@ -160,5 +161,124 @@ describe("listWeekProgress", () => {
     assert.equal(result.isError, true);
     assert.equal(result.status, "error");
     assert.equal(result.code, "PARSE_ERROR");
+  });
+});
+
+describe("listWeekProgress twin listen/speak fields", () => {
+  test("maps listen_* and aliases progress_* from twin body fields", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        listen_done: 2,
+        listen_total: 5,
+        speak_done: 1,
+        speak_total: 3,
+        level: "S15",
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 2);
+    assert.equal(result.listen_total, 5);
+    assert.equal(result.speak_done, 1);
+    assert.equal(result.speak_total, 3);
+    // backward-compat: progress_* aliases listen
+    assert.equal(result.progress_done, 2);
+    assert.equal(result.progress_total, 5);
+    assert.equal(result.level, "S15");
+  });
+
+  test("legacy progress-only body still fills listen_* and leaves speak null", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        progress_done: 0,
+        progress_total: 5,
+        level: "S15",
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 0);
+    assert.equal(result.listen_total, 5);
+    assert.equal(result.progress_done, 0);
+    assert.equal(result.progress_total, 5);
+    assert.equal(result.speak_done, null);
+    assert.equal(result.speak_total, null);
+  });
+
+  test("optional speak path env triggers second GET without inventing a default URL", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const calls: string[] = [];
+    const http = mockHttp(async (input) => {
+      calls.push(input.url);
+      if (input.url.includes("speak-week")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ speak_done: 0, speak_total: 3 }),
+        };
+      }
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ progress_done: 1, progress_total: 5, level: "S12" }),
+      };
+    });
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {
+        UNIPUS_ULS_ORIGIN: "https://ucloud.unipus.cn",
+        UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH: "/api/uls/speak-week",
+      },
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 1);
+    assert.equal(result.listen_total, 5);
+    assert.equal(result.speak_done, 0);
+    assert.equal(result.speak_total, 3);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.some((u) => u.endsWith("/api/uls/week-progress")));
+    assert.ok(calls.some((u) => u.endsWith("/api/uls/speak-week")));
+  });
+
+  test("without speak path env, only one HTTP call", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({ done: 2, total: 5, levelName: "S12" }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(http.calls.length, 1);
+    assert.equal(result.speak_done, null);
+    assert.equal(result.speak_total, null);
+  });
+});
+
+describe("resolveSpeakWeekProgressUrl", () => {
+  test("returns null when speak path env unset (no invented default)", () => {
+    assert.equal(resolveSpeakWeekProgressUrl({}), null);
+  });
+
+  test("builds URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set", () => {
+    assert.equal(
+      resolveSpeakWeekProgressUrl({
+        UNIPUS_ULS_ORIGIN: "https://uai.unipus.cn/",
+        UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH: "api/uls/oral/week",
+      }),
+      "https://uai.unipus.cn/api/uls/oral/week",
+    );
   });
 });

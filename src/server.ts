@@ -18,10 +18,12 @@ const AUTH_STATUS_DESCRIPTION = [
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
-  "List this week's U听力 listening progress (e.g. x/5) and level (e.g. S15).",
+  "List this week's U听力 + U口语 progress (listen x/5, speak x/3) and level.",
+  "Returns listen_done/listen_total, speak_done/speak_total; progress_* aliases listen.",
   "Product: mobile App U听力 / U听说 — not webpage course 261英语视听说.",
   "Uses JWT from env/CLI; does not accept credentials.",
-  "Path defaults to /api/uls/week-progress (override UNIPUS_ULS_WEEK_PROGRESS_PATH / UNIPUS_ULS_ORIGIN).",
+  "Listen path defaults to placeholder /api/uls/week-progress (UNIPUS_ULS_WEEK_PROGRESS_PATH / UNIPUS_ULS_ORIGIN).",
+  "Speak path unknown until UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set (no invented default).",
 ].join(" ");
 
 const START_LISTENING_TRAINING_DESCRIPTION = [

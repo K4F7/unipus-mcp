@@ -24,9 +24,14 @@ export type AuthStatusResult = ToolResult & {
 };
 
 export type WeekProgressResult = ToolResult & {
+  /** @deprecated alias of listen_*; kept for backward compatibility */
   progress_done?: number;
   progress_total?: number;
   level?: string | null;
+  listen_done?: number | null;
+  listen_total?: number | null;
+  speak_done?: number | null;
+  speak_total?: number | null;
 };
 
 export type StartListeningResult = ToolResult & {
@@ -93,6 +98,10 @@ export function okWeekProgress(input: {
   progress_done: number;
   progress_total: number;
   level: string | null;
+  listen_done: number;
+  listen_total: number;
+  speak_done: number | null;
+  speak_total: number | null;
 }): WeekProgressResult {
   return {
     isError: false,
@@ -102,6 +111,10 @@ export function okWeekProgress(input: {
     progress_done: input.progress_done,
     progress_total: input.progress_total,
     level: input.level,
+    listen_done: input.listen_done,
+    listen_total: input.listen_total,
+    speak_done: input.speak_done,
+    speak_total: input.speak_total,
   };
 }
 

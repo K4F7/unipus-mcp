@@ -36,6 +36,31 @@ export function resolveAdaptiveOrigin(
   return fromEnv != null ? fromEnv.replace(/\/+$/, "") : UADAPTIVE_ORIGIN;
 }
 
+/**
+ * Speak week-progress path is **not captured** yet.
+ * Only builds a URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set;
+ * returns null otherwise (do not invent a default path).
+ */
+export function resolveSpeakWeekProgressPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const path = envTrim(env.UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH);
+  if (path == null) {
+    return null;
+  }
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveSpeakWeekProgressUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const path = resolveSpeakWeekProgressPath(env);
+  if (path == null) {
+    return null;
+  }
+  return `${resolveUlsOrigin(env)}${path}`;
+}
+
 export function resolveLoadPaperPath(
   env: NodeJS.ProcessEnv = process.env,
 ): string {

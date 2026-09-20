@@ -214,6 +214,10 @@ describe("unipus MCP server", () => {
       assert.equal(payload.code, "OK");
       assert.equal(payload.progress_done, 1);
       assert.equal(payload.progress_total, 5);
+      assert.equal(payload.listen_done, 1);
+      assert.equal(payload.listen_total, 5);
+      assert.equal(payload.speak_done, null);
+      assert.equal(payload.speak_total, null);
       assert.equal(payload.level, "S15");
       assert.deepEqual(calls, [resolveWeekProgressUrl({})]);
       assert.doesNotMatch(JSON.stringify(payload), /eyJhbGci/);
@@ -235,6 +239,10 @@ function structuredPayload(result: unknown): {
   progress_done?: number;
   progress_total?: number;
   level?: string | null;
+  listen_done?: number | null;
+  listen_total?: number | null;
+  speak_done?: number | null;
+  speak_total?: number | null;
   task_id?: string;
   paper_token?: string | null;
 } {
@@ -258,6 +266,10 @@ function structuredPayload(result: unknown): {
       progress_done?: number;
       progress_total?: number;
       level?: string | null;
+      listen_done?: number | null;
+      listen_total?: number | null;
+      speak_done?: number | null;
+      speak_total?: number | null;
       task_id?: string;
       paper_token?: string | null;
     };
@@ -280,6 +292,10 @@ function structuredPayload(result: unknown): {
     progress_done?: number;
     progress_total?: number;
     level?: string | null;
+    listen_done?: number | null;
+    listen_total?: number | null;
+    speak_done?: number | null;
+    speak_total?: number | null;
     task_id?: string;
     paper_token?: string | null;
   };

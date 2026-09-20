@@ -54,7 +54,16 @@ SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capt
 
 ## Week progress
 
-Still placeholder `/api/uls/week-progress` until captured. MCP fields: `progress_done`, `progress_total`, `level`.
+| Item | Status | Notes |
+|------|--------|-------|
+| Listen path | **Placeholder** `/api/uls/week-progress` | Override `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN`. Not claimed as mitm-captured. |
+| Speak path | **Unknown** | No default URL invented. Set `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` when captured (same origin helper). |
+
+MCP `list_week_progress` fields:
+
+- `listen_done` / `listen_total` — listening week progress (product target **5**/week)
+- `speak_done` / `speak_total` — speaking week progress (product target **3**/week); `null` until twin fields appear in the listen response **or** speak path env is set
+- `progress_done` / `progress_total` / `level` — **backward-compatible aliases** of listen (same numbers as `listen_*`)
 
 ## Ops: PCAPdroid
 
