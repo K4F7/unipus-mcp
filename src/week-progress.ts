@@ -70,22 +70,23 @@ export async function listWeekProgress(
   }
 
   const { listen_done: listenDone, listen_total: listenTotal, level } = listenParsed;
-  // activation/status = 试用次数; trainingReport weekly* = 本周报告; never App 卡片 0/3.
+  // activation/status *TrialUsed = 本周试用进度（真机 tvWeekProgress 已对齐试用号）。
+  // 任务卡「0%」= 本篇完成度；付费周配额 5听+3口 path 仍未验证。
   const trialLike =
     /listenTrialUsed|speakTrialUsed|trialUsageLimit/.test(listenFetch.body);
-  const listenLabel = trialLike ? "试用听力" : "听力";
-  const speakLabel = trialLike ? "试用口语" : "口语";
+  const listenLabel = trialLike ? "本周试用听力" : "听力";
+  const speakLabel = trialLike ? "本周试用口语" : "口语";
   const speakSuffix =
     speakDone != null && speakTotal != null
       ? `；${speakLabel} ${speakDone}/${speakTotal}`
       : (
           trialLike
-            ? "；口语试用未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）"
+            ? "；本周试用口语未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）"
             : "；口语进度未知（响应无 speak_* 且未配置 SPEAK 路径）"
         );
   const levelSuffix = level != null ? `，级别 ${level}` : "";
   const trialNote = trialLike
-    ? "（试用次数，非 App 卡片模块进度 / 非付费周配额）"
+    ? "（试用账号已对齐 tvWeekProgress；付费周配额 path 未验证）"
     : "";
 
   return okWeekProgress({
@@ -227,8 +228,8 @@ const NEST_KEYS = ["data", "result", "payload", "value", "listen", "speak", "ora
 
 /**
  * Map stable MCP fields from known aliases.
- * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit (**试用次数**)
- * - listen trainingReport: weeklyCompleted / weeklyTarget (本周报告，非试用)
+ * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit (**本周试用进度**；试用号已对齐 App tvWeekProgress)
+ * - listen trainingReport: weeklyCompleted / weeklyTarget (报告字段；付费周配额 path 未验证)
  * - Legacy progress_* / generic done+total map to listen_*; speak_* only from
  *   speak-specific keys so a single-progress body does not invent speak counts.
  */

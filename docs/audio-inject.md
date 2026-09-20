@@ -18,7 +18,7 @@
 
 ### Not yet
 - 虚拟麦 / Frida `AudioRecord.read` 喂 PCM（需 root 或 gadget）。
-- 设备侧剩余：付费周配额 path、口语 part/get 模块进度（卡片 0/3）。
+- 设备侧剩余：付费周配额 path（5听+3口未验证）；任务卡完成度%（与试用周进度分离）。
 
 ### Done (headless MCP)
 - `query-upload-url` → Qiniu upload → `submit_answer` / `speak_and_submit`（见下方 Status 2026-09-21）。
@@ -41,4 +41,4 @@
 - SPA static: `POST /api/uls/user/answer/query-upload-url` → Qiniu form upload (`token`,`key`,`file`) → `submitAnswer`.
 - JWT via SSO CLI (`scripts/sso-login.ts`) + MCP `upload_answer_audio` (query-upload-url → Qiniu) **implemented 2026-09-21**.
 - Done: MCP `speak_and_submit` (Edge TTS → upload → submit_answer).
-- Progress probe: GET /api/uls/user/activation/status (`*TrialUsed`/`trialUsageLimit` = **试用**, not App card 0/3).
+- Progress probe: GET /api/uls/user/activation/status (`*TrialUsed`/`trialUsageLimit` = **本周试用进度**；试用已对齐 tvWeekProgress；付费周 path 未验证).

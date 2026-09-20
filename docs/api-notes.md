@@ -56,16 +56,16 @@ SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capt
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Primary path | **`GET /api/uls/user/activation/status`** | Live 2026-09-21: `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` = **试用次数** (e.g. 2/3). **Not** App card「当前进度 0/3」(本篇三模块 part/get). **Not** paid week quota. Default host **uadaptive** (raw JWT). Override path `UNIPUS_ULS_WEEK_PROGRESS_PATH`; host `UNIPUS_ULS_ORIGIN` or `UNIPUS_ULS_ADAPTIVE_ORIGIN`. |
+| Primary path | **`GET /api/uls/user/activation/status`** | Live 2026-09-21: `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` = **本周试用进度** (e.g. speak 2/3). Trial UI `tvWeekProgress` **aligned**. Task-card **0%** = chapter completion (separate). Paid week quota path **unverified**. Default host **uadaptive** (raw JWT). Override path `UNIPUS_ULS_WEEK_PROGRESS_PATH`; host `UNIPUS_ULS_ORIGIN` or `UNIPUS_ULS_ADAPTIVE_ORIGIN`. |
 | Speak dedicated path | Same body (optional env) | Recommended `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH=/api/uls/user/activation/status` only if a second fetch is desired; usually unnecessary. |
-| Listen report fields | `POST /api/uls/report/listen/trainingReport` | `weeklyCompleted` / `weeklyTarget` after a finished listen paper (parser also accepts these; these are week-report counts, not trial). |
+| Listen report fields | `POST /api/uls/report/listen/trainingReport` | `weeklyCompleted` / `weeklyTarget` after a finished listen paper (parser also accepts these). |
 
-MCP `list_week_progress` fields (default path = **试用**):
+MCP `list_week_progress` fields (default = **本周试用进度**；试用账号已对齐):
 
-- `listen_done` / `listen_total` — from default activation: **listen trial used / trialUsageLimit**; if you point path at trainingReport, weeklyCompleted/weeklyTarget instead
-- `speak_done` / `speak_total` — from default activation: **speak trial used / trialUsageLimit**; `null` if absent and no speak path env
+- `listen_done` / `listen_total` — activation `listenTrialUsed` / `trialUsageLimit` (or trainingReport weekly* if path overridden)
+- `speak_done` / `speak_total` — activation `speakTrialUsed` / `trialUsageLimit`; `null` if absent and no speak path env
 - `progress_done` / `progress_total` / `level` — **backward-compatible aliases** of listen (same numbers as `listen_*`)
-- Do **not** confuse with App 口语卡片「当前进度 0/3」(范例/AI对话/自由表达) or paid week quotas (听力 **5** / 口语 **3**, path still unknown)
+- **试用账号已对齐** App `tvWeekProgress`；**付费周配额**（听力 5 / 口语 3）**path 未验证** — 勿假装已抓到付费周接口
 
 ## Ops: PCAPdroid
 
@@ -79,11 +79,11 @@ MCP `list_week_progress` fields (default path = **试用**):
 | Module | Weekly target | UI signal (2026-09-21 phone) |
 |--------|---------------|------------------------------|
 | 听力 U听力 | **5** / week | Home / 听力 tab (capture remaining into `list_week_progress`) |
-| 口语 U口语 | **3** / week | Paid weekly quota path still unknown (device capture ongoing). |
+| 口语 U口语 | **3** / week | Paid weekly quota path **unverified** (device capture ongoing). |
 
-Note: 口语 tab **当前进度 `0/3`** on the task card is **本篇三模块** (范例/AI对话/自由表达 via part/get), **not** the activation/status trial counters and **not** yet wired as paid week quota.
+Note: 口语首页 `tvWeekProgress` (e.g. **2/3**) **matches** activation `speakTrialUsed`/`trialUsageLimit` on trial accounts. Task-card **0%** is chapter completion (old UI said 0/3).
 
-`list_week_progress` currently surfaces activation **试用** (or trainingReport weekly*) via `listen_*` / `speak_*`; paid week-quota path TBD.
+`list_week_progress` → activation/status = **本周试用进度**（试用已对齐）；付费周配额 path 未验证.
 
 ## 口语 SPA routes (static)
 
@@ -117,14 +117,15 @@ MVP acceptance: one 跟读/口头填空/口语题 auto-filled by generated audio
 | **AI口语对话** | 锁 | 需完成范例后解锁；对应 SPA `/speak/training/ai-dialog` |
 | **自由表达** | 锁 | 对应 `/speak/training/free` 等 |
 
-口语任务卡 UI：**当前进度 `0/3`** = 本篇三模块（范例/AI对话/自由表达），**不是** activation 试用次数，也**不是**（尚未抓到的）付费周配额 3。
-`trialRemainDesc`（例「2天」）对齐 UI「体验还剩 2天」。
+口语首页 `tvWeekProgress`（例 **2/3**）= activation `speakTrialUsed`/`trialUsageLimit`（**本周试用进度**，试用号已对齐）。
+任务卡 **0%** = 本篇完成度（旧 UI 曾写 0/3）。`trialRemainDesc`（例「2天」）对齐「体验还剩 2天」。
+付费周配额 3：**path 未验证**。
 
 关键 API（静态）：
 - `GET/POST` 族 `/api/uls/oral/train?ansVersion&questionId&taskId&openId…`
 - `POST /api/uls/user/answer/query-upload-url`（拿上传凭证，注音/无头上传答案用）
 
-付费周额度目标：听力 **5**、口语 **3**（path 未知）。MCP `list_week_progress` 默认露出的是 activation **试用**听/口，勿当成周配额或卡片模块进度。
+付费周额度目标：听力 **5**、口语 **3**（**path 未验证**）。MCP `list_week_progress` 默认 = activation **本周试用进度**（试用账号已对齐）；勿当成已验证的付费周接口。
 
 
 ## Silent audio upload (2026-09-21 live)
@@ -141,7 +142,7 @@ MCP tool: `upload_answer_audio` (filePath → storage_key + cdn_url). Does **not
 
 SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-login.ts` writes `~/.config/unipus-mcp/jwt`.
 
-Progress probe: prefer `GET /api/uls/user/activation/status` on uadaptive with **raw JWT** (`*TrialUsed` / `trialUsageLimit` = 试用). Listen report still returns `weeklyCompleted` / `weeklyTarget` after a finished paper (week-report, not trial).
+Progress probe: prefer `GET /api/uls/user/activation/status` on uadaptive with **raw JWT** (`*TrialUsed` / `trialUsageLimit` = **本周试用进度**；试用号已对齐 tvWeekProgress). Paid week-quota path unverified. Listen report still returns `weeklyCompleted` / `weeklyTarget` after a finished paper.
 
 ### submitAnswer (2026-09-21 live)
 

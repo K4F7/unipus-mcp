@@ -2,9 +2,9 @@ import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
  * Default progress probe: GET activation/status on uadaptive.
- * Fields listenTrialUsed / speakTrialUsed / trialUsageLimit are **试用次数**
- * (e.g. 2/3 trials) — NOT the App card「当前进度 0/3」(那是本篇三模块 part/get),
- * and NOT the paid weekly quota (听力5 / 口语3; path still unknown).
+ * Fields listenTrialUsed / speakTrialUsed / trialUsageLimit = **本周试用进度**
+ * (trial UI tvWeekProgress aligned, e.g. speak 2/3). Task-card percent (0%) is
+ * chapter completion. Paid weekly quota (听力5 / 口语3) path still unverified.
  * Path override: UNIPUS_ULS_WEEK_PROGRESS_PATH.
  * Host: UNIPUS_ULS_ORIGIN if set, else UNIPUS_ULS_ADAPTIVE_ORIGIN / uadaptive.
  */

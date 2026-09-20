@@ -307,8 +307,8 @@ describe("listWeekProgress twin listen/speak fields", () => {
     assert.equal(result.speak_total, 3);
     assert.equal(result.progress_done, 2);
     assert.equal(result.progress_total, 3);
-    assert.match(result.message, /试用/);
-    assert.match(result.message, /非 App 卡片|非付费周配额/);
+    assert.match(result.message, /本周试用/);
+    assert.match(result.message, /付费周配额 path 未验证|试用账号已对齐/);
     assert.equal(http.calls.length, 1);
     assert.equal(http.calls[0]?.headers.authorization, jwt);
     assert.doesNotMatch(http.calls[0]?.headers.authorization ?? "", /^Bearer /i);
