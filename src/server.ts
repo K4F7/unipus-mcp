@@ -274,8 +274,8 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     "Grade one answer via POST /api/uls/rate/gradeQuestion (raw JWT, no Bearer).",
     "Args: taskId, questionInstanceId (string snowflake), questionContent (answer JSON),",
     "optional ansVersion / isObjective / openId.",
-    "CDN-url-only oral record often returns score=0; prefer EN_SENT_SCORE shape",
-    "(type/text/url/isDone) from buildEnSentScoreQuestionContent or score_speech.",
+    "CDN-url-only oral record often returns score=0; prefer children[0].record",
+    "EN_SENT_SCORE (type/text/url/path/replayUrl/list + child isDone) from score_speech.",
     "Pre-submit scoring: use score_speech (Clio WSS en.sent.score); do not invent scores.",
     "After submit, results can be read via /api/uls/user/loadGradedQuestions (no MCP tool yet).",
     "Does not accept credentials (JWT from env/CLI only).",
@@ -329,7 +329,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     "Args: transcript + wavPath (16 kHz mono WAV); optional userId.",
     "Credentials: UNIPUS_CLIO_APP_ID / UNIPUS_CLIO_APP_SECRET (default = SPA phoneme pair);",
     "WSS: UNIPUS_CLIO_WSS_URL (default wss://speech.unipus.cn/speech/proxy/wss).",
-    "Returns overall/total, audio_url (clio-audios CDN), and en_sent_score_content for grade/submit.",
+    "Returns overall/total, audio_url (clio-audios), children-shaped en_sent_score_content for grade/submit.",
     "Does not fake scores; silence may yield total=0. Keep grade_question separate.",
   ].join(" ");
 

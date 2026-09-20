@@ -222,20 +222,74 @@ describe("scoreEnSent (mocked WSS)", () => {
     assert.equal(result.audio_url, "https://clio-audios.unipus.cn/x.wav");
     assert.ok(result.en_sent_score_content);
     const parsed = JSON.parse(String(result.en_sent_score_content));
-    assert.equal(parsed.record.type, "EN_SENT_SCORE");
-    assert.equal(parsed.record.text, "hello world");
-    assert.equal(parsed.record.isDone, true);
-    assert.equal(parsed.record.url, "https://clio-audios.unipus.cn/x.wav");
+    assert.equal(parsed.record, undefined);
+    assert.equal(parsed.children.length, 1);
+    assert.equal(parsed.children[0].isDone, true);
+    assert.equal(parsed.children[0].record.type, "EN_SENT_SCORE");
+    assert.equal(parsed.children[0].record.text, "hello world");
+    assert.equal(parsed.children[0].record.url, "https://clio-audios.unipus.cn/x.wav");
+    assert.equal(parsed.children[0].record.path, "https://clio-audios.unipus.cn/x.wav");
+    assert.deepEqual(parsed.children[0].record.list, []);
+    assert.equal("recordDetail" in parsed.children[0].record, false);
   });
 });
 
 describe("clioToEnSentScoreFields", () => {
-  test("builds record for grade/submit", () => {
+  test("defaults url/replayUrl/path to Clio audioUrl", () => {
     const mapped = clioToEnSentScoreFields("hello", {
       audioUrl: "https://clio-audios.unipus.cn/a.wav",
-      result: { total: 10 },
+      result: { overall: 76, fluency: 80, integrity: 70, pronunciation: 75, relevance: 90 },
     });
     assert.equal(mapped.record.type, "EN_SENT_SCORE");
-    assert.equal(mapped.input.path, "https://clio-audios.unipus.cn/a.wav");
+    assert.equal(mapped.record.url, "https://clio-audios.unipus.cn/a.wav");
+    assert.equal(mapped.record.replayUrl, "https://clio-audios.unipus.cn/a.wav");
+    assert.equal(mapped.record.path, "https://clio-audios.unipus.cn/a.wav");
+    assert.deepEqual(mapped.record.list, []);
+    assert.equal("recordDetail" in mapped.record, false);
+    assert.equal("specific_scores" in mapped.record, false);
+    assert.equal("isDone" in mapped.record, false);
+
+    const content = JSON.parse(mapped.questionContent);
+    assert.equal(content.children[0].isDone, true);
+    assert.deepEqual(content.children[0].record, mapped.record);
+
+    // Review-side mapping only — not in answer JSON
+    assert.deepEqual(mapped.reviewScores, {
+      score: 76,
+      smooth: 80,
+      completed: 70,
+      correctness: 75,
+      relevance: 90,
+    });
+  });
+
+  test("qiniuUrl sets url/replayUrl; path stays Clio", () => {
+    const mapped = clioToEnSentScoreFields(
+      "Hey, future me!",
+      {
+        audioUrl: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+        result: { overall: 76 },
+      },
+      { qiniuUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3" },
+    );
+    assert.deepEqual(mapped.record, {
+      type: "EN_SENT_SCORE",
+      text: "Hey, future me!",
+      url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      replayUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      path: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+      list: [],
+    });
+    assert.equal(mapped.reviewScores?.score, 76);
+    assert.equal(mapped.reviewScores?.smooth, undefined);
+  });
+
+  test("does not invent missing Clio score fields", () => {
+    const mapped = clioToEnSentScoreFields("x", {
+      audioUrl: "https://clio-audios.unipus.cn/z.wav",
+      result: { total: 10 },
+    });
+    // overall absent → no invented score; total alone is not mapped as overall
+    assert.equal(mapped.reviewScores, undefined);
   });
 });

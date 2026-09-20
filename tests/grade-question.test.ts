@@ -61,30 +61,54 @@ describe("resolveGradeQuestionUrl", () => {
 });
 
 describe("buildEnSentScore*", () => {
-  test("builds rich EN_SENT_SCORE record", () => {
+  test("builds device-shaped EN_SENT_SCORE under children[0]", () => {
     const record = buildEnSentScoreRecord({
-      text: "hello world",
-      url: "https://birdflock.unipus.cn/a.wav",
-      path: "/clio/proxy/x",
-      replayUrl: "https://birdflock.unipus.cn/a.wav",
+      text: "Hey, future me!",
+      url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      path: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+      replayUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
     });
     assert.deepEqual(record, {
       type: "EN_SENT_SCORE",
-      text: "hello world",
-      url: "https://birdflock.unipus.cn/a.wav",
-      path: "/clio/proxy/x",
-      replayUrl: "https://birdflock.unipus.cn/a.wav",
-      isDone: true,
+      text: "Hey, future me!",
+      url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      path: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+      replayUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      list: [],
     });
+    assert.equal("isDone" in record, false);
+    assert.equal("recordDetail" in record, false);
+    assert.equal("specific_scores" in record, false);
+
     const content = JSON.parse(
       buildEnSentScoreQuestionContent({
-        text: "hello world",
-        url: "https://birdflock.unipus.cn/a.wav",
+        text: "Hey, future me!",
+        url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+        path: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+        replayUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
       }),
     );
-    assert.equal(content.record.type, "EN_SENT_SCORE");
-    assert.equal(content.record.isDone, true);
-    assert.equal(content.record.path, undefined);
+    assert.deepEqual(content.value, []);
+    assert.equal(Array.isArray(content.children), true);
+    assert.equal(content.children.length, 1);
+    assert.equal(content.record, undefined);
+    const child = content.children[0];
+    assert.equal(child.isDone, true);
+    assert.deepEqual(child.value, []);
+    assert.deepEqual(child.record, record);
+  });
+
+  test("omits empty path/replayUrl but always includes list", () => {
+    const record = buildEnSentScoreRecord({
+      text: "hi",
+      url: "https://birdflock.unipus.cn/a.mp3",
+    });
+    assert.deepEqual(record, {
+      type: "EN_SENT_SCORE",
+      text: "hi",
+      url: "https://birdflock.unipus.cn/a.mp3",
+      list: [],
+    });
   });
 });
 

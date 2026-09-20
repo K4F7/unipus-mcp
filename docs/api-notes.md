@@ -181,9 +181,18 @@ Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
 ```
 
 - **`questionInstanceId` must be a string** end-to-end. Never `JSON.parse` bare snowflake numbers (e.g. `1984905701219868673` → corrupted). MCP uses `parseJsonPreservingLargeInts` / `asExactIdString`.
-- **CDN-url-only** short answer (`children[].record.url` or `{record:{url}}`) → grade may succeed but **`score=0`** / empty userAnswer.
-- Real ~76-score body uses rich `record`: `{ "type":"EN_SENT_SCORE", "text", "url", "replayUrl"?, "path"?, "isDone":true }` (`path` may be clio speech-proxy). Helper: `buildEnSentScoreQuestionContent`.
-- Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists** already-computed scores. Pre-submit: use MCP `score_speech` (Clio `en.sent.score`) then `buildEnSentScoreQuestionContent` / `grade_question`. CDN-url-only still often score=0.
+- **CDN-url-only** short answer (`children[].record.url` or top-level `{record:{url}}`) → grade may succeed but **`score=0`** / empty userAnswer.
+- Device-persisted ~76-score **answer** shape (2026-09-21):
+  ```json
+  {"children":[{"record":{"type":"EN_SENT_SCORE","text":"…","path":"https://clio-audios…/speech-proxy/…","url":"https://birdflock…/ans-prod/…","replayUrl":"https://birdflock…/ans-prod/…","list":[]},"value":[],"isDone":true}],"value":[]}
+  ```
+  - Record lives under **`children[0].record`** (not top-level `record`).
+  - **`isDone` is on the child**, not inside `record`.
+  - Record fields only: `type` / `text` / `url` / `path` / `replayUrl` / `list` — **no** `recordDetail` / `specific_scores` in questionContent (those appear in **gradeResult.review** after grade).
+  - Production URLs: `url`/`replayUrl` = birdflock ans-prod (Qiniu upload); `path` = clio-audios speech-proxy.
+- Helper: `buildEnSentScoreQuestionContent` / `clioToEnSentScoreFields({ qiniuUrl })`. Optional `reviewScores` maps Clio `overall→score`, `fluency→smooth`, etc. for callers — **not** embedded in answer JSON.
+- Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists**. Pre-submit: `score_speech` → optional Qiniu upload → `grade_question` with children-shaped content.
+- **Retest caveat:** grading an **already-submitted** task may empty `userAnswer` / return score=0. Need an **unsubmitted** task + remaining speak quota to live-verify non-zero grade.
 - After submit: **`/api/uls/user/loadGradedQuestions`** can read results (URL helper in config; **no MCP tool yet**).
 - Paid week quota 5/3 still **unverified**.
 
@@ -219,7 +228,7 @@ SPA phoneme helper (`mobile/core.js`) hardcodes:
 - `secret`: `8da79f23cff822c84a64d231fa5f7e28c5319896` (public in SPA bundle)
 
 Env overrides: `UNIPUS_CLIO_APP_ID` / `UNIPUS_CLIO_APP_SECRET` / `UNIPUS_CLIO_WSS_URL`.
-MCP tool: `score_speech` (transcript + wavPath). Helper maps result → `buildEnSentScoreQuestionContent`.
+MCP tool: `score_speech` (transcript + wavPath). Helper `clioToEnSentScoreFields` maps → children-shaped `buildEnSentScoreQuestionContent` (pass `qiniuUrl` after upload).
 
 ### SOE initialize/v2 (optional rotation; document only)
 
