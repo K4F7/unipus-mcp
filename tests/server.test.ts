@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
+import { resolveWeekProgressUrl } from "../src/config.js";
 import { createUnipusMcpServer } from "../src/server.js";
 import type { UnipusHttp } from "../src/http.js";
 
@@ -22,7 +23,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("unipus MCP server", () => {
-  test("lists tools; stubs and missing JWT keep stable JSON errors", async () => {
+  test("lists tools; missing JWT and stubs keep stable JSON errors", async () => {
     const server = createUnipusMcpServer({
       credentials: { getJwt: async () => null },
       http: {
@@ -64,9 +65,9 @@ describe("unipus MCP server", () => {
       const progress = await client.callTool({ name: "list_week_progress", arguments: {} });
       assert.equal("isError" in progress && progress.isError, true);
       const progressPayload = structuredPayload(progress);
-      assert.equal(progressPayload.status, "not_implemented");
-      assert.equal(progressPayload.code, "NOT_IMPLEMENTED");
-      assert.match(String(progressPayload.message), /未实现/);
+      assert.equal(progressPayload.status, "auth_required");
+      assert.equal(progressPayload.code, "AUTH_REQUIRED");
+      assert.match(String(progressPayload.message), /需登录|登录|JWT/);
 
       const train = await client.callTool({
         name: "start_listening_training",
@@ -114,6 +115,47 @@ describe("unipus MCP server", () => {
       await server.close();
     }
   });
+
+  test("list_week_progress returns structured fields when JWT ok", async () => {
+    const jwt = makeJwt({ openId: "oid-ok", exp: 4_000_000_000 });
+    const calls: string[] = [];
+    const http: UnipusHttp = {
+      async request(input) {
+        calls.push(input.url);
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            progress_done: 1,
+            progress_total: 5,
+            level: "S15",
+          }),
+        };
+      },
+    };
+    const server = createUnipusMcpServer({
+      credentials: { getJwt: async () => jwt },
+      http,
+    });
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+      const progress = await client.callTool({ name: "list_week_progress", arguments: {} });
+      assert.equal("isError" in progress && progress.isError, false);
+      const payload = structuredPayload(progress);
+      assert.equal(payload.status, "ok");
+      assert.equal(payload.code, "OK");
+      assert.equal(payload.progress_done, 1);
+      assert.equal(payload.progress_total, 5);
+      assert.equal(payload.level, "S15");
+      assert.deepEqual(calls, [resolveWeekProgressUrl({})]);
+      assert.doesNotMatch(JSON.stringify(payload), /eyJhbGci/);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 });
 
 function structuredPayload(result: unknown): {
@@ -124,6 +166,9 @@ function structuredPayload(result: unknown): {
   authenticated?: boolean;
   userId?: string | null;
   expired?: boolean | null;
+  progress_done?: number;
+  progress_total?: number;
+  level?: string | null;
 } {
   assert.ok(result !== null && typeof result === "object");
   const record = result as Record<string, unknown>;
@@ -142,6 +187,9 @@ function structuredPayload(result: unknown): {
       authenticated?: boolean;
       userId?: string | null;
       expired?: boolean | null;
+      progress_done?: number;
+      progress_total?: number;
+      level?: string | null;
     };
   }
 
@@ -159,5 +207,8 @@ function structuredPayload(result: unknown): {
     authenticated?: boolean;
     userId?: string | null;
     expired?: boolean | null;
+    progress_done?: number;
+    progress_total?: number;
+    level?: string | null;
   };
 }

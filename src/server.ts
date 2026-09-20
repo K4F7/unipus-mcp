@@ -4,6 +4,7 @@ import { probeAuthStatus, type AuthPorts } from "./auth.js";
 import { createEnvCredentialStore } from "./credentials.js";
 import { createFetchUnipusHttp } from "./http.js";
 import { notImplemented, toMcpToolResponse } from "./result.js";
+import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
 
 const AUTH_STATUS_DESCRIPTION = [
   "Report whether a usable U听说 / U听力 (cn.unipus.cloud) JWT or SSO session is configured.",
@@ -12,9 +13,10 @@ const AUTH_STATUS_DESCRIPTION = [
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
-  "List this week's U听力 listening progress (e.g. x/5) and level.",
+  "List this week's U听力 listening progress (e.g. x/5) and level (e.g. S15).",
   "Product: mobile App U听力 / U听说 — not webpage course 261英语视听说.",
-  "Does not accept credentials. Stub until uls HTTP is wired.",
+  "Uses JWT from env/CLI; does not accept credentials.",
+  "Path defaults to /api/uls/week-progress (override UNIPUS_ULS_WEEK_PROGRESS_PATH / UNIPUS_ULS_ORIGIN).",
 ].join(" ");
 
 const START_LISTENING_TRAINING_DESCRIPTION = [
@@ -22,7 +24,7 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
   "Does not accept credentials. Stub until uls HTTP is wired.",
 ].join(" ");
 
-export type UnipusServerPorts = Partial<AuthPorts>;
+export type UnipusServerPorts = Partial<WeekProgressPorts>;
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   const server = new McpServer({
@@ -34,6 +36,12 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     credentials: ports?.credentials ?? createEnvCredentialStore(),
     http: ports?.http ?? createFetchUnipusHttp(),
     now: ports?.now,
+  };
+
+  const weekPorts: WeekProgressPorts = {
+    ...authPorts,
+    env: ports?.env,
+    weekProgressUrl: ports?.weekProgressUrl,
   };
 
   server.registerTool(
@@ -51,7 +59,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       title: "List week progress",
       description: LIST_WEEK_PROGRESS_DESCRIPTION,
     },
-    async () => toMcpToolResponse(notImplemented("list_week_progress")),
+    async () => toMcpToolResponse(await listWeekProgress(weekPorts)),
   );
 
   server.registerTool(

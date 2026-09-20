@@ -1,5 +1,5 @@
 import type { JwtCredentialStore } from "./credentials.js";
-import { UCLOUD_ORIGIN, type UnipusHttp } from "./http.js";
+import { UCLOUD_ORIGIN, summarizeHttpErrorBody, type UnipusHttp } from "./http.js";
 import {
   decodeJwtPayload,
   expiresAtFromPayload,
@@ -23,22 +23,42 @@ type AuthMeta = {
   userId: string | null;
 };
 
-export async function probeAuthStatus(ports: AuthPorts): Promise<AuthStatusResult> {
-  const now = ports.now?.() ?? new Date();
+export type JwtOrAuth =
+  | { ok: true; jwt: string }
+  | { ok: false; result: AuthStatusResult };
 
+/** Load JWT from the credential store, or a stable auth_required ToolResult. */
+export async function requireConfiguredJwt(
+  credentials: JwtCredentialStore,
+): Promise<JwtOrAuth> {
   let jwt: string | null;
   try {
-    jwt = await ports.credentials.getJwt();
+    jwt = await credentials.getJwt();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    return authRequired(`读取凭据失败：${detail}`);
+    return { ok: false, result: authRequired(`读取凭据失败：${detail}`) };
   }
 
   if (jwt == null || jwt.trim().length === 0) {
-    return authRequired(
-      "未找到 UNIPUS_JWT / UNIPUS_JWT_FILE（或默认 ~/.config/unipus-mcp/jwt）",
-    );
+    return {
+      ok: false,
+      result: authRequired(
+        "未找到 UNIPUS_JWT / UNIPUS_JWT_FILE（或默认 ~/.config/unipus-mcp/jwt）",
+      ),
+    };
   }
+
+  return { ok: true, jwt };
+}
+
+export async function probeAuthStatus(ports: AuthPorts): Promise<AuthStatusResult> {
+  const now = ports.now?.() ?? new Date();
+
+  const loaded = await requireConfiguredJwt(ports.credentials);
+  if (!loaded.ok) {
+    return loaded.result;
+  }
+  const { jwt } = loaded;
 
   const payload = decodeJwtPayload(jwt);
   const meta: AuthMeta = {
@@ -62,7 +82,7 @@ export async function probeAuthStatus(ports: AuthPorts): Promise<AuthStatusResul
   }
 
   if (response.statusCode === 401) {
-    const hint = summarizeAuthFailureBody(response.body);
+    const hint = summarizeHttpErrorBody(response.body);
     return withMeta(
       authRequired(
         hint != null ? `uls 探活 401：${hint}` : "uls 探活 401：JWT 无效或已过期",
@@ -88,23 +108,4 @@ function withMeta(result: AuthStatusResult, meta: AuthMeta): AuthStatusResult {
     expiresAt: meta.expiresAt,
     userId: meta.userId,
   };
-}
-
-function summarizeAuthFailureBody(body: string): string | null {
-  const trimmed = body.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-  try {
-    const value: unknown = JSON.parse(trimmed);
-    if (value != null && typeof value === "object" && !Array.isArray(value)) {
-      const message = (value as { message?: unknown }).message;
-      if (typeof message === "string" && message.trim().length > 0) {
-        return message.trim().slice(0, 200);
-      }
-    }
-  } catch {
-    // fall through to raw body snippet
-  }
-  return trimmed.slice(0, 200);
 }

@@ -23,6 +23,12 @@ export type AuthStatusResult = ToolResult & {
   probeStatusCode?: number;
 };
 
+export type WeekProgressResult = ToolResult & {
+  progress_done?: number;
+  progress_total?: number;
+  level?: string | null;
+};
+
 export function notImplemented(feature: string): ToolResult {
   return {
     isError: true,
@@ -47,6 +53,15 @@ export function authRequired(detail?: string): AuthStatusResult {
   };
 }
 
+export function toolError(code: string, message: string): ToolResult {
+  return {
+    isError: true,
+    status: "error",
+    code,
+    message,
+  };
+}
+
 export function okAuthStatus(input: {
   message: string;
   expired?: boolean | null;
@@ -64,6 +79,23 @@ export function okAuthStatus(input: {
     expiresAt: input.expiresAt ?? null,
     userId: input.userId ?? null,
     probeStatusCode: input.probeStatusCode,
+  };
+}
+
+export function okWeekProgress(input: {
+  message: string;
+  progress_done: number;
+  progress_total: number;
+  level: string | null;
+}): WeekProgressResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    progress_done: input.progress_done,
+    progress_total: input.progress_total,
+    level: input.level,
   };
 }
 
