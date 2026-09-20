@@ -14,7 +14,16 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 2. `list_week_progress` — 本周听力进度（如 x/5）与级别
 3. `start_listening_training` — 对应 App「开始训练」（精确 path 以抓包为准）
 
-当前为骨架：工具可列出；占位实现返回稳定 JSON 错误（`auth_required` / `not_implemented`）。真实 HTTP 见后续 issue。
+`auth_status` 已接入：从 `UNIPUS_JWT` / `UNIPUS_JWT_FILE`（或 `~/.config/unipus-mcp/jwt`）读取 JWT，探活 `ucloud.unipus.cn/api/uls/`。其余工具仍为占位。
+
+## 登录（env / 文件，永不作为工具参数）
+
+```sh
+export UNIPUS_JWT='eyJ...'          # 或
+export UNIPUS_JWT_FILE=/path/to/jwt # 原始 JWT、jwt= cookie、或 portal JSON
+```
+
+不要把密码、JWT 写进 MCP 工具参数或聊天。
 
 ## 开发
 

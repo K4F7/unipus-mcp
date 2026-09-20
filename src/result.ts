@@ -15,6 +15,14 @@ export type ToolResult = {
   message: string;
 };
 
+export type AuthStatusResult = ToolResult & {
+  authenticated: boolean;
+  expired?: boolean | null;
+  expiresAt?: string | null;
+  userId?: string | null;
+  probeStatusCode?: number;
+};
+
 export function notImplemented(feature: string): ToolResult {
   return {
     isError: true,
@@ -24,13 +32,38 @@ export function notImplemented(feature: string): ToolResult {
   };
 }
 
-export function authRequired(detail?: string): ToolResult {
-  const extra = detail != null && detail.length > 0 ? ` ${detail}` : "";
+export function authRequired(detail?: string): AuthStatusResult {
+  const hint = "密码永不作为 MCP 工具参数。";
+  const message =
+    detail != null && detail.trim().length > 0
+      ? `需登录：${detail.trim()}（${hint}）`
+      : `需登录：尚未配置可用 JWT / SSO session。请用环境变量或 CLI 登录（${hint}）`;
   return {
     isError: true,
     status: "auth_required",
     code: "AUTH_REQUIRED",
-    message: `需登录：尚未配置可用 JWT / SSO session。请用环境变量或 CLI 登录（密码永不作为 MCP 工具参数）。${extra}`.trim(),
+    message,
+    authenticated: false,
+  };
+}
+
+export function okAuthStatus(input: {
+  message: string;
+  expired?: boolean | null;
+  expiresAt?: string | null;
+  userId?: string | null;
+  probeStatusCode?: number;
+}): AuthStatusResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    authenticated: true,
+    expired: input.expired ?? false,
+    expiresAt: input.expiresAt ?? null,
+    userId: input.userId ?? null,
+    probeStatusCode: input.probeStatusCode,
   };
 }
 

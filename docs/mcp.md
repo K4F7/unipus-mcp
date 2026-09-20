@@ -4,15 +4,15 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-当前为骨架：工具已注册，调用返回稳定 JSON 错误（`not_implemented` / `auth_required`）。真实 SSO / uls HTTP 见后续 issue。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；其余工具仍返回 `not_implemented`。
 
-## 工具（占位）
+## 工具
 
 | 工具 | 说明 |
 |------|------|
-| `auth_status` | 是否已有可用 JWT / SSO session（密码永不作为参数） |
-| `list_week_progress` | 本周听力进度（如 x/5）与级别 |
-| `start_listening_training` | 对应 App「开始训练」 |
+| `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
+| `list_week_progress` | 本周听力进度（如 x/5）与级别（占位） |
+| `start_listening_training` | 对应 App「开始训练」（占位） |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
 
@@ -25,7 +25,8 @@
 }
 ```
 
-`auth_status` 在未接入登录前返回 `status: "auth_required"` / `code: "AUTH_REQUIRED"`。
+无 JWT 或 uls 返回 401 时：`status: "auth_required"` / `code: "AUTH_REQUIRED"`。
+有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
 ## 安装
 
@@ -126,4 +127,5 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 ## 登录约定
 
 - 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
-- 工具也不返回密码、cookie、JWT。
+- 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
+- 工具也不返回密码、cookie、JWT 原文。
