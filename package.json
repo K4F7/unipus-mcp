@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "U校园AI / U听说 local stdio MCP",
+  "description": "U\u6821\u56edAI / U\u542c\u8bf4 local stdio MCP",
   "bin": {
     "unipus-mcp": "./dist/index.js"
   },
@@ -11,7 +11,8 @@
     "start": "node --import tsx src/stdio.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "sso-login": "tsx scripts/sso-login.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

@@ -9,6 +9,10 @@ import {
   type StartListeningPorts,
 } from "./start-listening-training.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
+import {
+  uploadAnswerAudio,
+  type UploadAnswerAudioPorts,
+} from "./upload-answer-audio.js";
 import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -33,8 +37,10 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
 ].join(" ");
 
 export type UnipusServerPorts = Partial<WeekProgressPorts> &
-  Partial<StartListeningPorts> & {
+  Partial<StartListeningPorts> &
+  Partial<UploadAnswerAudioPorts> & {
     loadPaperUrl?: string;
+    queryUploadUrl?: string;
   };
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
@@ -103,6 +109,46 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         }),
       ),
   );
+
+  const UPLOAD_ANSWER_AUDIO_DESCRIPTION = [
+    "Upload answer audio for U听力/U口语 without mic (silent path).",
+    "POST /api/uls/user/answer/query-upload-url then Qiniu form upload (token,key,file).",
+    "Args: filePath (required), optional fileName / openId.",
+    "Returns storage_key + cdn_url; does not call submitAnswer yet.",
+    "Does not accept credentials (JWT from env/CLI only).",
+  ].join(" ");
+
+  const uploadPorts: UploadAnswerAudioPorts = {
+    ...authPorts,
+    env: ports?.env,
+    queryUploadUrl: ports?.queryUploadUrl,
+  };
+
+  server.registerTool(
+    "upload_answer_audio",
+    {
+      title: "Upload answer audio",
+      description: UPLOAD_ANSWER_AUDIO_DESCRIPTION,
+      inputSchema: {
+        filePath: z.string().min(1).describe("Local audio file path to upload"),
+        fileName: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Remote file name; default basename(filePath)"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await uploadAnswerAudio(uploadPorts, {
+          filePath: args.filePath,
+          fileName: args.fileName,
+          openId: args.openId,
+        }),
+      ),
+  );
+
 
   return server;
 }

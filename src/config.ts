@@ -79,3 +79,22 @@ function envTrim(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed != null && trimmed.length > 0 ? trimmed : null;
 }
+
+/** SPA-confirmed silent upload credential endpoint (2026-09-21). */
+export const DEFAULT_ULS_QUERY_UPLOAD_URL_PATH =
+  "/api/uls/user/answer/query-upload-url";
+
+export function resolveQueryUploadUrlPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_QUERY_UPLOAD_URL_PATH) ??
+    DEFAULT_ULS_QUERY_UPLOAD_URL_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveQueryUploadUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveQueryUploadUrlPath(env)}`;
+}

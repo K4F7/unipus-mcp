@@ -134,6 +134,33 @@ export function okStartListening(input: {
   };
 }
 
+
+export type UploadAnswerAudioResult = ToolResult & {
+  file_name?: string;
+  storage_key?: string;
+  cdn_url?: string;
+  upload_hash?: string | null;
+};
+
+export function okUploadAnswerAudio(input: {
+  message: string;
+  file_name: string;
+  storage_key: string;
+  cdn_url: string;
+  upload_hash: string | null;
+}): UploadAnswerAudioResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    file_name: input.file_name,
+    storage_key: input.storage_key,
+    cdn_url: input.cdn_url,
+    upload_hash: input.upload_hash,
+  };
+}
+
 export function toMcpToolResponse(result: ToolResult) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(result) }],

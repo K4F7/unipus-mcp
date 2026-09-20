@@ -120,3 +120,21 @@ MVP acceptance: one 跟读/口头填空/口语题 auto-filled by generated audio
 - `POST /api/uls/user/answer/query-upload-url`（拿上传凭证，注音/无头上传答案用）
 
 听力周额度 **5**；口语 **3**；MCP 进度工具要同时露出听/口剩余。
+
+
+## Silent audio upload (2026-09-21 live)
+
+Confirmed against `uadaptive` with JWT (raw `Authorization`, no Bearer):
+
+| Step | Method | Path / host | Notes |
+|------|--------|-------------|-------|
+| Credential | POST | `/api/uls/user/answer/query-upload-url` | Body `{ fileName }`; returns `token` / `path` / `url` |
+| Upload | POST multipart | `https://up-z1.qiniup.com` | Fields `token`, `key`(=path), `file` |
+| Submit | POST | `/api/uls/user/submitAnswer` | Needs `loadPaper` token; multi-device lock without it |
+
+MCP tool: `upload_answer_audio` (filePath → storage_key + cdn_url). Does **not** submit yet.
+
+SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-login.ts` writes `~/.config/unipus-mcp/jwt`.
+
+Week progress: `POST /api/uls/report/listen/trainingReport` returns `weeklyCompleted` / `weeklyTarget` (often 0 until a paper is finished). Speak week path still unset.
+

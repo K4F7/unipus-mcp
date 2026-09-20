@@ -143,3 +143,17 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 - 本周进度路径（可选）：`UNIPUS_ULS_ORIGIN`（默认 `https://ucloud.unipus.cn`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认占位 `/api/uls/week-progress`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（**无默认**；未设置则不请求口语周进度 URL）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。
+
+## `upload_answer_audio`
+
+Silent answer-audio upload (no mic):
+
+1. `POST /api/uls/user/answer/query-upload-url` with `{ fileName }` (JWT raw Authorization on uadaptive)
+2. Multipart POST to Qiniu `up-z1.qiniup.com` (`token`, `key`, `file`)
+3. Returns `storage_key` + `cdn_url` (+ optional `upload_hash`)
+
+Does **not** call `submitAnswer` yet (needs a fresh `loadPaper` token).
+
+Args: `filePath` (required), optional `fileName`, `openId`. No credentials in tool args.
+
+SSO helper: `npx tsx scripts/sso-login.ts` with `UNIPUS_USERNAME` / `UNIPUS_PASSWORD` → `~/.config/unipus-mcp/jwt`.
