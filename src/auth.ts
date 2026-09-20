@@ -6,6 +6,8 @@ import {
   isPayloadExpired,
   safeUserIdFromPayload,
 } from "./jwt.js";
+import { summarizeHttpErrorBody } from "./http-body.js";
+import { requireConfiguredJwt } from "./require-jwt.js";
 import { authRequired, okAuthStatus, type AuthStatusResult } from "./result.js";
 
 /** Any `/api/uls/*` path hits the JWT gate (401 Missing JWT without token). */
@@ -26,19 +28,11 @@ type AuthMeta = {
 export async function probeAuthStatus(ports: AuthPorts): Promise<AuthStatusResult> {
   const now = ports.now?.() ?? new Date();
 
-  let jwt: string | null;
-  try {
-    jwt = await ports.credentials.getJwt();
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return authRequired(`读取凭据失败：${detail}`);
+  const loaded = await requireConfiguredJwt(ports.credentials);
+  if (!loaded.ok) {
+    return loaded.result;
   }
-
-  if (jwt == null || jwt.trim().length === 0) {
-    return authRequired(
-      "未找到 UNIPUS_JWT / UNIPUS_JWT_FILE（或默认 ~/.config/unipus-mcp/jwt）",
-    );
-  }
+  const { jwt } = loaded;
 
   const payload = decodeJwtPayload(jwt);
   const meta: AuthMeta = {
@@ -62,7 +56,7 @@ export async function probeAuthStatus(ports: AuthPorts): Promise<AuthStatusResul
   }
 
   if (response.statusCode === 401) {
-    const hint = summarizeAuthFailureBody(response.body);
+    const hint = summarizeHttpErrorBody(response.body);
     return withMeta(
       authRequired(
         hint != null ? `uls 探活 401：${hint}` : "uls 探活 401：JWT 无效或已过期",
@@ -90,21 +84,3 @@ function withMeta(result: AuthStatusResult, meta: AuthMeta): AuthStatusResult {
   };
 }
 
-function summarizeAuthFailureBody(body: string): string | null {
-  const trimmed = body.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-  try {
-    const value: unknown = JSON.parse(trimmed);
-    if (value != null && typeof value === "object" && !Array.isArray(value)) {
-      const message = (value as { message?: unknown }).message;
-      if (typeof message === "string" && message.trim().length > 0) {
-        return message.trim().slice(0, 200);
-      }
-    }
-  } catch {
-    // fall through to raw body snippet
-  }
-  return trimmed.slice(0, 200);
-}
