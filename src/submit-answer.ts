@@ -7,6 +7,7 @@ import {
   toolError,
   type SubmitAnswerResult,
 } from "./result.js";
+import { asExactIdString } from "./safe-json.js";
 
 export type SubmitAnswerUserItem = {
   instanceId: string;
@@ -47,7 +48,7 @@ export async function submitAnswer(
   ports: SubmitAnswerPorts,
   input: SubmitAnswerInput,
 ): Promise<SubmitAnswerResult> {
-  const taskId = input.taskId.trim();
+  const taskId = (asExactIdString(input.taskId) ?? input.taskId).trim();
   if (taskId.length === 0) {
     return toolError("INVALID_ARGUMENT", "taskId 不能为空");
   }
@@ -78,7 +79,9 @@ export async function submitAnswer(
   const wrapAudioUrl = input.wrapAudioUrl !== false;
   const userData = [];
   for (const item of input.userData) {
-    const instanceId = String(item.instanceId ?? "").trim();
+    const instanceId =
+      asExactIdString(item.instanceId) ??
+      String(item.instanceId ?? "").trim();
     if (instanceId.length === 0) {
       return toolError("INVALID_ARGUMENT", "userData.instanceId 不能为空");
     }

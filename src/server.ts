@@ -21,6 +21,10 @@ import {
   speakAndSubmit,
   type SpeakAndSubmitPorts,
 } from "./speak-and-submit.js";
+import {
+  gradeQuestion,
+  type GradeQuestionPorts,
+} from "./grade-question.js";
 import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -43,6 +47,7 @@ const LIST_WEEK_PROGRESS_DESCRIPTION = [
 const START_LISTENING_TRAINING_DESCRIPTION = [
   "Start U听力「开始训练」via POST /api/uls/user/loadPaper on uadaptive.",
   "Args: taskId (required), ansVersion (default 1), optional openId.",
+  "Returns task_id, paper_token, and instance_ids (exact q_qinstid strings; BigInt-safe).",
   "Does not accept credentials (JWT from env/CLI only).",
 ].join(" ");
 
@@ -50,10 +55,12 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<StartListeningPorts> &
   Partial<UploadAnswerAudioPorts> &
   Partial<SubmitAnswerPorts> &
-  Partial<SpeakAndSubmitPorts> & {
+  Partial<SpeakAndSubmitPorts> &
+  Partial<GradeQuestionPorts> & {
     loadPaperUrl?: string;
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
+    gradeQuestionUrl?: string;
   };
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
@@ -257,5 +264,60 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       ),
   );
 
+
+  const GRADE_QUESTION_DESCRIPTION = [
+    "Grade one answer via POST /api/uls/rate/gradeQuestion (raw JWT, no Bearer).",
+    "Args: taskId, questionInstanceId (string snowflake), questionContent (answer JSON),",
+    "optional ansVersion / isObjective / openId.",
+    "CDN-url-only oral record often returns score=0; prefer EN_SENT_SCORE shape",
+    "(type/text/url/isDone) from buildEnSentScoreQuestionContent — server mostly persists",
+    "client-SDK scores; pre-submit speech scoring SDK is not wired yet.",
+    "After submit, results can be read via /api/uls/user/loadGradedQuestions (no MCP tool yet).",
+    "Does not accept credentials (JWT from env/CLI only).",
+  ].join(" ");
+
+  const gradePorts: GradeQuestionPorts = {
+    ...authPorts,
+    env: ports?.env,
+    gradeQuestionUrl: ports?.gradeQuestionUrl,
+  };
+
+  server.registerTool(
+    "grade_question",
+    {
+      title: "Grade question",
+      description: GRADE_QUESTION_DESCRIPTION,
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id (exact string)"),
+        questionInstanceId: z
+          .string()
+          .min(1)
+          .describe("q_qinstid as exact string (never Number-coerce)"),
+        questionContent: z
+          .string()
+          .min(1)
+          .describe("Answer JSON string (questionContent)"),
+        ansVersion: z.number().positive().optional().describe("Default 1"),
+        isObjective: z
+          .boolean()
+          .optional()
+          .describe("SPA optional; false for subjective/oral when known"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await gradeQuestion(gradePorts, {
+          taskId: args.taskId,
+          questionInstanceId: args.questionInstanceId,
+          questionContent: args.questionContent,
+          ansVersion: args.ansVersion,
+          isObjective: args.isObjective,
+          openId: args.openId,
+        }),
+      ),
+  );
+
   return server;
 }
+

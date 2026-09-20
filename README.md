@@ -12,10 +12,12 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 
 1. `auth_status` — 是否已有可用 JWT / SSO session
 2. `list_week_progress` — 本周听力进度（如 x/5）与级别
-3. `start_listening_training` — 对应 App「开始训练」（精确 path 以抓包为准）
+3. `start_listening_training` — 开始训练 / loadPaper（返回 `instance_ids` 精确字符串）
+4. `upload_answer_audio` / `submit_answer` / `speak_and_submit` — 静默口语上传与提交
+5. `grade_question` — `gradeQuestion` 评分（BigInt-safe instance id；CDN-only 常 0 分）
 
 `auth_status` 已接入：从 `UNIPUS_JWT` / `UNIPUS_JWT_FILE`（或 `~/.config/unipus-mcp/jwt`）读取 JWT，探活 `ucloud.unipus.cn/api/uls/`。
-`list_week_progress` 已接入：同一套 JWT 拉本周进度（默认 path `/api/uls/week-progress`，可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN` 覆盖；抓包后只改常量）。`start_listening_training` 仍为占位。
+`list_week_progress` 已接入 activation/status（本周试用进度）。静默上传 / submit / grade 见 `docs/mcp.md` 与 `docs/api-notes.md`。
 
 ## 登录（env / 文件，永不作为工具参数）
 

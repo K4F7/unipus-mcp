@@ -15,6 +15,7 @@ const EXPECTED_TOOLS = [
   "upload_answer_audio",
   "submit_answer",
   "speak_and_submit",
+  "grade_question",
 ] as const;
 
 function makeJwt(payload: Record<string, unknown>): string {
@@ -120,6 +121,19 @@ describe("unipus MCP server", () => {
       const submitPayload = structuredPayload(submit);
       assert.equal(submitPayload.status, "auth_required");
       assert.equal(submitPayload.code, "AUTH_REQUIRED");
+
+      const grade = await client.callTool({
+        name: "grade_question",
+        arguments: {
+          taskId: "t1",
+          questionInstanceId: "1984905701219868673",
+          questionContent: "{\"record\":{\"url\":\"https://example.com/a.wav\"}}",
+        },
+      });
+      assert.equal("isError" in grade && grade.isError, true);
+      const gradePayload = structuredPayload(grade);
+      assert.equal(gradePayload.status, "auth_required");
+      assert.equal(gradePayload.code, "AUTH_REQUIRED");
 
       const trainingTool = listed.tools.find(
         (tool) => tool.name === "start_listening_training",
