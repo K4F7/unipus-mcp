@@ -1,7 +1,9 @@
-import type { AuthPorts } from "./auth.js";
+import {
+  requireConfiguredJwt,
+  type AuthPorts,
+} from "./auth.js";
 import { resolveWeekProgressUrl } from "./config.js";
-import { summarizeHttpErrorBody } from "./http-body.js";
-import { requireConfiguredJwt } from "./require-jwt.js";
+import { summarizeHttpErrorBody } from "./http.js";
 import {
   authRequired,
   okWeekProgress,
@@ -41,9 +43,7 @@ export async function listWeekProgress(
   if (response.statusCode === 401) {
     const hint = summarizeHttpErrorBody(response.body);
     return authRequired(
-      hint != null
-        ? `本周进度 401：${hint}`
-        : "本周进度 401：JWT 无效或已过期",
+      hint != null ? `本周进度 401：${hint}` : "本周进度 401：JWT 无效或已过期",
     );
   }
 
@@ -73,6 +73,7 @@ export async function listWeekProgress(
     level: parsed.level,
   });
 }
+
 
 type ParsedProgress = {
   progress_done: number;

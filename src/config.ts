@@ -8,21 +8,14 @@ import { UCLOUD_ORIGIN } from "./http.js";
 export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/week-progress";
 
 export function resolveUlsOrigin(env: NodeJS.ProcessEnv = process.env): string {
-  const fromEnv = env.UNIPUS_ULS_ORIGIN?.trim();
-  if (fromEnv != null && fromEnv.length > 0) {
-    return fromEnv.replace(/\/+$/, "");
-  }
-  return UCLOUD_ORIGIN;
+  const fromEnv = envTrim(env.UNIPUS_ULS_ORIGIN);
+  return fromEnv != null ? fromEnv.replace(/\/+$/, "") : UCLOUD_ORIGIN;
 }
 
 export function resolveWeekProgressPath(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const fromEnv = env.UNIPUS_ULS_WEEK_PROGRESS_PATH?.trim();
-  const path =
-    fromEnv != null && fromEnv.length > 0
-      ? fromEnv
-      : DEFAULT_ULS_WEEK_PROGRESS_PATH;
+  const path = envTrim(env.UNIPUS_ULS_WEEK_PROGRESS_PATH) ?? DEFAULT_ULS_WEEK_PROGRESS_PATH;
   return path.startsWith("/") ? path : `/${path}`;
 }
 
@@ -30,4 +23,9 @@ export function resolveWeekProgressUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return `${resolveUlsOrigin(env)}${resolveWeekProgressPath(env)}`;
+}
+
+function envTrim(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed != null && trimmed.length > 0 ? trimmed : null;
 }
