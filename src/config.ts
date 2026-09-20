@@ -1,11 +1,21 @@
 import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
- * Default ULS week-progress path until mitm capture fills the real subpath.
- * Override with UNIPUS_ULS_WEEK_PROGRESS_PATH; base with UNIPUS_ULS_ORIGIN.
- * Capture later should only need to change this constant (or the env).
+ * Default progress probe: GET activation/status on uadaptive.
+ * Fields listenTrialUsed / speakTrialUsed / trialUsageLimit = **本周试用进度**
+ * (trial UI tvWeekProgress aligned, e.g. speak 2/3). Task-card percent (0%) is
+ * chapter completion. Paid weekly quota (听力5 / 口语3) path still unverified.
+ * Path override: UNIPUS_ULS_WEEK_PROGRESS_PATH.
+ * Host: UNIPUS_ULS_ORIGIN if set, else UNIPUS_ULS_ADAPTIVE_ORIGIN / uadaptive.
  */
-export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/week-progress";
+export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/user/activation/status";
+
+/**
+ * Recommended speak path (same activation/status body already has speakTrialUsed).
+ * Optional second fetch via UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH; unset = no 2nd request.
+ */
+export const RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH =
+  "/api/uls/user/activation/status";
 
 /** Enter-training path from uadaptive SPA preload (2026-09-21). */
 export const DEFAULT_ULS_LOAD_PAPER_PATH = "/api/uls/user/loadPaper";
@@ -22,16 +32,28 @@ export function resolveWeekProgressPath(
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+/** Host for week/trial progress: UNIPUS_ULS_ORIGIN override, else adaptive. */
+export function resolveWeekProgressOrigin(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const fromEnv = envTrim(env.UNIPUS_ULS_ORIGIN);
+  if (fromEnv != null) {
+    return fromEnv.replace(/\/+$/, "");
+  }
+  return resolveAdaptiveOrigin(env);
+}
+
 export function resolveWeekProgressUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveWeekProgressPath(env)}`;
+  return `${resolveWeekProgressOrigin(env)}${resolveWeekProgressPath(env)}`;
 }
 
 /**
- * Speak week-progress path is **not captured** yet.
- * Only builds a URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set;
- * returns null otherwise (do not invent a default path).
+ * Speak week-progress path: optional second URL.
+ * Prefer parsing speakTrialUsed (试用) from the primary activation/status response;
+ * set UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH only if you need a dedicated fetch
+ * (recommended value: RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH).
  */
 export function resolveSpeakWeekProgressPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -50,7 +72,7 @@ export function resolveSpeakWeekProgressUrl(
   if (path == null) {
     return null;
   }
-  return `${resolveUlsOrigin(env)}${path}`;
+  return `${resolveWeekProgressOrigin(env)}${path}`;
 }
 
 /** H5 training APIs live on uadaptive; override with UNIPUS_ULS_ADAPTIVE_ORIGIN. */
@@ -78,4 +100,40 @@ export function resolveLoadPaperUrl(
 function envTrim(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed != null && trimmed.length > 0 ? trimmed : null;
+}
+
+/** SPA-confirmed silent upload credential endpoint (2026-09-21). */
+export const DEFAULT_ULS_QUERY_UPLOAD_URL_PATH =
+  "/api/uls/user/answer/query-upload-url";
+
+export function resolveQueryUploadUrlPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_QUERY_UPLOAD_URL_PATH) ??
+    DEFAULT_ULS_QUERY_UPLOAD_URL_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveQueryUploadUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveQueryUploadUrlPath(env)}`;
+}
+
+/** SPA-confirmed submit path (2026-09-21 live). */
+export const DEFAULT_ULS_SUBMIT_ANSWER_PATH = "/api/uls/user/submitAnswer";
+
+export function resolveSubmitAnswerPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_SUBMIT_ANSWER_PATH) ?? DEFAULT_ULS_SUBMIT_ANSWER_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveSubmitAnswerUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveSubmitAnswerPath(env)}`;
 }

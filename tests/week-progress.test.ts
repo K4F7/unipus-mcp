@@ -39,20 +39,30 @@ function mockHttp(
 }
 
 describe("resolveWeekProgressUrl", () => {
-  test("defaults to documented uls placeholder path", () => {
+  test("defaults to uadaptive activation/status (raw-JWT host)", () => {
     assert.equal(
       resolveWeekProgressUrl({}),
-      `https://ucloud.unipus.cn${DEFAULT_ULS_WEEK_PROGRESS_PATH}`,
+      `https://uadaptive.unipus.cn${DEFAULT_ULS_WEEK_PROGRESS_PATH}`,
     );
   });
 
-  test("honors UNIPUS_ULS_ORIGIN and UNIPUS_ULS_WEEK_PROGRESS_PATH", () => {
+  test("honors UNIPUS_ULS_ADAPTIVE_ORIGIN and UNIPUS_ULS_WEEK_PROGRESS_PATH", () => {
     assert.equal(
       resolveWeekProgressUrl({
-        UNIPUS_ULS_ORIGIN: "https://uai.unipus.cn/",
+        UNIPUS_ULS_ADAPTIVE_ORIGIN: "https://uai.unipus.cn/",
         UNIPUS_ULS_WEEK_PROGRESS_PATH: "/api/uls/home/week",
       }),
       "https://uai.unipus.cn/api/uls/home/week",
+    );
+  });
+
+  test("UNIPUS_ULS_ORIGIN still overrides host when set", () => {
+    assert.equal(
+      resolveWeekProgressUrl({
+        UNIPUS_ULS_ORIGIN: "https://ucloud.unipus.cn/",
+        UNIPUS_ULS_WEEK_PROGRESS_PATH: "/api/uls/user/activation/status",
+      }),
+      "https://ucloud.unipus.cn/api/uls/user/activation/status",
     );
   });
 });
@@ -92,7 +102,8 @@ describe("listWeekProgress", () => {
     assert.equal(result.level, "S15");
     assert.equal(http.calls.length, 1);
     assert.equal(http.calls[0]?.url, resolveWeekProgressUrl({}));
-    assert.match(http.calls[0]?.headers.authorization ?? "", /^Bearer /);
+    assert.equal(http.calls[0]?.headers.authorization, jwt);
+    assert.doesNotMatch(http.calls[0]?.headers.authorization ?? "", /^Bearer /i);
     assert.doesNotMatch(JSON.stringify(result), /eyJhbGci/);
   });
 
@@ -245,7 +256,7 @@ describe("listWeekProgress twin listen/speak fields", () => {
     assert.equal(result.speak_done, 0);
     assert.equal(result.speak_total, 3);
     assert.equal(calls.length, 2);
-    assert.ok(calls.some((u) => u.endsWith("/api/uls/week-progress")));
+    assert.ok(calls.some((u) => u.endsWith(DEFAULT_ULS_WEEK_PROGRESS_PATH)));
     assert.ok(calls.some((u) => u.endsWith("/api/uls/speak-week")));
   });
 
@@ -265,6 +276,65 @@ describe("listWeekProgress twin listen/speak fields", () => {
     assert.equal(result.speak_done, null);
     assert.equal(result.speak_total, null);
   });
+
+  test("parses activation/status listenTrialUsed + speakTrialUsed + trialUsageLimit", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 1,
+        msg: "SUCCESS",
+        value: {
+          listenTrialUsed: 2,
+          speakTrialUsed: 0,
+          trialUsageLimit: 3,
+          listenTrialExceeded: false,
+          speakTrialExceeded: false,
+          status: 0,
+        },
+        success: true,
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 2);
+    assert.equal(result.listen_total, 3);
+    assert.equal(result.speak_done, 0);
+    assert.equal(result.speak_total, 3);
+    assert.equal(result.progress_done, 2);
+    assert.equal(result.progress_total, 3);
+    assert.match(result.message, /本周试用/);
+    assert.match(result.message, /付费周配额 path 未验证|试用账号已对齐/);
+    assert.equal(http.calls.length, 1);
+    assert.equal(http.calls[0]?.headers.authorization, jwt);
+    assert.doesNotMatch(http.calls[0]?.headers.authorization ?? "", /^Bearer /i);
+    assert.ok(http.calls[0]?.url.includes("uadaptive.unipus.cn"));
+  });
+
+  test("parses listen trainingReport weeklyCompleted/weeklyTarget", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 1,
+        value: { weeklyCompleted: 1, weeklyTarget: 5, weeklyProgress: "1/5" },
+      }),
+    }));
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 1);
+    assert.equal(result.listen_total, 5);
+    assert.equal(result.speak_done, null);
+    assert.equal(result.speak_total, null);
+  });
 });
 
 describe("resolveSpeakWeekProgressUrl", () => {
@@ -275,10 +345,19 @@ describe("resolveSpeakWeekProgressUrl", () => {
   test("builds URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set", () => {
     assert.equal(
       resolveSpeakWeekProgressUrl({
-        UNIPUS_ULS_ORIGIN: "https://uai.unipus.cn/",
+        UNIPUS_ULS_ADAPTIVE_ORIGIN: "https://uai.unipus.cn/",
         UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH: "api/uls/oral/week",
       }),
       "https://uai.unipus.cn/api/uls/oral/week",
+    );
+  });
+
+  test("speak path defaults host to uadaptive when only path set", () => {
+    assert.equal(
+      resolveSpeakWeekProgressUrl({
+        UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH: "/api/uls/user/activation/status",
+      }),
+      "https://uadaptive.unipus.cn/api/uls/user/activation/status",
     );
   });
 });

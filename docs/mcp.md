@@ -4,14 +4,14 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 用同一套 JWT 拉本周听+口进度（听力默认占位 `/api/uls/week-progress`；口语 path 未捕获，需 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`）。`start_listening_training` 已实现：调用 uadaptive 的 `POST /api/uls/user/loadPaper`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 默认用 **raw JWT** 调 uadaptive `GET /api/uls/user/activation/status`，字段 `listenTrialUsed`/`speakTrialUsed`/`trialUsageLimit` = **本周试用进度**（试用账号已对齐 App `tvWeekProgress`；付费周配额 5听+3口 path 未验证）。`start_listening_training` 已实现：调用 uadaptive 的 `POST /api/uls/user/loadPaper`。
 
 ## 工具
 
 | 工具 | 说明 |
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
-| `list_week_progress` | 本周听+口进度：`listen_done`/`listen_total`、`speak_done`/`speak_total`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
+| `list_week_progress` | 本周试用听+口：`listen_done`/`listen_total`、`speak_done`/`speak_total`（activation `*TrialUsed`/`trialUsageLimit`；试用已对齐）；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
@@ -38,7 +38,7 @@
 
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
-`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`（口语未知时为 `null`），以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。听力默认 path 仍为占位 `/api/uls/week-progress`；口语 path **未抓到**，仅当设置 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` 时才二次请求。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
+`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`（口语未知时为 `null`），以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。默认 path `/api/uls/user/activation/status`（uadaptive，**raw JWT**，**本周试用进度**；试用号已对齐 `tvWeekProgress`）；仅当设置 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` 时才二次请求。付费周配额 path **未验证**。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
 
 ## 安装
 
@@ -140,6 +140,36 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 
 - 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
 - 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
-- 本周进度路径（可选）：`UNIPUS_ULS_ORIGIN`（默认 `https://ucloud.unipus.cn`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认占位 `/api/uls/week-progress`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（**无默认**；未设置则不请求口语周进度 URL）。
+- 进度路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_ORIGIN`（若设置则覆盖进度 host）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认 `/api/uls/user/activation/status`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（可选二次请求；推荐同为 activation/status，通常不必设）。Authorization 为**原始 JWT**（不加 `Bearer `）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。
+
+## `upload_answer_audio`
+
+Silent answer-audio upload (no mic):
+
+1. `POST /api/uls/user/answer/query-upload-url` with `{ fileName }` (JWT raw Authorization on uadaptive)
+2. Multipart POST to Qiniu `up-z1.qiniup.com` (`token`, `key`, `file`)
+3. Returns `storage_key` + `cdn_url` (+ optional `upload_hash`)
+
+Does **not** call `submitAnswer` yet (needs a fresh `loadPaper` token).
+
+Args: `filePath` (required), optional `fileName`, `openId`. No credentials in tool args.
+
+SSO helper: `npx tsx scripts/sso-login.ts` with `UNIPUS_USERNAME` / `UNIPUS_PASSWORD` → `~/.config/unipus-mcp/jwt`.
+
+## `submit_answer`
+
+Submit one answer after silent upload:
+
+- Requires `paperToken` from `start_listening_training` / loadPaper (raw JWT alone is not enough).
+- Args: `taskId`, `paperToken`, `instanceId`, `answer` (oral CDN URL auto-wrapped as `{record:{url}}`), optional `ansVersion` / `durationSec`.
+- Live-confirmed 2026-09-21: `POST /api/uls/user/submitAnswer` returns `code:1`.
+
+## `speak_and_submit`
+
+One-shot silent oral path: Edge TTS → 16 kHz mono WAV → `upload_answer_audio` → `submit_answer`.
+
+- Args: `text`, `taskId`, `paperToken`, `instanceId`; optional `voice` (default `en-US-JennyNeural`), `ansVersion`, `durationSec`, `openId`.
+- Needs `ffmpeg` on PATH and network for Edge TTS + Qiniu.
+- Prefer this over speaker/mic inject.

@@ -29,14 +29,15 @@ export async function listWeekProgress(
     return loaded.result;
   }
 
-  const authHeader = { authorization: `Bearer ${loaded.jwt}` };
+  // uadaptive activation/status rejects "Bearer " prefix (same as loadPaper).
+  const authHeader = { authorization: loaded.jwt };
   const listenUrl = ports.weekProgressUrl ?? resolveWeekProgressUrl(ports.env);
   const speakUrl =
     ports.speakWeekProgressUrl !== undefined
       ? ports.speakWeekProgressUrl
       : resolveSpeakWeekProgressUrl(ports.env);
 
-  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "本周听力进度");
+  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "进度");
   if (!listenFetch.ok) {
     return listenFetch.error;
   }
@@ -45,7 +46,7 @@ export async function listWeekProgress(
   if (listenParsed?.listen_done == null || listenParsed.listen_total == null) {
     return toolError(
       "PARSE_ERROR",
-      "本周进度响应无法解析为 listen/progress done/total（及可选 speak_*）",
+      "进度响应无法解析为 listen/progress done/total（及可选 speak_*）",
     );
   }
 
@@ -53,7 +54,7 @@ export async function listWeekProgress(
   let speakTotal = listenParsed.speak_total;
 
   if (speakUrl != null && speakUrl.length > 0) {
-    const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "本周口语进度");
+    const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "口语进度");
     if (!speakFetch.ok) {
       return speakFetch.error;
     }
@@ -69,14 +70,27 @@ export async function listWeekProgress(
   }
 
   const { listen_done: listenDone, listen_total: listenTotal, level } = listenParsed;
+  // activation/status *TrialUsed = 本周试用进度（真机 tvWeekProgress 已对齐试用号）。
+  // 任务卡「0%」= 本篇完成度；付费周配额 5听+3口 path 仍未验证。
+  const trialLike =
+    /listenTrialUsed|speakTrialUsed|trialUsageLimit/.test(listenFetch.body);
+  const listenLabel = trialLike ? "本周试用听力" : "听力";
+  const speakLabel = trialLike ? "本周试用口语" : "口语";
   const speakSuffix =
     speakDone != null && speakTotal != null
-      ? `；口语 ${speakDone}/${speakTotal}`
-      : "；口语进度未知（未配置 UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH 且响应无 speak_*）";
+      ? `；${speakLabel} ${speakDone}/${speakTotal}`
+      : (
+          trialLike
+            ? "；本周试用口语未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）"
+            : "；口语进度未知（响应无 speak_* 且未配置 SPEAK 路径）"
+        );
   const levelSuffix = level != null ? `，级别 ${level}` : "";
+  const trialNote = trialLike
+    ? "（试用账号已对齐 tvWeekProgress；付费周配额 path 未验证）"
+    : "";
 
   return okWeekProgress({
-    message: `本周听力 ${listenDone}/${listenTotal}${speakSuffix}${levelSuffix}`,
+    message: `${listenLabel} ${listenDone}/${listenTotal}${speakSuffix}${levelSuffix}${trialNote}`,
     level,
     listen_done: listenDone,
     listen_total: listenTotal,
@@ -160,22 +174,42 @@ type ParsedProgress = {
   level: string | null;
 };
 
-const EXPLICIT_LISTEN_DONE = ["listen_done", "listenDone", "listeningDone"] as const;
-const EXPLICIT_LISTEN_TOTAL = ["listen_total", "listenTotal", "listeningTotal"] as const;
+const EXPLICIT_LISTEN_DONE = [
+  "listen_done",
+  "listenDone",
+  "listeningDone",
+  "listenTrialUsed",
+] as const;
+const EXPLICIT_LISTEN_TOTAL = [
+  "listen_total",
+  "listenTotal",
+  "listeningTotal",
+  "listenTrialLimit",
+] as const;
 const LEGACY_DONE = [
   "progress_done",
   "progressDone",
   "done",
   "completed",
   "finished",
+  "weeklyCompleted",
 ] as const;
-const LEGACY_TOTAL = ["progress_total", "progressTotal", "total", "target", "goal"] as const;
+const LEGACY_TOTAL = [
+  "progress_total",
+  "progressTotal",
+  "total",
+  "target",
+  "goal",
+  "weeklyTarget",
+  "trialUsageLimit",
+] as const;
 const SPEAK_DONE_KEYS = [
   "speak_done",
   "speakDone",
   "oralDone",
   "oral_done",
   "speakingDone",
+  "speakTrialUsed",
 ] as const;
 const SPEAK_TOTAL_KEYS = [
   "speak_total",
@@ -183,16 +217,21 @@ const SPEAK_TOTAL_KEYS = [
   "oralTotal",
   "oral_total",
   "speakingTotal",
+  "speakTrialLimit",
 ] as const;
+/** Shared trial cap from activation/status (applies to both listen + speak). */
+const TRIAL_LIMIT_KEYS = ["trialUsageLimit"] as const;
 const LEVEL_KEYS = ["level", "levelName", "grade", "band"] as const;
 const RATIO_KEYS = ["progress", "weekProgress", "ratio"] as const;
 const SPEAK_RATIO_KEYS = ["speakProgress", "oralProgress", "speak_ratio"] as const;
-const NEST_KEYS = ["data", "result", "payload", "listen", "speak", "oral"] as const;
+const NEST_KEYS = ["data", "result", "payload", "value", "listen", "speak", "oral"] as const;
 
 /**
- * Map stable MCP fields from known aliases until the real uls schema is captured.
- * Legacy `progress_*` / generic done+total map to listen_*; speak_* only from
- * speak-specific keys so a single-progress body does not invent speak counts.
+ * Map stable MCP fields from known aliases.
+ * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit (**本周试用进度**；试用号已对齐 App tvWeekProgress)
+ * - listen trainingReport: weeklyCompleted / weeklyTarget (报告字段；付费周配额 path 未验证)
+ * - Legacy progress_* / generic done+total map to listen_*; speak_* only from
+ *   speak-specific keys so a single-progress body does not invent speak counts.
  */
 export function parseWeekProgressBody(body: string): ParsedProgress | null {
   const record = parseJsonRecord(body);
@@ -225,11 +264,24 @@ export function parseWeekProgressBody(body: string): ParsedProgress | null {
       speakTotal ??= speakRatio.total;
     }
 
+    const trialLimit = firstNumber(candidate, TRIAL_LIMIT_KEYS);
+    if (trialLimit != null) {
+      // activation/status: one cap for both trial flows
+      if (speakDone != null) {
+        speakTotal ??= trialLimit;
+      }
+      // also available as listen total when listenTrialUsed present
+    }
+
     const explicitDone = firstNumber(candidate, EXPLICIT_LISTEN_DONE);
-    const explicitTotal = firstNumber(candidate, EXPLICIT_LISTEN_TOTAL);
+    const explicitTotal =
+      firstNumber(candidate, EXPLICIT_LISTEN_TOTAL) ?? trialLimit;
     if (explicitDone != null && explicitTotal != null) {
       listenDone ??= explicitDone;
       listenTotal ??= explicitTotal;
+      if (speakDone != null) {
+        speakTotal ??= trialLimit ?? speakTotal;
+      }
       continue;
     }
 
