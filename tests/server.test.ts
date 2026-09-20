@@ -4,7 +4,7 @@ import { describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { resolveWeekProgressUrl } from "../src/config.js";
+import { resolveLoadPaperUrl, resolveWeekProgressUrl } from "../src/config.js";
 import { createUnipusMcpServer } from "../src/server.js";
 import type { UnipusHttp } from "../src/http.js";
 
@@ -23,7 +23,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("unipus MCP server", () => {
-  test("lists tools; missing JWT and stubs keep stable JSON errors", async () => {
+  test("lists tools; missing JWT keeps stable JSON errors", async () => {
     const server = createUnipusMcpServer({
       credentials: { getJwt: async () => null },
       http: {
@@ -71,13 +71,79 @@ describe("unipus MCP server", () => {
 
       const train = await client.callTool({
         name: "start_listening_training",
-        arguments: {},
+        arguments: { taskId: "t1" },
       });
       assert.equal("isError" in train && train.isError, true);
       const trainPayload = structuredPayload(train);
-      assert.equal(trainPayload.status, "not_implemented");
-      assert.equal(trainPayload.code, "NOT_IMPLEMENTED");
-      assert.match(String(trainPayload.message), /未实现/);
+      assert.equal(trainPayload.status, "auth_required");
+      assert.equal(trainPayload.code, "AUTH_REQUIRED");
+      assert.match(String(trainPayload.message), /需登录|登录|JWT/);
+
+      const trainingTool = listed.tools.find(
+        (tool) => tool.name === "start_listening_training",
+      );
+      assert.ok(trainingTool);
+      const trainingProps = (
+        (trainingTool.inputSchema as { properties?: Record<string, unknown> } | undefined)
+          ?.properties ?? {}
+      );
+      assert.ok("taskId" in trainingProps);
+      assert.equal(
+        "password" in trainingProps ||
+          "passwd" in trainingProps ||
+          "cookie" in trainingProps ||
+          "jwt" in trainingProps,
+        false,
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("start_listening_training loads a paper through the MCP server", async () => {
+    const jwt = "raw-jwt-value";
+    const calls: Array<{
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+    }> = [];
+    const server = createUnipusMcpServer({
+      credentials: { getJwt: async () => jwt },
+      http: {
+        async request(input) {
+          calls.push(input);
+          return {
+            statusCode: 200,
+            body: JSON.stringify({ code: 0, data: { taskId: "abc", token: "tok" } }),
+          };
+        },
+      },
+    });
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+      const train = await client.callTool({
+        name: "start_listening_training",
+        arguments: { taskId: "abc", ansVersion: 2 },
+      });
+      assert.equal("isError" in train && train.isError, false);
+      const payload = structuredPayload(train);
+      assert.equal(payload.status, "ok");
+      assert.equal(payload.code, "OK");
+      assert.equal(payload.task_id, "abc");
+      assert.equal(payload.paper_token, "tok");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.url, resolveLoadPaperUrl({}));
+      assert.equal(calls[0]?.method, "POST");
+      assert.equal(calls[0]?.headers?.authorization, jwt);
+      assert.deepEqual(JSON.parse(calls[0]?.body ?? "{}"), {
+        taskId: "abc",
+        ansVersion: 2,
+      });
     } finally {
       await client.close();
       await server.close();
@@ -169,6 +235,8 @@ function structuredPayload(result: unknown): {
   progress_done?: number;
   progress_total?: number;
   level?: string | null;
+  task_id?: string;
+  paper_token?: string | null;
 } {
   assert.ok(result !== null && typeof result === "object");
   const record = result as Record<string, unknown>;
@@ -190,6 +258,8 @@ function structuredPayload(result: unknown): {
       progress_done?: number;
       progress_total?: number;
       level?: string | null;
+      task_id?: string;
+      paper_token?: string | null;
     };
   }
 
@@ -210,5 +280,7 @@ function structuredPayload(result: unknown): {
     progress_done?: number;
     progress_total?: number;
     level?: string | null;
+    task_id?: string;
+    paper_token?: string | null;
   };
 }

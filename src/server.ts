@@ -3,8 +3,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { probeAuthStatus, type AuthPorts } from "./auth.js";
 import { createEnvCredentialStore } from "./credentials.js";
 import { createFetchUnipusHttp } from "./http.js";
-import { notImplemented, toMcpToolResponse } from "./result.js";
+import { toMcpToolResponse } from "./result.js";
+import {
+  startListeningTraining,
+  type StartListeningPorts,
+} from "./start-listening-training.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
+import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
   "Report whether a usable U听说 / U听力 (cn.unipus.cloud) JWT or SSO session is configured.",
@@ -20,11 +25,15 @@ const LIST_WEEK_PROGRESS_DESCRIPTION = [
 ].join(" ");
 
 const START_LISTENING_TRAINING_DESCRIPTION = [
-  "Start U听力「开始训练」listening session (exact path TBD from capture).",
-  "Does not accept credentials. Stub until uls HTTP is wired.",
+  "Start U听力「开始训练」via POST /api/uls/user/loadPaper on uadaptive.",
+  "Args: taskId (required), ansVersion (default 1), optional openId.",
+  "Does not accept credentials (JWT from env/CLI only).",
 ].join(" ");
 
-export type UnipusServerPorts = Partial<WeekProgressPorts>;
+export type UnipusServerPorts = Partial<WeekProgressPorts> &
+  Partial<StartListeningPorts> & {
+    loadPaperUrl?: string;
+  };
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   const server = new McpServer({
@@ -62,13 +71,35 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     async () => toMcpToolResponse(await listWeekProgress(weekPorts)),
   );
 
+  const startPorts: StartListeningPorts = {
+    ...authPorts,
+    env: ports?.env,
+    loadPaperUrl: ports?.loadPaperUrl,
+  };
+
   server.registerTool(
     "start_listening_training",
     {
       title: "Start listening training",
       description: START_LISTENING_TRAINING_DESCRIPTION,
+      inputSchema: {
+        taskId: z.string().min(1).describe("H5 taskId query param"),
+        ansVersion: z
+          .number()
+          .positive()
+          .optional()
+          .describe("H5 ansVersion; default 1"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
     },
-    async () => toMcpToolResponse(notImplemented("start_listening_training")),
+    async (args) =>
+      toMcpToolResponse(
+        await startListeningTraining(startPorts, {
+          taskId: args.taskId,
+          ansVersion: args.ansVersion,
+          openId: args.openId,
+        }),
+      ),
   );
 
   return server;

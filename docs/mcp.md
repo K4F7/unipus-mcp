@@ -4,7 +4,7 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 用同一套 JWT 拉本周听力进度（默认 `/api/uls/week-progress`，可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN` 覆盖）。`start_listening_training` 仍返回 `not_implemented`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` 用同一套 JWT 拉本周听力进度（默认 `/api/uls/week-progress`，可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `UNIPUS_ULS_ORIGIN` 覆盖）。`start_listening_training` 已实现：调用 uadaptive 的 `POST /api/uls/user/loadPaper`。
 
 ## 工具
 
@@ -12,20 +12,30 @@
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_week_progress` | 本周听力进度（`progress_done` / `progress_total` / `level`）；401→`auth_required`，网络失败→`NETWORK_ERROR` |
-| `start_listening_training` | 对应 App「开始训练」（占位） |
+| `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
 
 ```json
 {
   "isError": true,
-  "status": "not_implemented",
-  "code": "NOT_IMPLEMENTED",
-  "message": "未实现：…"
+  "status": "auth_required",
+  "code": "AUTH_REQUIRED",
+  "message": "需登录：…"
 }
 ```
 
 无 JWT 或 uls 返回 401 时：`status: "auth_required"` / `code: "AUTH_REQUIRED"`。
+
+`start_listening_training` 参数与请求：
+
+- `taskId`：必填任务 id；空字符串返回 `INVALID_ARGUMENT`。
+- `ansVersion`：可选正数，默认 `1`。
+- `openId`：可选；存在时作为 `openId` 请求头发送。
+- 请求体为 `{ taskId, ansVersion }`，`Authorization` 使用**原始 JWT**，不加 `Bearer ` 前缀。
+- 默认地址为 `https://uadaptive.unipus.cn/api/uls/user/loadPaper`；可用 `UNIPUS_ULS_ADAPTIVE_ORIGIN` / `UNIPUS_ULS_LOAD_PAPER_PATH` 覆盖。
+- 业务成功码接受 `0`、`1`、`200`；成功结果带 `task_id` 与 `paper_token`（若响应提供）。
+
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
 `list_week_progress` 成功时额外带稳定字段：`progress_done`、`progress_total`、`level`。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`（与 401/`AUTH_REQUIRED` 可区分）。
@@ -131,4 +141,5 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 - 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
 - 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
 - 本周进度路径（可选）：`UNIPUS_ULS_ORIGIN`（默认 `https://ucloud.unipus.cn`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（默认 `/api/uls/week-progress`）。
+- 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。

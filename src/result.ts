@@ -29,6 +29,12 @@ export type WeekProgressResult = ToolResult & {
   level?: string | null;
 };
 
+export type StartListeningResult = ToolResult & {
+  task_id?: string;
+  paper_token?: string | null;
+  raw_code?: number | null;
+};
+
 export function notImplemented(feature: string): ToolResult {
   return {
     isError: true,
@@ -96,6 +102,23 @@ export function okWeekProgress(input: {
     progress_done: input.progress_done,
     progress_total: input.progress_total,
     level: input.level,
+  };
+}
+
+export function okStartListening(input: {
+  message: string;
+  task_id: string;
+  paper_token: string | null;
+  raw_code: number | null;
+}): StartListeningResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    task_id: input.task_id,
+    paper_token: input.paper_token,
+    raw_code: input.raw_code,
   };
 }
 

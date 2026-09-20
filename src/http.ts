@@ -1,5 +1,6 @@
 export const UCLOUD_ORIGIN = "https://ucloud.unipus.cn";
 export const UAI_ORIGIN = "https://uai.unipus.cn";
+export const UADAPTIVE_ORIGIN = "https://uadaptive.unipus.cn";
 
 export const UNIPUS_USER_AGENT =
   "unipus-mcp/0.1 (+https://github.com/K4F7/unipus-mcp; local stdio)";
@@ -34,6 +35,7 @@ export function isTrustedUnipusUrl(value: string): boolean {
     return (
       url.hostname === "ucloud.unipus.cn" ||
       url.hostname === "uai.unipus.cn" ||
+      url.hostname === "uadaptive.unipus.cn" ||
       url.hostname === "sso.unipus.cn"
     );
   } catch {
