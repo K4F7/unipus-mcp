@@ -30,6 +30,8 @@ export type UploadAnswerAudioPorts = AuthPorts & {
 };
 
 const DEFAULT_QINIU_UPLOAD = "https://up-z1.qiniup.com";
+/** Soft cap for silent uploads (20 MiB) — avoids buffering huge files. */
+export const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 
 /**
  * Silent audio path: POST query-upload-url → Qiniu multipart (token,key,file).
@@ -177,6 +179,15 @@ async function readAudioBytes(
         result: toolError("INVALID_ARGUMENT", "音频文件为空"),
       };
     }
+    if (buffer.length > MAX_AUDIO_BYTES) {
+      return {
+        ok: false,
+        result: toolError(
+          "INVALID_ARGUMENT",
+          `音频文件过大（>${MAX_AUDIO_BYTES} bytes / 20MiB limit）`,
+        ),
+      };
+    }
     return { ok: true, buffer };
   } catch (error) {
     if (
@@ -223,8 +234,8 @@ export function parseQueryUploadBody(body: string): {
   const v = value as Record<string, unknown>;
   const token = pickString(v, ["token", "uploadToken", "upToken"]);
   const path = pickString(v, ["path", "key", "fileKey", "fileName"]);
-  const url = pickString(v, ["url", "defaultUrl", "cdnUrl"]) ?? "";
-  if (token == null || path == null) {
+  const url = pickString(v, ["url", "defaultUrl", "cdnUrl"]);
+  if (token == null || path == null || url == null) {
     return null;
   }
   return { token, path, url };

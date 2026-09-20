@@ -30,11 +30,12 @@ const AUTH_STATUS_DESCRIPTION = [
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
-  "List this week's U听力 + U口语 progress (listen x/5, speak x/3) and level.",
+  "List U听力 + U口语 counters from the configured progress endpoint.",
+  "Default GET /api/uls/user/activation/status on uadaptive returns **试用次数**",
+  "(listenTrialUsed / speakTrialUsed / trialUsageLimit) — NOT App card 模块 0/3,",
+  "and NOT paid weekly quota (听力5/口语3; path still unknown).",
   "Returns listen_done/listen_total, speak_done/speak_total; progress_* aliases listen.",
-  "Product: mobile App U听力 / U听说 — not webpage course 261英语视听说.",
-  "Uses JWT from env/CLI; does not accept credentials.",
-  "Defaults to GET /api/uls/user/activation/status (listenTrialUsed / speakTrialUsed / trialUsageLimit).",
+  "Auth: raw JWT (no Bearer). Host: UNIPUS_ULS_ORIGIN or UNIPUS_ULS_ADAPTIVE_ORIGIN.",
   "Optional UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH for a dedicated second fetch.",
 ].join(" ");
 

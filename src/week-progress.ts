@@ -29,14 +29,15 @@ export async function listWeekProgress(
     return loaded.result;
   }
 
-  const authHeader = { authorization: `Bearer ${loaded.jwt}` };
+  // uadaptive activation/status rejects "Bearer " prefix (same as loadPaper).
+  const authHeader = { authorization: loaded.jwt };
   const listenUrl = ports.weekProgressUrl ?? resolveWeekProgressUrl(ports.env);
   const speakUrl =
     ports.speakWeekProgressUrl !== undefined
       ? ports.speakWeekProgressUrl
       : resolveSpeakWeekProgressUrl(ports.env);
 
-  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "本周听力进度");
+  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "进度");
   if (!listenFetch.ok) {
     return listenFetch.error;
   }
@@ -45,7 +46,7 @@ export async function listWeekProgress(
   if (listenParsed?.listen_done == null || listenParsed.listen_total == null) {
     return toolError(
       "PARSE_ERROR",
-      "本周进度响应无法解析为 listen/progress done/total（及可选 speak_*）",
+      "进度响应无法解析为 listen/progress done/total（及可选 speak_*）",
     );
   }
 
@@ -53,7 +54,7 @@ export async function listWeekProgress(
   let speakTotal = listenParsed.speak_total;
 
   if (speakUrl != null && speakUrl.length > 0) {
-    const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "本周口语进度");
+    const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "口语进度");
     if (!speakFetch.ok) {
       return speakFetch.error;
     }
@@ -69,14 +70,26 @@ export async function listWeekProgress(
   }
 
   const { listen_done: listenDone, listen_total: listenTotal, level } = listenParsed;
+  // activation/status = 试用次数; trainingReport weekly* = 本周报告; never App 卡片 0/3.
+  const trialLike =
+    /listenTrialUsed|speakTrialUsed|trialUsageLimit/.test(listenFetch.body);
+  const listenLabel = trialLike ? "试用听力" : "听力";
+  const speakLabel = trialLike ? "试用口语" : "口语";
   const speakSuffix =
     speakDone != null && speakTotal != null
-      ? `；口语 ${speakDone}/${speakTotal}`
-      : "；口语进度未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）";
+      ? `；${speakLabel} ${speakDone}/${speakTotal}`
+      : (
+          trialLike
+            ? "；口语试用未知（activation/status 无 speakTrialUsed 且未配置 SPEAK 路径）"
+            : "；口语进度未知（响应无 speak_* 且未配置 SPEAK 路径）"
+        );
   const levelSuffix = level != null ? `，级别 ${level}` : "";
+  const trialNote = trialLike
+    ? "（试用次数，非 App 卡片模块进度 / 非付费周配额）"
+    : "";
 
   return okWeekProgress({
-    message: `本周听力 ${listenDone}/${listenTotal}${speakSuffix}${levelSuffix}`,
+    message: `${listenLabel} ${listenDone}/${listenTotal}${speakSuffix}${levelSuffix}${trialNote}`,
     level,
     listen_done: listenDone,
     listen_total: listenTotal,
@@ -214,8 +227,8 @@ const NEST_KEYS = ["data", "result", "payload", "value", "listen", "speak", "ora
 
 /**
  * Map stable MCP fields from known aliases.
- * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit
- * - listen trainingReport: weeklyCompleted / weeklyTarget
+ * - activation/status: listenTrialUsed / speakTrialUsed / trialUsageLimit (**试用次数**)
+ * - listen trainingReport: weeklyCompleted / weeklyTarget (本周报告，非试用)
  * - Legacy progress_* / generic done+total map to listen_*; speak_* only from
  *   speak-specific keys so a single-progress body does not invent speak counts.
  */

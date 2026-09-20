@@ -56,6 +56,27 @@ describe("parseQueryUploadBody", () => {
       null,
     );
   });
+
+  test("rejects missing or empty cdn url", () => {
+    assert.equal(
+      parseQueryUploadBody(
+        JSON.stringify({
+          code: 1,
+          value: { token: "tok", path: "ans-prod/a.wav", url: "" },
+        }),
+      ),
+      null,
+    );
+    assert.equal(
+      parseQueryUploadBody(
+        JSON.stringify({
+          code: 1,
+          value: { token: "tok", path: "ans-prod/a.wav" },
+        }),
+      ),
+      null,
+    );
+  });
 });
 
 describe("uploadAnswerAudio", () => {
@@ -109,5 +130,22 @@ describe("uploadAnswerAudio", () => {
     assert.equal(uploadedBytes, 4);
     assert.equal(http.calls.length, 1);
     assert.match(http.calls[0]!.body ?? "", /fileName/);
+  });
+
+  test("rejects oversized audio before upload", async () => {
+    const http = mockHttp(async () => ({ statusCode: 200, body: "{}" }));
+    const big = Buffer.alloc(20 * 1024 * 1024 + 1, 1);
+    const result = await uploadAnswerAudio(
+      {
+        credentials: { getJwt: async () => "hdr.pay.sig" },
+        http,
+        readFile: async () => big,
+      },
+      { filePath: "/tmp/huge.wav" },
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.code, "INVALID_ARGUMENT");
+    assert.match(result.message, /过大|limit|20/i);
+    assert.deepEqual(http.calls, []);
   });
 });

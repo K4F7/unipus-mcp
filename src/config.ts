@@ -1,16 +1,18 @@
 import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
- * Live week/trial progress (2026-09-21 probe): GET activation/status returns
- * listenTrialUsed / speakTrialUsed / trialUsageLimit (App 当前进度 x/3 for trial).
- * Override with UNIPUS_ULS_WEEK_PROGRESS_PATH; base with UNIPUS_ULS_ORIGIN.
+ * Default progress probe: GET activation/status on uadaptive.
+ * Fields listenTrialUsed / speakTrialUsed / trialUsageLimit are **试用次数**
+ * (e.g. 2/3 trials) — NOT the App card「当前进度 0/3」(那是本篇三模块 part/get),
+ * and NOT the paid weekly quota (听力5 / 口语3; path still unknown).
+ * Path override: UNIPUS_ULS_WEEK_PROGRESS_PATH.
+ * Host: UNIPUS_ULS_ORIGIN if set, else UNIPUS_ULS_ADAPTIVE_ORIGIN / uadaptive.
  */
 export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/user/activation/status";
 
 /**
- * Recommended speak week-progress path (same activation/status body already has
- * speakTrialUsed). Optional second fetch via UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH;
- * no automatic second request when unset.
+ * Recommended speak path (same activation/status body already has speakTrialUsed).
+ * Optional second fetch via UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH; unset = no 2nd request.
  */
 export const RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH =
   "/api/uls/user/activation/status";
@@ -30,15 +32,26 @@ export function resolveWeekProgressPath(
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+/** Host for week/trial progress: UNIPUS_ULS_ORIGIN override, else adaptive. */
+export function resolveWeekProgressOrigin(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const fromEnv = envTrim(env.UNIPUS_ULS_ORIGIN);
+  if (fromEnv != null) {
+    return fromEnv.replace(/\/+$/, "");
+  }
+  return resolveAdaptiveOrigin(env);
+}
+
 export function resolveWeekProgressUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveWeekProgressPath(env)}`;
+  return `${resolveWeekProgressOrigin(env)}${resolveWeekProgressPath(env)}`;
 }
 
 /**
  * Speak week-progress path: optional second URL.
- * Prefer parsing speakTrialUsed from the primary activation/status response;
+ * Prefer parsing speakTrialUsed (试用) from the primary activation/status response;
  * set UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH only if you need a dedicated fetch
  * (recommended value: RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH).
  */
@@ -59,7 +72,7 @@ export function resolveSpeakWeekProgressUrl(
   if (path == null) {
     return null;
   }
-  return `${resolveUlsOrigin(env)}${path}`;
+  return `${resolveWeekProgressOrigin(env)}${path}`;
 }
 
 /** H5 training APIs live on uadaptive; override with UNIPUS_ULS_ADAPTIVE_ORIGIN. */

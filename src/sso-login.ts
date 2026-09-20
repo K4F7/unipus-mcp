@@ -3,7 +3,7 @@
  * Username/password stay in env / CLI argv — never MCP tool args.
  */
 import { createCipheriv } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { defaultJwtFilePath } from "./credentials.js";
@@ -170,5 +170,8 @@ export async function saveJwtToDefaultPath(
   const path = defaultJwtFilePath(options.env, options.home);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, `${jwt}\n`, { mode: 0o600 });
+  // mode on writeFile only applies on create; tighten on overwrite too.
+  await chmod(dirname(path), 0o700);
+  await chmod(path, 0o600);
   return path;
 }

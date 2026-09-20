@@ -93,8 +93,9 @@ export async function speakAndSubmit(
       return toolError("UPLOAD_ERROR", "上传成功但缺少 cdn_url");
     }
 
+    // Do not return wav_path: finally cleanup deletes the temp dir before the
+    // caller sees the result, so any path would already be stale.
     const uploadedMeta = {
-      wav_path: wavPath,
       storage_key: uploaded.storage_key,
       cdn_url: cdn,
       upload_hash: uploaded.upload_hash ?? null,

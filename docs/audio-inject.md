@@ -18,7 +18,10 @@
 
 ### Not yet
 - 虚拟麦 / Frida `AudioRecord.read` 喂 PCM（需 root 或 gadget）。
-- 无头：`query-upload-url` + 上传 + 提交（短时 PCAPdroid TLS 抓包，超时立刻停 VPN）。
+- 设备侧剩余：付费周配额 path、口语 part/get 模块进度（卡片 0/3）。
+
+### Done (headless MCP)
+- `query-upload-url` → Qiniu upload → `submit_answer` / `speak_and_submit`（见下方 Status 2026-09-21）。
 
 ## Phases
 1. **Device path（进行中）**: 声学旁路已验证跟读可得分；收多句脚本。
@@ -37,4 +40,5 @@
 - PCAPdroid Control API + mitm addon: VPN starts; **TLS decrypt yields no HTTP payloads** (Connections → HTTP 请求 = 空). Likely **cert pinning** in App/WebView. SNI only: `uadaptive.unipus.cn`, `speech.unipus.cn`, `clio-audios.unipus.cn`, `up-z1.qiniup.com`.
 - SPA static: `POST /api/uls/user/answer/query-upload-url` → Qiniu form upload (`token`,`key`,`file`) → `submitAnswer`.
 - JWT via SSO CLI (`scripts/sso-login.ts`) + MCP `upload_answer_audio` (query-upload-url → Qiniu) **implemented 2026-09-21**.
-- Done: MCP `speak_and_submit` (Edge TTS → upload → submit_answer). Speak week-progress: GET /api/uls/user/activation/status (speakTrialUsed/trialUsageLimit).
+- Done: MCP `speak_and_submit` (Edge TTS → upload → submit_answer).
+- Progress probe: GET /api/uls/user/activation/status (`*TrialUsed`/`trialUsageLimit` = **试用**, not App card 0/3).

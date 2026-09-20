@@ -83,6 +83,7 @@ describe("speakAndSubmit", () => {
     assert.equal(result.isError, false);
     assert.equal(result.status, "ok");
     assert.equal(result.cdn_url, "https://birdflock.unipus.cn/ans-prod/x.wav");
+    assert.equal(result.wav_path, undefined);
     assert.ok(http.calls.some((u) => u.includes("query-upload-url")));
   });
 });

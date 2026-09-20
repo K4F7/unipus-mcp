@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { encryptSsoField, loginWithPassword } from "../src/sso-login.js";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { encryptSsoField, loginWithPassword, saveJwtToDefaultPath } from "../src/sso-login.js";
 
 describe("encryptSsoField", () => {
   test("returns stable uppercase hex for known plaintext", () => {
@@ -39,5 +43,23 @@ describe("loginWithPassword", () => {
       assert.equal(r.jwt, "aaa.bbb.ccc");
       assert.equal(r.refreshToken, "refresh");
     }
+  });
+});
+
+describe("saveJwtToDefaultPath", () => {
+  test("chmod 0o600 even when overwriting a looser file", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-jwt-"));
+    const path = join(home, ".config", "unipus-mcp", "jwt");
+    // create with loose perms first
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(home, ".config", "unipus-mcp"), { recursive: true, mode: 0o755 });
+    await writeFile(path, "old.jwt\n", { mode: 0o644 });
+    await chmod(path, 0o644);
+
+    const saved = await saveJwtToDefaultPath("new.jwt.token", { home });
+    assert.equal(saved, path);
+    assert.equal((await readFile(path, "utf8")).trim(), "new.jwt.token");
+    const mode = (await stat(path)).mode & 0o777;
+    assert.equal(mode, 0o600);
   });
 });
