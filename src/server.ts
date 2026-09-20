@@ -1,11 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { authRequired, notImplemented, toMcpToolResponse } from "./result.js";
+import { probeAuthStatus, type AuthPorts } from "./auth.js";
+import { createEnvCredentialStore } from "./credentials.js";
+import { createFetchUnipusHttp } from "./http.js";
+import { notImplemented, toMcpToolResponse } from "./result.js";
 
 const AUTH_STATUS_DESCRIPTION = [
   "Report whether a usable U听说 / U听力 (cn.unipus.cloud) JWT or SSO session is configured.",
-  "Does not accept username or password; login is env/CLI only.",
-  "Stub until SSO / uls auth lands — currently returns auth_required.",
+  "Probes https://ucloud.unipus.cn/api/uls/ with Authorization Bearer.",
+  "Does not accept username or password; login is env/CLI only (UNIPUS_JWT / UNIPUS_JWT_FILE).",
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
@@ -19,11 +22,19 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
   "Does not accept credentials. Stub until uls HTTP is wired.",
 ].join(" ");
 
-export function createUnipusMcpServer(): McpServer {
+export type UnipusServerPorts = Partial<AuthPorts>;
+
+export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   const server = new McpServer({
     name: "unipus-mcp",
     version: "0.1.0",
   });
+
+  const authPorts: AuthPorts = {
+    credentials: ports?.credentials ?? createEnvCredentialStore(),
+    http: ports?.http ?? createFetchUnipusHttp(),
+    now: ports?.now,
+  };
 
   server.registerTool(
     "auth_status",
@@ -31,7 +42,7 @@ export function createUnipusMcpServer(): McpServer {
       title: "Auth status",
       description: AUTH_STATUS_DESCRIPTION,
     },
-    async () => toMcpToolResponse(authRequired("SSO / JWT 尚未接入（issue #2）。")),
+    async () => toMcpToolResponse(await probeAuthStatus(authPorts)),
   );
 
   server.registerTool(
