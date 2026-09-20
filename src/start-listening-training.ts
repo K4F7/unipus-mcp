@@ -138,14 +138,7 @@ export function parseLoadPaperBody(
     return null;
   }
 
-  const data =
-    root.data != null && typeof root.data === "object" && !Array.isArray(root.data)
-      ? (root.data as Record<string, unknown>)
-      : root.value != null &&
-          typeof root.value === "object" &&
-          !Array.isArray(root.value)
-        ? (root.value as Record<string, unknown>)
-        : root;
+  const data = nestedRecord(root, "data") ?? nestedRecord(root, "value") ?? root;
 
   const taskId =
     firstString(data, ["taskId", "task_id", "id"]) ?? fallbackTaskId;
@@ -161,6 +154,18 @@ export function parseLoadPaperBody(
     paper_token: paperToken,
     raw_code: code,
   };
+}
+
+
+function nestedRecord(
+  root: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  const value = root[key];
+  if (value != null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
 }
 
 function numericCode(value: unknown): number | null {

@@ -24,7 +24,7 @@ export type AuthStatusResult = ToolResult & {
 };
 
 export type WeekProgressResult = ToolResult & {
-  /** @deprecated alias of listen_*; kept for backward compatibility */
+  /** Backward-compatible alias of listen_done */
   progress_done?: number;
   progress_total?: number;
   level?: string | null;
@@ -95,8 +95,6 @@ export function okAuthStatus(input: {
 
 export function okWeekProgress(input: {
   message: string;
-  progress_done: number;
-  progress_total: number;
   level: string | null;
   listen_done: number;
   listen_total: number;
@@ -108,8 +106,9 @@ export function okWeekProgress(input: {
     status: "ok",
     code: "OK",
     message: input.message,
-    progress_done: input.progress_done,
-    progress_total: input.progress_total,
+    // progress_* aliases listen_* for callers that predate twin fields
+    progress_done: input.listen_done,
+    progress_total: input.listen_total,
     level: input.level,
     listen_done: input.listen_done,
     listen_total: input.listen_total,

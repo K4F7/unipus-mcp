@@ -28,14 +28,6 @@ export function resolveWeekProgressUrl(
   return `${resolveUlsOrigin(env)}${resolveWeekProgressPath(env)}`;
 }
 
-/** H5 training APIs live on uadaptive; override with UNIPUS_ULS_ADAPTIVE_ORIGIN. */
-export function resolveAdaptiveOrigin(
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  const fromEnv = envTrim(env.UNIPUS_ULS_ADAPTIVE_ORIGIN);
-  return fromEnv != null ? fromEnv.replace(/\/+$/, "") : UADAPTIVE_ORIGIN;
-}
-
 /**
  * Speak week-progress path is **not captured** yet.
  * Only builds a URL when UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH is set;
@@ -59,6 +51,14 @@ export function resolveSpeakWeekProgressUrl(
     return null;
   }
   return `${resolveUlsOrigin(env)}${path}`;
+}
+
+/** H5 training APIs live on uadaptive; override with UNIPUS_ULS_ADAPTIVE_ORIGIN. */
+export function resolveAdaptiveOrigin(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const fromEnv = envTrim(env.UNIPUS_ULS_ADAPTIVE_ORIGIN);
+  return fromEnv != null ? fromEnv.replace(/\/+$/, "") : UADAPTIVE_ORIGIN;
 }
 
 export function resolveLoadPaperPath(

@@ -6,17 +6,13 @@ import {
   resolveSpeakWeekProgressUrl,
   resolveWeekProgressUrl,
 } from "./config.js";
-import { summarizeHttpErrorBody } from "./http.js";
+import { summarizeHttpErrorBody, type UnipusHttpResponse } from "./http.js";
 import {
   authRequired,
   okWeekProgress,
   toolError,
   type WeekProgressResult,
 } from "./result.js";
-
-/** Product weekly targets (UI 2026-09-21); not claimed as API capture. */
-export const PRODUCT_LISTEN_WEEK_TOTAL = 5;
-export const PRODUCT_SPEAK_WEEK_TOTAL = 3;
 
 export type WeekProgressPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
@@ -33,33 +29,20 @@ export async function listWeekProgress(
     return loaded.result;
   }
 
+  const authHeader = { authorization: `Bearer ${loaded.jwt}` };
   const listenUrl = ports.weekProgressUrl ?? resolveWeekProgressUrl(ports.env);
   const speakUrl =
     ports.speakWeekProgressUrl !== undefined
       ? ports.speakWeekProgressUrl
       : resolveSpeakWeekProgressUrl(ports.env);
 
-  const authHeader = { authorization: `Bearer ${loaded.jwt}` };
-
-  let listenResponse: { statusCode: number; body: string };
-  try {
-    listenResponse = await ports.http.request({
-      url: listenUrl,
-      method: "GET",
-      headers: authHeader,
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return toolError("NETWORK_ERROR", `拉取本周进度失败（网络）：${detail}`);
+  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "本周听力进度");
+  if (!listenFetch.ok) {
+    return listenFetch.error;
   }
 
-  const listenHttpError = mapHttpError(listenResponse, "本周听力进度");
-  if (listenHttpError != null) {
-    return listenHttpError;
-  }
-
-  const listenParsed = parseWeekProgressBody(listenResponse.body);
-  if (listenParsed == null || listenParsed.listen_done == null || listenParsed.listen_total == null) {
+  const listenParsed = parseWeekProgressBody(listenFetch.body);
+  if (listenParsed?.listen_done == null || listenParsed.listen_total == null) {
     return toolError(
       "PARSE_ERROR",
       "本周进度响应无法解析为 listen/progress done/total（及可选 speak_*）",
@@ -70,45 +53,22 @@ export async function listWeekProgress(
   let speakTotal = listenParsed.speak_total;
 
   if (speakUrl != null && speakUrl.length > 0) {
-    let speakResponse: { statusCode: number; body: string };
-    try {
-      speakResponse = await ports.http.request({
-        url: speakUrl,
-        method: "GET",
-        headers: authHeader,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      return toolError("NETWORK_ERROR", `拉取本周口语进度失败（网络）：${detail}`);
+    const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "本周口语进度");
+    if (!speakFetch.ok) {
+      return speakFetch.error;
     }
-    const speakHttpError = mapHttpError(speakResponse, "本周口语进度");
-    if (speakHttpError != null) {
-      return speakHttpError;
-    }
-    const speakParsed = parseWeekProgressBody(speakResponse.body);
-    if (speakParsed?.speak_done != null && speakParsed.speak_total != null) {
-      speakDone = speakParsed.speak_done;
-      speakTotal = speakParsed.speak_total;
-    } else if (
-      speakParsed?.listen_done != null &&
-      speakParsed.listen_total != null &&
-      speakDone == null
-    ) {
-      // Speak-only endpoint may reuse generic done/total keys
-      speakDone = speakParsed.listen_done;
-      speakTotal = speakParsed.listen_total;
-    } else if (speakDone == null) {
+    const merged = mergeSpeakCounts(speakDone, speakTotal, parseWeekProgressBody(speakFetch.body));
+    if (merged == null) {
       return toolError(
         "PARSE_ERROR",
         "口语周进度响应无法解析为 speak_done / speak_total",
       );
     }
+    speakDone = merged.done;
+    speakTotal = merged.total;
   }
 
-  const listenDone = listenParsed.listen_done;
-  const listenTotal = listenParsed.listen_total;
-  const level = listenParsed.level;
-
+  const { listen_done: listenDone, listen_total: listenTotal, level } = listenParsed;
   const speakSuffix =
     speakDone != null && speakTotal != null
       ? `；口语 ${speakDone}/${speakTotal}`
@@ -117,8 +77,6 @@ export async function listWeekProgress(
 
   return okWeekProgress({
     message: `本周听力 ${listenDone}/${listenTotal}${speakSuffix}${levelSuffix}`,
-    progress_done: listenDone,
-    progress_total: listenTotal,
     level,
     listen_done: listenDone,
     listen_total: listenTotal,
@@ -127,8 +85,53 @@ export async function listWeekProgress(
   });
 }
 
+async function fetchProgress(
+  ports: WeekProgressPorts,
+  url: string,
+  headers: Record<string, string>,
+  label: string,
+): Promise<{ ok: true; body: string } | { ok: false; error: WeekProgressResult }> {
+  let response: UnipusHttpResponse;
+  try {
+    response = await ports.http.request({ url, method: "GET", headers });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: toolError("NETWORK_ERROR", `拉取${label}失败（网络）：${detail}`),
+    };
+  }
+  const mapped = mapHttpError(response, label);
+  if (mapped != null) {
+    return { ok: false, error: mapped };
+  }
+  return { ok: true, body: response.body };
+}
+
+function mergeSpeakCounts(
+  existingDone: number | null,
+  existingTotal: number | null,
+  speakParsed: ParsedProgress | null,
+): { done: number; total: number } | null {
+  if (speakParsed?.speak_done != null && speakParsed.speak_total != null) {
+    return { done: speakParsed.speak_done, total: speakParsed.speak_total };
+  }
+  // Speak-only endpoint may reuse generic done/total keys (parsed as listen_*).
+  if (
+    existingDone == null &&
+    speakParsed?.listen_done != null &&
+    speakParsed.listen_total != null
+  ) {
+    return { done: speakParsed.listen_done, total: speakParsed.listen_total };
+  }
+  if (existingDone != null && existingTotal != null) {
+    return { done: existingDone, total: existingTotal };
+  }
+  return null;
+}
+
 function mapHttpError(
-  response: { statusCode: number; body: string },
+  response: UnipusHttpResponse,
   label: string,
 ): WeekProgressResult | null {
   if (response.statusCode === 401) {
@@ -157,26 +160,16 @@ type ParsedProgress = {
   level: string | null;
 };
 
-const LISTEN_DONE_KEYS = [
-  "listen_done",
-  "listenDone",
-  "listeningDone",
+const EXPLICIT_LISTEN_DONE = ["listen_done", "listenDone", "listeningDone"] as const;
+const EXPLICIT_LISTEN_TOTAL = ["listen_total", "listenTotal", "listeningTotal"] as const;
+const LEGACY_DONE = [
   "progress_done",
   "progressDone",
   "done",
   "completed",
   "finished",
 ] as const;
-const LISTEN_TOTAL_KEYS = [
-  "listen_total",
-  "listenTotal",
-  "listeningTotal",
-  "progress_total",
-  "progressTotal",
-  "total",
-  "target",
-  "goal",
-] as const;
+const LEGACY_TOTAL = ["progress_total", "progressTotal", "total", "target", "goal"] as const;
 const SPEAK_DONE_KEYS = [
   "speak_done",
   "speakDone",
@@ -198,23 +191,11 @@ const NEST_KEYS = ["data", "result", "payload", "listen", "speak", "oral"] as co
 
 /**
  * Map stable MCP fields from known aliases until the real uls schema is captured.
- * `progress_*` aliases map into listen_*; speak_* only from speak-specific keys
- * (or ratio) so a legacy single-progress body does not invent speak counts.
+ * Legacy `progress_*` / generic done+total map to listen_*; speak_* only from
+ * speak-specific keys so a single-progress body does not invent speak counts.
  */
 export function parseWeekProgressBody(body: string): ParsedProgress | null {
-  const trimmed = body.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  let value: unknown;
-  try {
-    value = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-
-  const record = asRecord(value);
+  const record = parseJsonRecord(body);
   if (record == null) {
     return null;
   }
@@ -235,89 +216,84 @@ export function parseWeekProgressBody(body: string): ParsedProgress | null {
 
   for (const candidate of candidates) {
     level ??= firstString(candidate, LEVEL_KEYS);
-
-    // Prefer speak-specific keys before generic done/total on the same object
     speakDone ??= firstNumber(candidate, SPEAK_DONE_KEYS);
     speakTotal ??= firstNumber(candidate, SPEAK_TOTAL_KEYS);
 
-    const speakRatio = firstString(candidate, SPEAK_RATIO_KEYS);
-    if (speakRatio != null && (speakDone == null || speakTotal == null)) {
-      const match = speakRatio.match(/^(\d+)\s*\/\s*(\d+)$/);
-      if (match?.[1] != null && match[2] != null) {
-        speakDone ??= Number(match[1]);
-        speakTotal ??= Number(match[2]);
-      }
+    const speakRatio = parseRatio(firstString(candidate, SPEAK_RATIO_KEYS));
+    if (speakRatio != null) {
+      speakDone ??= speakRatio.done;
+      speakTotal ??= speakRatio.total;
     }
-  }
 
-  for (const candidate of candidates) {
-    // Explicit listen_* first
-    const explicitListenDone = firstNumber(candidate, [
-      "listen_done",
-      "listenDone",
-      "listeningDone",
-    ]);
-    const explicitListenTotal = firstNumber(candidate, [
-      "listen_total",
-      "listenTotal",
-      "listeningTotal",
-    ]);
-    if (explicitListenDone != null && explicitListenTotal != null) {
-      listenDone ??= explicitListenDone;
-      listenTotal ??= explicitListenTotal;
+    const explicitDone = firstNumber(candidate, EXPLICIT_LISTEN_DONE);
+    const explicitTotal = firstNumber(candidate, EXPLICIT_LISTEN_TOTAL);
+    if (explicitDone != null && explicitTotal != null) {
+      listenDone ??= explicitDone;
+      listenTotal ??= explicitTotal;
       continue;
     }
 
-    // Legacy progress / generic done+total (listen alias)
-    const done = firstNumber(candidate, LISTEN_DONE_KEYS);
-    const total = firstNumber(candidate, LISTEN_TOTAL_KEYS);
-    // Avoid treating speak-only objects as listen when they only have speak keys
-    const onlySpeak =
+    const legacyDone = firstNumber(candidate, LEGACY_DONE);
+    const legacyTotal = firstNumber(candidate, LEGACY_TOTAL);
+    const speakOnly =
       firstNumber(candidate, SPEAK_DONE_KEYS) != null &&
-      firstNumber(candidate, [
-        "listen_done",
-        "listenDone",
-        "progress_done",
-        "progressDone",
-        "done",
-      ]) == null;
-    if (done != null && total != null && !onlySpeak) {
-      listenDone ??= done;
-      listenTotal ??= total;
+      firstNumber(candidate, [...EXPLICIT_LISTEN_DONE, ...LEGACY_DONE]) == null;
+    if (legacyDone != null && legacyTotal != null && !speakOnly) {
+      listenDone ??= legacyDone;
+      listenTotal ??= legacyTotal;
       continue;
     }
 
-    const ratio = firstString(candidate, RATIO_KEYS);
+    const ratio = parseRatio(firstString(candidate, RATIO_KEYS));
     if (ratio != null && listenDone == null) {
-      const match = ratio.match(/^(\d+)\s*\/\s*(\d+)$/);
-      if (match?.[1] != null && match[2] != null) {
-        listenDone = Number(match[1]);
-        listenTotal = Number(match[2]);
-      }
+      listenDone = ratio.done;
+      listenTotal = ratio.total;
     }
   }
 
-  if (listenDone == null || listenTotal == null) {
-    // Allow speak-only parse results (used when merging a dedicated speak response)
-    if (speakDone != null && speakTotal != null) {
-      return {
-        listen_done: null,
-        listen_total: null,
-        speak_done: speakDone,
-        speak_total: speakTotal,
-        level,
-      };
-    }
+  if (listenDone != null && listenTotal != null) {
+    return {
+      listen_done: listenDone,
+      listen_total: listenTotal,
+      speak_done: speakDone,
+      speak_total: speakTotal,
+      level,
+    };
+  }
+  // Speak-only parse (dedicated speak response merge).
+  if (speakDone != null && speakTotal != null) {
+    return {
+      listen_done: null,
+      listen_total: null,
+      speak_done: speakDone,
+      speak_total: speakTotal,
+      level,
+    };
+  }
+  return null;
+}
+
+function parseJsonRecord(body: string): Record<string, unknown> | null {
+  const trimmed = body.trim();
+  if (trimmed.length === 0) {
     return null;
   }
+  try {
+    return asRecord(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
 
-  return {
-    listen_done: listenDone,
-    listen_total: listenTotal,
-    speak_done: speakDone,
-    speak_total: speakTotal,
-    level,
-  };
+function parseRatio(value: string | null): { done: number; total: number } | null {
+  if (value == null) {
+    return null;
+  }
+  const match = value.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (match?.[1] == null || match[2] == null) {
+    return null;
+  }
+  return { done: Number(match[1]), total: Number(match[2]) };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
