@@ -13,6 +13,10 @@ import {
   uploadAnswerAudio,
   type UploadAnswerAudioPorts,
 } from "./upload-answer-audio.js";
+import {
+  submitAnswer,
+  type SubmitAnswerPorts,
+} from "./submit-answer.js";
 import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -38,9 +42,11 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
 
 export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<StartListeningPorts> &
-  Partial<UploadAnswerAudioPorts> & {
+  Partial<UploadAnswerAudioPorts> &
+  Partial<SubmitAnswerPorts> & {
     loadPaperUrl?: string;
     queryUploadUrl?: string;
+    submitAnswerUrl?: string;
   };
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
@@ -145,6 +151,54 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           filePath: args.filePath,
           fileName: args.fileName,
           openId: args.openId,
+        }),
+      ),
+  );
+
+
+  const SUBMIT_ANSWER_DESCRIPTION = [
+    "Submit U听力/U口语 answers via POST /api/uls/user/submitAnswer.",
+    "Requires paperToken from start_listening_training / loadPaper (avoids multi-device lock).",
+    "userData: [{ instanceId, answer }] — answer may be oral CDN URL (auto-wrapped) or JSON string.",
+    "Does not accept credentials (JWT from env/CLI only).",
+  ].join(" ");
+
+  const submitPorts: SubmitAnswerPorts = {
+    ...authPorts,
+    env: ports?.env,
+    submitAnswerUrl: ports?.submitAnswerUrl,
+  };
+
+  server.registerTool(
+    "submit_answer",
+    {
+      title: "Submit answer",
+      description: SUBMIT_ANSWER_DESCRIPTION,
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id from getUserStatus / loadPaper"),
+        paperToken: z
+          .string()
+          .min(1)
+          .describe("Token from loadPaper / start_listening_training"),
+        ansVersion: z.number().positive().optional().describe("Default 1"),
+        durationSec: z.number().nonnegative().optional().describe("Seconds spent; default 1"),
+        instanceId: z.string().min(1).describe("Question instance id (q_qinstid)"),
+        answer: z
+          .string()
+          .min(1)
+          .describe("Answer JSON or oral audio CDN URL (auto-wrapped as record.url)"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await submitAnswer(submitPorts, {
+          taskId: args.taskId,
+          paperToken: args.paperToken,
+          ansVersion: args.ansVersion,
+          durationSec: args.durationSec,
+          openId: args.openId,
+          userData: [{ instanceId: args.instanceId, answer: args.answer }],
         }),
       ),
   );

@@ -161,6 +161,30 @@ export function okUploadAnswerAudio(input: {
   };
 }
 
+
+export type SubmitAnswerResult = ToolResult & {
+  task_id?: string;
+  instance_id?: string;
+  raw_code?: number | null;
+};
+
+export function okSubmitAnswer(input: {
+  message: string;
+  task_id: string;
+  instance_id: string;
+  raw_code: number | null;
+}): SubmitAnswerResult {
+  return {
+    isError: false,
+    status: "ok",
+    code: "OK",
+    message: input.message,
+    task_id: input.task_id,
+    instance_id: input.instance_id,
+    raw_code: input.raw_code,
+  };
+}
+
 export function toMcpToolResponse(result: ToolResult) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(result) }],

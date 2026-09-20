@@ -138,3 +138,24 @@ SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-lo
 
 Week progress: `POST /api/uls/report/listen/trainingReport` returns `weeklyCompleted` / `weeklyTarget` (often 0 until a paper is finished). Speak week path still unset.
 
+### submitAnswer (2026-09-21 live)
+
+`POST /api/uls/user/submitAnswer` with raw JWT + body:
+
+```json
+{
+  "taskId": "...",
+  "ansVersion": 1,
+  "token": "<loadPaper token>",
+  "duration": 3,
+  "userData": [{
+    "instanceId": "<q_qinstid>",
+    "answer": "{\"value\":[],\"children\":[],\"record\":{\"url\":\"<cdn>\"}}",
+    "answerVersion": 1,
+    "context": "{\"state\":\"done\"}",
+    "contextVersion": 1
+  }]
+}
+```
+
+Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).

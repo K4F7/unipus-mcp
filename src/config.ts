@@ -98,3 +98,20 @@ export function resolveQueryUploadUrl(
 ): string {
   return `${resolveAdaptiveOrigin(env)}${resolveQueryUploadUrlPath(env)}`;
 }
+
+/** SPA-confirmed submit path (2026-09-21 live). */
+export const DEFAULT_ULS_SUBMIT_ANSWER_PATH = "/api/uls/user/submitAnswer";
+
+export function resolveSubmitAnswerPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_SUBMIT_ANSWER_PATH) ?? DEFAULT_ULS_SUBMIT_ANSWER_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveSubmitAnswerUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveSubmitAnswerPath(env)}`;
+}
