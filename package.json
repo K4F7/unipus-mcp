@@ -8,9 +8,19 @@
     "unipus-mcp": "./dist/index.js"
   },
   "scripts": {
+    "start": "node --import tsx src/stdio.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js 2>/dev/null || node --test"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "tsx": "4.20.5",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=20"
