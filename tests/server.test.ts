@@ -14,6 +14,7 @@ const EXPECTED_TOOLS = [
   "start_listening_training",
   "upload_answer_audio",
   "submit_answer",
+  "speak_and_submit",
 ] as const;
 
 function makeJwt(payload: Record<string, unknown>): string {

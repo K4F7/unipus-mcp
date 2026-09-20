@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "U\u6821\u56edAI / U\u542c\u8bf4 local stdio MCP",
+  "description": "U校园AI / U听说 local stdio MCP",
   "bin": {
     "unipus-mcp": "./dist/index.js"
   },
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "node-edge-tts": "^1.2.10",
     "tsx": "4.20.5",
     "zod": "3.25.76"
   },

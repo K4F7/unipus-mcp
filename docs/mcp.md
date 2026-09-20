@@ -165,3 +165,11 @@ Submit one answer after silent upload:
 - Requires `paperToken` from `start_listening_training` / loadPaper (raw JWT alone is not enough).
 - Args: `taskId`, `paperToken`, `instanceId`, `answer` (oral CDN URL auto-wrapped as `{record:{url}}`), optional `ansVersion` / `durationSec`.
 - Live-confirmed 2026-09-21: `POST /api/uls/user/submitAnswer` returns `code:1`.
+
+## `speak_and_submit`
+
+One-shot silent oral path: Edge TTS → 16 kHz mono WAV → `upload_answer_audio` → `submit_answer`.
+
+- Args: `text`, `taskId`, `paperToken`, `instanceId`; optional `voice` (default `en-US-JennyNeural`), `ansVersion`, `durationSec`, `openId`.
+- Needs `ffmpeg` on PATH and network for Edge TTS + Qiniu.
+- Prefer this over speaker/mic inject.

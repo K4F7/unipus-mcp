@@ -37,4 +37,4 @@
 - PCAPdroid Control API + mitm addon: VPN starts; **TLS decrypt yields no HTTP payloads** (Connections → HTTP 请求 = 空). Likely **cert pinning** in App/WebView. SNI only: `uadaptive.unipus.cn`, `speech.unipus.cn`, `clio-audios.unipus.cn`, `up-z1.qiniup.com`.
 - SPA static: `POST /api/uls/user/answer/query-upload-url` → Qiniu form upload (`token`,`key`,`file`) → `submitAnswer`.
 - JWT via SSO CLI (`scripts/sso-login.ts`) + MCP `upload_answer_audio` (query-upload-url → Qiniu) **implemented 2026-09-21**.
-- Next: wire TTS → upload → `submitAnswer` (needs loadPaper token); speak week-progress path still open.
+- Done: MCP `speak_and_submit` (Edge TTS → upload → submit_answer). Speak week-progress path still open.

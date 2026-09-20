@@ -116,7 +116,7 @@ export async function uploadAnswerAudio(
   form.append("key", cred.path);
   form.append(
     "file",
-    new Blob([Uint8Array.from(bytes.buffer)], { type: guessAudioMime(fileName) }),
+    new Blob([bytes], { type: guessAudioMime(fileName) }),
     fileName,
   );
 

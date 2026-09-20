@@ -17,6 +17,10 @@ import {
   submitAnswer,
   type SubmitAnswerPorts,
 } from "./submit-answer.js";
+import {
+  speakAndSubmit,
+  type SpeakAndSubmitPorts,
+} from "./speak-and-submit.js";
 import { z } from "zod";
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -43,7 +47,8 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
 export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<StartListeningPorts> &
   Partial<UploadAnswerAudioPorts> &
-  Partial<SubmitAnswerPorts> & {
+  Partial<SubmitAnswerPorts> &
+  Partial<SpeakAndSubmitPorts> & {
     loadPaperUrl?: string;
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
@@ -199,6 +204,52 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           durationSec: args.durationSec,
           openId: args.openId,
           userData: [{ instanceId: args.instanceId, answer: args.answer }],
+        }),
+      ),
+  );
+
+
+  const SPEAK_AND_SUBMIT_DESCRIPTION = [
+    "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
+    "Requires paperToken from start_listening_training / loadPaper.",
+    "Args: text, taskId, paperToken, instanceId; optional voice / ansVersion / durationSec / openId.",
+    "Needs ffmpeg on PATH. Does not accept credentials.",
+  ].join(" ");
+
+  const speakPorts: SpeakAndSubmitPorts = {
+    ...authPorts,
+    env: ports?.env,
+    queryUploadUrl: ports?.queryUploadUrl,
+    submitAnswerUrl: ports?.submitAnswerUrl,
+  };
+
+  server.registerTool(
+    "speak_and_submit",
+    {
+      title: "Speak and submit",
+      description: SPEAK_AND_SUBMIT_DESCRIPTION,
+      inputSchema: {
+        text: z.string().min(1).describe("Text to speak (TTS)"),
+        taskId: z.string().min(1),
+        paperToken: z.string().min(1).describe("Token from loadPaper"),
+        instanceId: z.string().min(1).describe("Question instance id"),
+        voice: z.string().optional().describe("edge-tts voice; default en-US-JennyNeural"),
+        ansVersion: z.number().positive().optional(),
+        durationSec: z.number().nonnegative().optional(),
+        openId: z.string().optional(),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await speakAndSubmit(speakPorts, {
+          text: args.text,
+          taskId: args.taskId,
+          paperToken: args.paperToken,
+          instanceId: args.instanceId,
+          voice: args.voice,
+          ansVersion: args.ansVersion,
+          durationSec: args.durationSec,
+          openId: args.openId,
         }),
       ),
   );
