@@ -4,14 +4,14 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` **默认按付费账号**：`getUserStatus?flowType=listen` → `POST /api/uls/report/listen/trainingReport`，字段 `weeklyCompleted`/`weeklyTarget`/`weeklyProgress`（例 5/5）。activation/status 的 `*TrialUsed`/`trialUsageLimit` 仅作**试用可选**；解锁后为 null 时不得 PARSE_ERROR。口语付费周 path **BLOCKED**（SPA 无 `/report/speak/trainingReport`，对称猜测 404；需设备抓包）→ `speak_*` 保持 null（勿编造 3）。详见 `docs/api-notes.md`「BLOCKED: paid speak weekly progress」。`start_listening_training` 已实现：`POST /api/uls/user/loadPaper`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活。`list_week_progress` 默认对听力和口语各请求一次 `GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen|speak`。本周计数是 `weekDoneTaskCount`，达标数是 `weekFrequency`。不要把 3 或 6 写死。`weekTotalTaskCount` 不是这两个数。试用账号仍可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` 走 activation。`start_listening_training` 已实现：`POST /api/uls/user/loadPaper`。
 
 ## 工具
 
 | 工具 | 说明 |
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
-| `list_week_progress` | 本周听+口（**付费默认** trainingReport）：`listen_done`/`listen_total` 来自 `weeklyCompleted`/`weeklyTarget`；`speak_done`/`speak_total` 仅试用 activation 有值时填充，付费口语周 **BLOCKED**→`null`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
+| `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
@@ -44,13 +44,11 @@
 
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
-`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`（口语未知时为 `null`），以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。
+`list_week_progress` 成功时带：`listen_done`/`listen_total`、`speak_done`/`speak_total`，以及兼容别名 `progress_done`/`progress_total`/`level`（= 听力）。
 
-**付费默认（推荐）**：uadaptive **raw JWT** → `GET /api/uls/user/getUserStatus?flowType=listen` 取 `taskId` → `POST /api/uls/report/listen/trainingReport` `{ taskId, ansVersion }` → `weeklyCompleted`/`weeklyTarget`/`weeklyProgress`。进行中试卷可能 `weeklyTarget=0`，此时用产品听力周配额 **5** 补全 total（不编造口语 3）。
+**默认**：ucloud **raw JWT** → `GET /api/uls/user/getUserStatusForApp?flowType=listen` 和 `flowType=speak`。`*_done` 是 `weekDoneTaskCount`（界面「本周总计」），`*_total` 是 `weekFrequency`（达标数，`weekDoneTaskCount >= weekFrequency` 即已达标）。数字从响应读取，不写死 3 或 6。
 
-**试用可选**：`GET /api/uls/user/activation/status` 的 `listenTrialUsed`/`speakTrialUsed`/`trialUsageLimit`；仅当数值存在时填入；null 不致 PARSE_ERROR。强制旧单 GET：设 `UNIPUS_ULS_WEEK_PROGRESS_PATH` 或 `weekProgressUrl`。
-
-仅当设置 `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH` 时才二次拉口语；失败则 `speak_*=null`。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
+**试用可选**：`GET /api/uls/user/activation/status` 的 `listenTrialUsed`/`speakTrialUsed`/`trialUsageLimit`。强制旧单 GET：设 `UNIPUS_ULS_WEEK_PROGRESS_PATH` 或 `weekProgressUrl`。网络失败为 `status: "error"` / `code: "NETWORK_ERROR"`。
 
 ## 安装
 
@@ -152,7 +150,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 
 - 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
 - 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
-- 进度路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_ORIGIN`（若设置则覆盖进度 host）、`UNIPUS_ULS_USER_STATUS_PATH`（默认 `/api/uls/user/getUserStatus`）、`UNIPUS_ULS_LISTEN_TRAINING_REPORT_PATH`（默认 `/api/uls/report/listen/trainingReport`）、`UNIPUS_ULS_WEEK_PROGRESS_PATH`（若设置则**强制** legacy 单 GET，默认值 `/api/uls/user/activation/status`）、`UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`（可选口语二次请求；通常不必设）。Authorization 为**原始 JWT**（不加 `Bearer `）。
+- 进度路径（可选）：默认 host `https://ucloud.unipus.cn`（`UNIPUS_ULS_ORIGIN` 可覆盖），path `UNIPUS_ULS_USER_STATUS_FOR_APP_PATH`（默认 `/api/uls/user/getUserStatusForApp`）。`UNIPUS_ULS_WEEK_PROGRESS_PATH` 若设置则**强制** legacy 单 GET。Authorization 为**原始 JWT**（不加 `Bearer `）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。
 

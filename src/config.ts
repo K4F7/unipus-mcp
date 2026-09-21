@@ -2,15 +2,22 @@ import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
  * Legacy single-GET progress probe (trial accounts): activation/status.
- * Paid default for list_week_progress is multi-step trainingReport (see
- * resolveUserStatusUrl / resolveListenTrainingReportUrl). Set
- * UNIPUS_ULS_WEEK_PROGRESS_PATH or ports.weekProgressUrl to force this legacy GET.
+ * Paid default for list_week_progress is getUserStatusForApp (see
+ * resolveUserStatusForAppUrl). Set UNIPUS_ULS_WEEK_PROGRESS_PATH or
+ * ports.weekProgressUrl to force this legacy GET.
  * Host: UNIPUS_ULS_ORIGIN if set, else UNIPUS_ULS_ADAPTIVE_ORIGIN / uadaptive.
  */
 export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/user/activation/status";
 
 /** Paid listen week: getUserStatus?flowType=listen → taskId for trainingReport. */
 export const DEFAULT_ULS_USER_STATUS_PATH = "/api/uls/user/getUserStatus";
+
+/**
+ * Homepage 本周计数 / 达标数 for listen and speak.
+ * GET on ucloud: weekDoneTaskCount / weekFrequency. flowType=listen|speak.
+ */
+export const DEFAULT_ULS_USER_STATUS_FOR_APP_PATH =
+  "/api/uls/user/getUserStatusForApp";
 
 /** Paid listen week report (verified): weeklyCompleted / weeklyTarget / weeklyProgress. */
 export const DEFAULT_ULS_LISTEN_TRAINING_REPORT_PATH =
@@ -72,6 +79,25 @@ export function resolveUserStatusPath(
   const path =
     envTrim(env.UNIPUS_ULS_USER_STATUS_PATH) ?? DEFAULT_ULS_USER_STATUS_PATH;
   return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveUserStatusForAppPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_USER_STATUS_FOR_APP_PATH) ??
+    DEFAULT_ULS_USER_STATUS_FOR_APP_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+/** GET getUserStatusForApp?flowType=listen|speak on ucloud (UNIPUS_ULS_ORIGIN). */
+export function resolveUserStatusForAppUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  flowType: "listen" | "speak",
+): string {
+  const base = `${resolveUlsOrigin(env)}${resolveUserStatusForAppPath(env)}`;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}flowType=${encodeURIComponent(flowType)}`;
 }
 
 /** GET getUserStatus?flowType=listen|speak on adaptive host. */

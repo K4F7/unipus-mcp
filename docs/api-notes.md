@@ -56,19 +56,23 @@ SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capt
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Paid default (listen)** | **`GET getUserStatus?flowType=listen` → `POST /api/uls/report/listen/trainingReport`** | Live 2026-09-21 (paid/unlocked): `weeklyCompleted` / `weeklyTarget` / `weeklyProgress` (e.g. **5/5**). In-progress paper may return `weeklyTarget=0` while `weeklyCompleted` stays valid — MCP then fills total with product listen quota **5**. Host **uadaptive**, raw JWT. |
-| Trial optional | **`GET /api/uls/user/activation/status`** | `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` = **本周试用进度** (e.g. speak 2/3). Trial UI `tvWeekProgress` aligned. After unlock these fields are **null** — must **not** PARSE_ERROR. Force legacy single-GET via `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `weekProgressUrl`. |
-| Speak dedicated path | Optional env | `UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH`; paid speak week path **BLOCKED** (static+probe 2026-09-21) — leave `speak_*` null (do **not** invent 3). |
+| **Homepage week (listen + speak)** | **`GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen` and `flowType=speak`** | Captured 2026-09-21 from official app 2.8.4. 本周计数 = `value.weekDoneTaskCount`. 达标数 = `value.weekFrequency`. `weekTotalTaskCount` is a third field and is not either of those. Raw JWT, no Bearer. Do not hardcode 3 or 6. |
+| Trial optional | **`GET /api/uls/user/activation/status`** | `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` = **本周试用进度**. Force legacy single-GET via `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `weekProgressUrl`. |
+| trainingReport | Not the homepage counter | `POST /api/uls/report/listen/trainingReport` still exists on uadaptive. `speak/trainingReport` and `oral/trainingReport` are 404. Homepage 本周总计 does not come from those. |
 | Task-card % | Separate | Chapter completion (e.g. 0%), not week counters. |
 
-MCP `list_week_progress` fields (**default = paid trainingReport listen**):
+MCP `list_week_progress` fields (**default = getUserStatusForApp**):
 
-- `listen_done` / `listen_total` — trainingReport `weeklyCompleted` / `weeklyTarget` (fallback: trial `listenTrialUsed` / `trialUsageLimit`)
-- `speak_done` / `speak_total` — trial `speakTrialUsed` / `trialUsageLimit` when present; otherwise **`null`** (**BLOCKED**: paid speak week path not in SPA; needs device capture)
+- `listen_done` / `speak_done` — `weekDoneTaskCount`（本周计数，界面「本周总计 N次」）
+- `listen_total` / `speak_total` — `weekFrequency`（达标数）
 - `progress_done` / `progress_total` / `level` — **backward-compatible aliases** of listen
-- Default user going forward is **paid**; trial counters are optional only
+- One capture: listen 5/5 (`weekDoneTaskCount`/`weekFrequency`, `weekTotalTaskCount` was 6); speak 6/3 (`weekTotalTaskCount` was 7). Those samples are not constants.
 
-### BLOCKED: paid speak weekly progress (App ~3/week)
+### Homepage week counters (captured)
+
+Official app homepage uses `getUserStatusForApp`, not `trainingReport`. The notes below are the earlier probes that did not find this path.
+
+### Earlier probes (trainingReport is not the homepage counter)
 
 **Status (2026-09-21):** path **not findable** from H5 SPA static + JWT probes. Do **not** wire guessed paths. Needs **unipus device capture** (PCAPdroid / Frida) while opening 口语首页 so `tvWeekProgress` (native UTSS) refreshes.
 
@@ -109,12 +113,12 @@ MCP `list_week_progress` fields (**default = paid trainingReport listen**):
 
 | Module | Weekly target | UI signal (2026-09-21 phone) |
 |--------|---------------|------------------------------|
-| 听力 U听力 | **5** / week | Home / 听力 tab (capture remaining into `list_week_progress`) |
-| 口语 U口语 | **3** / week | Paid weekly quota path **BLOCKED** — SPA 无对称 trainingReport；需设备抓包（见上节）。 |
+| 听力 U听力 | `weekFrequency` | 本周计数 `weekDoneTaskCount`。一次抓包是 5 和 5。 |
+| 口语 U口语 | `weekFrequency` | 本周计数 `weekDoneTaskCount`。一次抓包是 6 和 3。 |
 
 Note: 口语首页 `tvWeekProgress` (e.g. **2/3**) **matches** activation `speakTrialUsed`/`trialUsageLimit` on trial accounts. Task-card **0%** is chapter completion (old UI said 0/3).
 
-`list_week_progress` → **付费默认** trainingReport listen week；activation trial 字段可选；口语付费周 **BLOCKED** → speak 保持 null.
+`list_week_progress` 默认两次 `getUserStatusForApp`，听力和口语都返回本周计数和达标数。
 
 ## 口语 SPA routes (static)
 
@@ -156,7 +160,7 @@ MVP acceptance: one 跟读/口头填空/口语题 auto-filled by generated audio
 - `GET/POST` 族 `/api/uls/oral/train?ansVersion&questionId&taskId&openId…`
 - `POST /api/uls/user/answer/query-upload-url`（拿上传凭证，注音/无头上传答案用）
 
-付费周额度目标：听力 **5**（trainingReport 已验证）、口语 **3**（**BLOCKED**，勿编造）。MCP `list_week_progress` 默认 = **付费** listen trainingReport；activation = 试用可选；speak_* 付费仍 null。
+本周计数和达标数都从 `getUserStatusForApp` 读：`weekDoneTaskCount` / `weekFrequency`。听力和口语各一次。不要写死 3 或 6。
 
 
 ## Silent audio upload (2026-09-21 live)
@@ -173,7 +177,7 @@ MCP tool: `upload_answer_audio` (filePath → storage_key + cdn_url). Does **not
 
 SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-login.ts` writes `~/.config/unipus-mcp/jwt`.
 
-Progress probe (paid default): `getUserStatus?flowType=listen` + `POST .../listen/trainingReport` on uadaptive with **raw JWT** → `weeklyCompleted` / `weeklyTarget`. Trial: activation/status `*TrialUsed` / `trialUsageLimit` optional (null after unlock OK). Speak paid week **BLOCKED** (needs device capture; see section above).
+Progress probe (default): `GET /api/uls/user/getUserStatusForApp?flowType=listen` and `flowType=speak` on ucloud with **raw JWT** → `weekDoneTaskCount` / `weekFrequency`. Trial activation remains the legacy single-GET.
 
 ### submitAnswer (2026-09-21 live)
 
