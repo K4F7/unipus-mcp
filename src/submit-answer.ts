@@ -163,6 +163,17 @@ export async function submitAnswer(
 
   const parsed = parseSubmitAnswerBody(response.body);
   if (parsed == null) {
+    const biz = readSubmitBusinessFailure(response.body);
+    if (biz != null) {
+      const hint =
+        biz.code === 4295
+          ? "（定级卷需全卷 userData，且每题 answer.children 长度对齐小题数；见 placement-paper helpers）"
+          : "";
+      return toolError(
+        "BUSINESS_ERROR",
+        `submitAnswer 业务失败 code=${biz.code}${biz.msg != null ? `：${biz.msg}` : ""}${hint}`,
+      );
+    }
     return toolError(
       "PARSE_ERROR",
       "submitAnswer 响应无法解析为业务成功",
@@ -220,6 +231,41 @@ function normalizeContext(
   }
   const trimmed = context.trim();
   return trimmed.length > 0 ? trimmed : JSON.stringify({ state: "done" });
+}
+
+
+export function readSubmitBusinessFailure(
+  body: string,
+): { code: number; msg: string | null } | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (data == null || typeof data !== "object" || Array.isArray(data)) {
+    return null;
+  }
+  const record = data as Record<string, unknown>;
+  const code = record.code;
+  const n =
+    typeof code === "number"
+      ? code
+      : typeof code === "string" &&
+          code.trim() !== "" &&
+          !Number.isNaN(Number(code))
+        ? Number(code)
+        : null;
+  if (n == null || n === 0 || n === 1 || n === 200) {
+    return null;
+  }
+  const msg =
+    typeof record.msg === "string"
+      ? record.msg
+      : typeof record.message === "string"
+        ? record.message
+        : null;
+  return { code: n, msg };
 }
 
 export function parseSubmitAnswerBody(

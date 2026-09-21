@@ -254,3 +254,86 @@ SPA passes `appKey`/`appSecret` into SOE `initConfig` — **not present in main 
 - Leftover for unipus: treat `aiengine.provision` as **native/Chivox stub**; do not fake `EN_SENT_SCORE`. CDN-url-only grade still often score=0 without Clio scores.
 
 MCP: `score_speech` ships the Clio WSS path; `grade_question` stays separate (persist).
+
+## Placement / 定级 completion path (SPA reverse 2026-09-21)
+
+Source: `uadaptive` chunks `mobile-speak-placement-*.js` / `mobile-listen-placement-*.js` + main `index-*.js` API map. **No skip/bypass API** in SPA (no `skipPlacement` / 免测 / 跳过定级).
+
+### sourceBizType → route
+
+| sourceBizType | 卷种 | 进入 |
+|---------------|------|------|
+| 101 | 听力定级 | `/placement/listen` (auto: `/placement/auto`) |
+| 102 | 听力诊断 | `/diagnosis/listen` |
+| 103 | 听力训练 | `/listen/guide` |
+| 104 | 口语定级 | `/placement/speak` (auto: `/placement/auto`) |
+| 106 | 口语训练 | `/speak/training` |
+
+### getUserStatus: `type=grade` → `train`
+
+`GET /api/uls/user/getUserStatus?flowType=` (`listen` / `speak` / `trial-speak`).
+
+Normalized value: `{ type, taskId, ansVersion, status }` where `status` prefers `testStatus` then `status`.
+
+| `type` | Client meaning |
+|--------|----------------|
+| `grade` | 定级中；`status` 映射阶段 |
+| `grade_profile` / `train_plan` | 定级后报告/计划 |
+| `train` | 周训已解锁（听力入口遇此 type →「当前不在定级阶段」） |
+| `diagnosis` | 诊断阶段 |
+
+`type=grade` 时 `status`：
+
+| status | UI stage |
+|--------|----------|
+| 0 | `device`（设备/麦克风检测） |
+| 1 | `answer`（作答中；设备观察 speak task 常停在此） |
+| 2 | `report`（交卷成功后看定级报告） |
+
+**Flip `grade` → `train` is server-side** after a successful **full-paper** `submitAnswer` (and backend settling). Client re-fetches `getUserStatus`; there is no client-only flip API.
+
+Post-placement reports (after status=2):
+
+- Speak: `GET /api/uls/report/oralLevelReport`
+- Listen: `POST /api/uls/report/levelReport`
+
+### Exam API sequence (placement)
+
+Placement **does not** finish via `gradeQuestion` or `part/submit`. Chunk has **no** `gradeQuestion` calls.
+
+1. `POST /api/uls/user/loadPaper` `{ taskId, ansVersion }` → `token` + `paperJson`
+2. While answering: `POST /api/uls/user/saveSnapshot` (partial `userData`, non-empty answers only); keepalive on hide
+3. Final 交卷: `POST /api/uls/user/submitAnswer` with **full** `userData` (every leaf instance) + loadPaper `token` + `duration`
+4. On success → local examStatus `done` → finish callback → UI `report`; later `getUserStatus` shows `status=2` then eventually `type=train`
+
+`part/get` / `part/submit` / `part/submit-question` are for **口语训练首页 part 树**（`skillType` train），不是定级交卷路径。
+
+### Why `submitAnswer` → **4295** 「作答小题数存在问题」
+
+SPA `submitExam` before POST:
+
+1. Builds `userData` from **all** `answers` parallel to paper questions (not a single item).
+2. Runs reconcile `k(questions, answers)`: for each answer whose paper leaf has `data.children.length > 1`, pads `answer.children` to that length (`w()` oral/objective stubs). Logs `[SUBMIT_ANSWER_RECONCILED]` when repaired.
+
+Server 4295 (not present in SPA client map) = **sub-question count mismatch**:
+
+- `userData.length` ≠ paper leaf count (e.g. headless submit of **one** instance on a multi-question placement paper), and/or
+- some `answer` JSON has `children.length` **&lt;** paper expected sub-questions.
+
+Helpers (pure, unit-tested): `listPlacementQuestions` / `reconcileAnswerChildren` / `buildPlacementUserData` / `diagnosePlacementSubmitCoverage` in `src/placement-paper.ts`. `submit_answer` now surfaces `BUSINESS_ERROR` with code/msg (4295 includes placement hint).
+
+### Why `gradeQuestion` returns empty shell on placement items
+
+Observed: `code=SUCCESS` but `userId=""`, `questionInstanceId=0`, `score=null` on listen+speak placement items.
+
+SPA placement chunks **never call** `gradeQuestion`. Main bundle normalizer `Y()` would coerce missing score → `0` and stringify ids — empty fields are **from the server**, not client parse loss.
+
+Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack/shell until the paper is closed by `submitAnswer` (and/or report pipeline). It is **not** evidence of wrong EN_SENT_SCORE children shape (PR#12 shape is still correct for train). Completing placement requires full-paper submit, not repeated gradeQuestion.
+
+### Ready notes for unipus (device)
+
+1. `getUserStatus` until `type=grade` & `status=1` with speak/listen `taskId`.
+2. `loadPaper` that task → list leaves via `listPlacementQuestions(paperJson)`.
+3. For **every** leaf: Clio `score_speech` → Qiniu → children-shaped answer; `reconcileAnswerChildren` / `buildPlacementUserData`.
+4. `diagnosePlacementSubmitCoverage` must be `ok` before `submit_answer` (multi-item `userData` + paperToken).
+5. Re-`getUserStatus`: expect `status=2` then `type=train` (week 5听/3口). Do **not** invent purchase/skip hacks; `isPurchased=0` trial is fine once type flips.

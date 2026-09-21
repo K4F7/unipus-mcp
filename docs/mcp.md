@@ -199,3 +199,12 @@ Headless Clio sentence score over `wss://speech.unipus.cn/speech/proxy/wss` (`en
 - Returns `overall` / `total`, `audio_url` (clio-audios CDN), `en_sent_score_content` / `en_sent_score_record` for `grade_question` / `submit_answer` (children-shaped; pass Qiniu URL via `clioToEnSentScoreFields` `qiniuUrl` for production path/url split).
 - Live smoke: `UNIPUS_CLIO_LIVE_SMOKE=1 npx tsx scripts/clio-score-smoke.ts ["hello world"]`.
 - initialize/v2 appKey rotation and native `aiengine.provision` — see `docs/api-notes.md` (provision = native TBD; not in soe-sdk JS).
+
+
+## Placement / 定级（无新 MCP 工具）
+
+定级交卷路径见 `docs/api-notes.md`「Placement / 定级 completion path」。纯函数 helper：`src/placement-paper.ts`（`listPlacementQuestions` / `buildPlacementUserData` / `diagnosePlacementSubmitCoverage`）。
+
+- 单题 `grade_question` 在定级卷上常返回空壳（`userId=""` / `questionInstanceId=0` / `score=null`）——**预期**，不能代替交卷。
+- 单条 `submit_answer` 对多小题定级卷 → 业务码 **4295**「作答小题数存在问题」；需全卷 `userData` 且 `children` 对齐。`submit_answer` 现会以 `BUSINESS_ERROR` 打出 code/msg。
+- `type=grade` → `train` 由服务端在全卷 `submitAnswer` 成功后翻转；无 skip API。

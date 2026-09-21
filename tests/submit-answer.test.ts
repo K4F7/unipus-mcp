@@ -102,4 +102,31 @@ describe("submitAnswer", () => {
     const answer = JSON.parse(body.userData[0].answer);
     assert.equal(answer.record.url, "https://birdflock.unipus.cn/a.wav");
   });
+
+  test("surfaces business code 4295 with placement hint", async () => {
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 4295,
+        msg: "作答小题数存在问题",
+      }),
+    }));
+    const r = await submitAnswer(
+      {
+        credentials: { getJwt: async () => "jwt-x" },
+        http,
+        submitAnswerUrl: "https://example.test/submitAnswer",
+      },
+      {
+        taskId: "t1",
+        paperToken: "tok",
+        userData: [{ instanceId: "1", answer: '{"value":[],"children":[]}' }],
+      },
+    );
+    assert.equal(r.isError, true);
+    assert.equal(r.code, "BUSINESS_ERROR");
+    assert.match(r.message, /4295/);
+    assert.match(r.message, /作答小题数存在问题/);
+    assert.match(r.message, /placement-paper/);
+  });
 });
