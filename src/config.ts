@@ -90,6 +90,16 @@ export function resolveUserStatusForAppPath(
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+/**
+ * Server-side sourceId for getUserStatusForApp. The app sends it as header
+ * `u-app-id`, not as a query parameter. 116 is cn.unipus.cloud's app id.
+ */
+export const DEFAULT_U_APP_ID = "116";
+
+export function resolveUAppId(env: NodeJS.ProcessEnv = process.env): string {
+  return envTrim(env.UNIPUS_U_APP_ID) ?? DEFAULT_U_APP_ID;
+}
+
 /** GET getUserStatusForApp?flowType=listen|speak on ucloud (UNIPUS_ULS_ORIGIN). */
 export function resolveUserStatusForAppUrl(
   env: NodeJS.ProcessEnv = process.env,

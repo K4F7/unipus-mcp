@@ -44,6 +44,7 @@ const LIST_WEEK_PROGRESS_DESCRIPTION = [
   "达标数 = weekFrequency (listen_total / speak_total).",
   "Read both from the response. Do not hardcode 3 or 6. weekTotalTaskCount is not either number.",
   "Legacy single-GET: set UNIPUS_ULS_WEEK_PROGRESS_PATH or ports.weekProgressUrl.",
+  "Also send header u-app-id (default 116, override UNIPUS_U_APP_ID). That value is the server's sourceId.",
   "progress_* aliases listen. Auth: raw JWT (no Bearer). Host: UNIPUS_ULS_ORIGIN or ucloud.",
 ].join(" ");
 

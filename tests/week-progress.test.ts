@@ -381,8 +381,8 @@ describe("listWeekProgress paid getUserStatusForApp path", () => {
     listen?: Record<string, unknown>;
     speak?: Record<string, unknown>;
     speakStatus?: number;
-  }): UnipusHttp & { calls: Array<{ url: string; method: string; body?: string; authorization?: string }> } {
-    const calls: Array<{ url: string; method: string; body?: string; authorization?: string }> = [];
+  }): UnipusHttp & { calls: Array<{ url: string; method: string; body?: string; authorization?: string; appId?: string }> } {
+    const calls: Array<{ url: string; method: string; body?: string; authorization?: string; appId?: string }> = [];
     return {
       calls,
       async request(input) {
@@ -392,6 +392,7 @@ describe("listWeekProgress paid getUserStatusForApp path", () => {
           method,
           body: input.body,
           authorization: input.headers?.authorization,
+          appId: input.headers?.["u-app-id"],
         });
         if (input.url.includes("flowType=speak")) {
           if (handlers.speakStatus != null) {
@@ -454,7 +455,27 @@ describe("listWeekProgress paid getUserStatusForApp path", () => {
     assert.ok(http.calls.some((c) => c.url.includes("flowType=listen")));
     assert.ok(http.calls.some((c) => c.url.includes("flowType=speak")));
     assert.ok(http.calls.every((c) => c.authorization === jwt));
+    assert.ok(http.calls.every((c) => c.appId === "116"));
     assert.ok(!http.calls.some((c) => c.url.includes("trainingReport")));
+  });
+
+  test("UNIPUS_U_APP_ID overrides the u-app-id header", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = paidHttp({});
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: { UNIPUS_U_APP_ID: "116" },
+    });
+    assert.equal(result.isError, false);
+    assert.ok(http.calls.every((c) => c.appId === "116"));
+    const custom = paidHttp({});
+    await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http: custom,
+      env: { UNIPUS_U_APP_ID: "20840" },
+    });
+    assert.ok(custom.calls.every((c) => c.appId === "20840"));
   });
 
   test("legacy forced URL with only null trials still PARSE_ERROR (no invented speak 3)", async () => {

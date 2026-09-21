@@ -56,7 +56,7 @@ SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capt
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Homepage week (listen + speak)** | **`GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen` and `flowType=speak`** | Captured 2026-09-21 from official app 2.8.4. 本周计数 = `value.weekDoneTaskCount`. 达标数 = `value.weekFrequency`. `weekTotalTaskCount` is a third field and is not either of those. Raw JWT, no Bearer. Do not hardcode 3 or 6. |
+| **Homepage week (listen + speak)** | **`GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen` and `flowType=speak`** | Captured 2026-09-21 from official app 2.8.4. Header `u-app-id: 116` is required (`sourceId`). 本周计数 = `value.weekDoneTaskCount`. 达标数 = `value.weekFrequency`. `weekTotalTaskCount` is a third field and is not either of those. Raw JWT, no Bearer. Do not hardcode 3 or 6. |
 | Trial optional | **`GET /api/uls/user/activation/status`** | `listenTrialUsed` / `speakTrialUsed` / `trialUsageLimit` = **本周试用进度**. Force legacy single-GET via `UNIPUS_ULS_WEEK_PROGRESS_PATH` / `weekProgressUrl`. |
 | trainingReport | Not the homepage counter | `POST /api/uls/report/listen/trainingReport` still exists on uadaptive. `speak/trainingReport` and `oral/trainingReport` are 404. Homepage 本周总计 does not come from those. |
 | Task-card % | Separate | Chapter completion (e.g. 0%), not week counters. |

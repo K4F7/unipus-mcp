@@ -5,6 +5,7 @@ import {
 import {
   hasExplicitWeekProgressPath,
   resolveSpeakWeekProgressUrl,
+  resolveUAppId,
   resolveUserStatusForAppUrl,
   resolveWeekProgressUrl,
 } from "./config.js";
@@ -118,8 +119,9 @@ async function listWeekProgressPaid(
 ): Promise<WeekProgressResult> {
   const listenUrl = resolveUserStatusForAppUrl(ports.env, "listen");
   const speakUrl = resolveUserStatusForAppUrl(ports.env, "speak");
+  const headers = { ...authHeader, "u-app-id": resolveUAppId(ports.env) };
 
-  const listenFetch = await fetchProgress(ports, listenUrl, authHeader, "听力本周");
+  const listenFetch = await fetchProgress(ports, listenUrl, headers, "听力本周");
   if (!listenFetch.ok) {
     return listenFetch.error;
   }
@@ -131,7 +133,7 @@ async function listWeekProgressPaid(
     );
   }
 
-  const speakFetch = await fetchProgress(ports, speakUrl, authHeader, "口语本周");
+  const speakFetch = await fetchProgress(ports, speakUrl, headers, "口语本周");
   if (!speakFetch.ok) {
     return speakFetch.error;
   }
