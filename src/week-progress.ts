@@ -3,11 +3,10 @@ import {
   type AuthPorts,
 } from "./auth.js";
 import {
-  PAID_LISTEN_WEEK_TARGET,
   hasExplicitWeekProgressPath,
-  resolveListenTrainingReportUrl,
   resolveSpeakWeekProgressUrl,
-  resolveUserStatusUrl,
+  resolveUAppId,
+  resolveUserStatusForAppUrl,
   resolveWeekProgressUrl,
 } from "./config.js";
 import { summarizeHttpErrorBody, type UnipusHttpResponse } from "./http.js";
@@ -47,7 +46,7 @@ export async function listWeekProgress(
     return listWeekProgressLegacy(ports, authHeader, speakUrl);
   }
 
-  return listWeekProgressPaid(ports, authHeader, speakUrl);
+  return listWeekProgressPaid(ports, authHeader);
 }
 
 /** Legacy single-GET (trial / explicit UNIPUS_ULS_WEEK_PROGRESS_PATH / weekProgressUrl). */
@@ -111,124 +110,48 @@ async function listWeekProgressLegacy(
 }
 
 /**
- * Paid default: getUserStatus(listen) → POST trainingReport → optional activation
- * for trial speak counters only (null trials must not PARSE_ERROR).
+ * Paid default: GET getUserStatusForApp for listen and speak.
+ * 本周计数 = weekDoneTaskCount. 达标数 = weekFrequency.
  */
 async function listWeekProgressPaid(
   ports: WeekProgressPorts,
   authHeader: Record<string, string>,
-  speakUrl: string | null,
 ): Promise<WeekProgressResult> {
-  const statusUrl = resolveUserStatusUrl(ports.env, "listen");
-  const statusFetch = await fetchProgress(
-    ports,
-    statusUrl,
-    authHeader,
-    "用户状态",
-  );
-  if (!statusFetch.ok) {
-    return statusFetch.error;
-  }
+  const listenUrl = resolveUserStatusForAppUrl(ports.env, "listen");
+  const speakUrl = resolveUserStatusForAppUrl(ports.env, "speak");
+  const headers = { ...authHeader, "u-app-id": resolveUAppId(ports.env) };
 
-  const statusInfo = parseUserStatusBody(statusFetch.body);
-  if (statusInfo?.taskId == null) {
+  const listenFetch = await fetchProgress(ports, listenUrl, headers, "听力本周");
+  if (!listenFetch.ok) {
+    return listenFetch.error;
+  }
+  const listenWeek = weekCountsFromStatusForApp(listenFetch.body);
+  if (listenWeek == null) {
     return toolError(
       "PARSE_ERROR",
-      "getUserStatus 响应无法解析 taskId（付费听力周进度需要 trainingReport）",
+      "听力 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
     );
   }
 
-  const reportUrl = resolveListenTrainingReportUrl(ports.env);
-  const reportFetch = await fetchProgress(
-    ports,
-    reportUrl,
-    { ...authHeader, "content-type": "application/json" },
-    "听力训练报告",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        taskId: statusInfo.taskId,
-        ansVersion: statusInfo.ansVersion ?? 1,
-      }),
-    },
-  );
-  if (!reportFetch.ok) {
-    return reportFetch.error;
+  const speakFetch = await fetchProgress(ports, speakUrl, headers, "口语本周");
+  if (!speakFetch.ok) {
+    return speakFetch.error;
   }
-
-  const reportListen = listenFromTrainingReport(reportFetch.body);
-
-  // Best-effort activation for optional trial speak (and listen fallback).
-  const activationUrl = resolveWeekProgressUrl(ports.env);
-  const activationFetch = await fetchProgress(
-    ports,
-    activationUrl,
-    authHeader,
-    "激活状态",
-  );
-  let activationParsed: ParsedProgress | null = null;
-  if (activationFetch.ok) {
-    activationParsed = parseWeekProgressBody(activationFetch.body);
-  }
-
-  let listenDone = reportListen?.done ?? activationParsed?.listen_done ?? null;
-  let listenTotal =
-    reportListen?.total ?? activationParsed?.listen_total ?? null;
-
-  // In-progress papers may return weeklyTarget=0 while weeklyCompleted is valid.
-  if (
-    listenDone != null &&
-    (listenTotal == null || listenTotal <= 0) &&
-    activationParsed?.listen_total == null
-  ) {
-    listenTotal = PAID_LISTEN_WEEK_TARGET;
-  }
-
-  if (listenDone == null || listenTotal == null || listenTotal <= 0) {
+  const speakWeek = weekCountsFromStatusForApp(speakFetch.body);
+  if (speakWeek == null) {
     return toolError(
       "PARSE_ERROR",
-      "付费听力周进度无法解析（trainingReport weeklyCompleted/weeklyTarget）",
+      "口语 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
     );
   }
-
-  // Speak: trial counters only when present; else null (paid speak path unverified).
-  let speakDone = activationParsed?.speak_done ?? null;
-  let speakTotal = activationParsed?.speak_total ?? null;
-
-  if (speakUrl != null && speakUrl.length > 0) {
-    const speakFetch = await fetchProgress(
-      ports,
-      speakUrl,
-      authHeader,
-      "口语进度",
-    );
-    if (speakFetch.ok) {
-      const merged = mergeSpeakCounts(
-        speakDone,
-        speakTotal,
-        parseWeekProgressBody(speakFetch.body),
-      );
-      if (merged != null) {
-        speakDone = merged.done;
-        speakTotal = merged.total;
-      }
-    }
-  }
-
-  const usedTrialListen =
-    reportListen == null &&
-    activationParsed?.listen_done != null &&
-    activationParsed.listen_total != null;
-  const usedTrialSpeak = speakDone != null && speakTotal != null;
 
   return buildWeekProgressResult({
-    listenDone,
-    listenTotal,
-    speakDone,
-    speakTotal,
-    level: statusInfo.level ?? activationParsed?.level ?? null,
-    source: usedTrialListen ? "trial" : "paid",
-    speakIsTrial: usedTrialSpeak,
+    listenDone: listenWeek.done,
+    listenTotal: listenWeek.total,
+    speakDone: speakWeek.done,
+    speakTotal: speakWeek.total,
+    level: listenWeek.level ?? speakWeek.level,
+    source: "paid",
   });
 }
 
@@ -256,7 +179,7 @@ function buildWeekProgressResult(input: {
   const levelSuffix = input.level != null ? `，级别 ${input.level}` : "";
   const sourceNote =
     input.source === "paid"
-      ? "（付费默认：listen trainingReport）"
+      ? "（本周计数 weekDoneTaskCount / 达标数 weekFrequency）"
       : input.source === "trial"
         ? "（试用账号已对齐 tvWeekProgress）"
         : "";
@@ -288,9 +211,10 @@ function detectProgressSource(
   return "generic";
 }
 
-function parseUserStatusBody(body: string): {
-  taskId: string;
-  ansVersion: number | null;
+/** Homepage week pair. Ignores weekTotalTaskCount so it cannot be mistaken for 达标数. */
+function weekCountsFromStatusForApp(body: string): {
+  done: number;
+  total: number;
   level: string | null;
 } | null {
   const record = parseJsonRecord(body);
@@ -305,81 +229,14 @@ function parseUserStatusBody(body: string): {
     }
   }
   for (const candidate of candidates) {
-    const taskRaw = candidate.taskId ?? candidate.task_id;
-    let taskId: string | null = null;
-    if (typeof taskRaw === "string" && taskRaw.trim().length > 0) {
-      taskId = taskRaw.trim();
-    } else if (typeof taskRaw === "number" && Number.isFinite(taskRaw)) {
-      taskId = String(taskRaw);
-    }
-    if (taskId == null) {
+    const done = firstNumber(candidate, ["weekDoneTaskCount"]);
+    const total = firstNumber(candidate, ["weekFrequency"]);
+    if (done == null || total == null || done < 0 || total < 0) {
       continue;
     }
-    const ansRaw = candidate.ansVersion ?? candidate.ans_version;
-    let ansVersion: number | null = null;
-    if (typeof ansRaw === "number" && Number.isFinite(ansRaw) && ansRaw > 0) {
-      ansVersion = ansRaw;
-    } else if (typeof ansRaw === "string" && ansRaw.trim().length > 0) {
-      const n = Number(ansRaw.trim());
-      if (Number.isFinite(n) && n > 0) {
-        ansVersion = n;
-      }
-    }
     const level =
-      firstString(candidate, [
-        "currentLevel",
-        "level",
-        "levelName",
-        "initLevel",
-        "grade",
-        "band",
-      ]) ?? null;
-    return { taskId, ansVersion, level };
-  }
-  return null;
-}
-
-/** Prefer weeklyCompleted/weeklyTarget; ignore non-positive totals; try weeklyProgress. */
-function listenFromTrainingReport(
-  body: string,
-): { done: number; total: number | null } | null {
-  const record = parseJsonRecord(body);
-  if (record == null) {
-    return null;
-  }
-  const candidates: Record<string, unknown>[] = [record];
-  for (const nestKey of NEST_KEYS) {
-    const nested = asRecord(record[nestKey]);
-    if (nested != null) {
-      candidates.push(nested);
-    }
-  }
-  for (const candidate of candidates) {
-    const done = firstNumber(candidate, [
-      "weeklyCompleted",
-      "listen_done",
-      "listenDone",
-    ]);
-    let total = firstNumber(candidate, [
-      "weeklyTarget",
-      "listen_total",
-      "listenTotal",
-    ]);
-    if (total != null && total <= 0) {
-      total = null;
-    }
-    const ratio = parseRatio(
-      firstString(candidate, ["weeklyProgress", "progress", "weekProgress"]),
-    );
-    if (ratio != null && ratio.total > 0) {
-      return {
-        done: done ?? ratio.done,
-        total: total ?? ratio.total,
-      };
-    }
-    if (done != null) {
-      return { done, total };
-    }
+      firstString(candidate, ["currentLevel", "level", "levelName"]) ?? null;
+    return { done, total, level };
   }
   return null;
 }
@@ -519,7 +376,7 @@ const NEST_KEYS = ["data", "result", "payload", "value", "listen", "speak", "ora
 
 /**
  * Map stable MCP fields from known aliases.
- * - Paid default path uses trainingReport weeklyCompleted / weeklyTarget (via listWeekProgressPaid).
+ * - Paid default path uses getUserStatusForApp weekDoneTaskCount / weekFrequency.
  * - activation/status trial counters (listenTrialUsed / speakTrialUsed / trialUsageLimit) are
  *   optional (trial accounts only); null values must not alone cause PARSE_ERROR on paid path.
  * - Legacy progress_* / generic done+total map to listen_*; speak_* only from

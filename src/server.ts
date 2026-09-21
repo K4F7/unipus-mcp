@@ -39,15 +39,13 @@ const AUTH_STATUS_DESCRIPTION = [
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
   "List U听力 + U口语 week progress.",
-  "Default (paid): getUserStatus(listen) → POST /api/uls/report/listen/trainingReport",
-  "→ weeklyCompleted/weeklyTarget/weeklyProgress (e.g. 5/5).",
-  "activation/status trial counters (listenTrialUsed/speakTrialUsed/trialUsageLimit) are optional",
-  "(trial accounts); null after unlock must not PARSE_ERROR.",
-  "Speak week path still unverified — speak_done/speak_total may be null (do not invent 3).",
+  "Default: GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen and flowType=speak.",
+  "本周计数 = weekDoneTaskCount (listen_done / speak_done).",
+  "达标数 = weekFrequency (listen_total / speak_total).",
+  "Read both from the response. Do not hardcode 3 or 6. weekTotalTaskCount is not either number.",
   "Legacy single-GET: set UNIPUS_ULS_WEEK_PROGRESS_PATH or ports.weekProgressUrl.",
-  "Returns listen_done/listen_total, speak_done/speak_total; progress_* aliases listen.",
-  "Auth: raw JWT (no Bearer). Host: UNIPUS_ULS_ORIGIN or UNIPUS_ULS_ADAPTIVE_ORIGIN.",
-  "Optional UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH for a dedicated speak fetch.",
+  "Also send header u-app-id (default 116, override UNIPUS_U_APP_ID). That value is the server's sourceId.",
+  "progress_* aliases listen. Auth: raw JWT (no Bearer). Host: UNIPUS_ULS_ORIGIN or ucloud.",
 ].join(" ");
 
 const START_LISTENING_TRAINING_DESCRIPTION = [

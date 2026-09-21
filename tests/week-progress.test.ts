@@ -376,58 +376,51 @@ describe("resolveSpeakWeekProgressUrl", () => {
   });
 });
 
-describe("listWeekProgress paid trainingReport path", () => {
+describe("listWeekProgress paid getUserStatusForApp path", () => {
   function paidHttp(handlers: {
-    status?: Record<string, unknown>;
-    report?: Record<string, unknown>;
-    activation?: Record<string, unknown>;
-  }): UnipusHttp & { calls: Array<{ url: string; method: string; body?: string }> } {
-    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    listen?: Record<string, unknown>;
+    speak?: Record<string, unknown>;
+    speakStatus?: number;
+  }): UnipusHttp & { calls: Array<{ url: string; method: string; body?: string; authorization?: string; appId?: string }> } {
+    const calls: Array<{ url: string; method: string; body?: string; authorization?: string; appId?: string }> = [];
     return {
       calls,
       async request(input) {
         const method = input.method ?? "GET";
-        calls.push({ url: input.url, method, body: input.body });
-        if (input.url.includes("getUserStatus")) {
+        calls.push({
+          url: input.url,
+          method,
+          body: input.body,
+          authorization: input.headers?.authorization,
+          appId: input.headers?.["u-app-id"],
+        });
+        if (input.url.includes("flowType=speak")) {
+          if (handlers.speakStatus != null) {
+            return { statusCode: handlers.speakStatus, body: "{}" };
+          }
           return {
             statusCode: 200,
             body: JSON.stringify({
               code: 1,
-              value: handlers.status ?? {
-                type: "train",
-                taskId: "104413919195601795",
-                ansVersion: 1,
-                status: 0,
+              value: handlers.speak ?? {
+                weekDoneTaskCount: 6,
+                weekFrequency: 3,
+                weekTotalTaskCount: 7,
+                currentLevel: "S12-13",
+              },
+            }),
+          };
+        }
+        if (input.url.includes("getUserStatusForApp")) {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              code: 1,
+              value: handlers.listen ?? {
+                weekDoneTaskCount: 5,
+                weekFrequency: 5,
+                weekTotalTaskCount: 6,
                 currentLevel: "S15",
-              },
-            }),
-          };
-        }
-        if (input.url.includes("trainingReport")) {
-          return {
-            statusCode: 200,
-            body: JSON.stringify({
-              code: 1,
-              msg: "SUCCESS",
-              value: handlers.report ?? {
-                weeklyCompleted: 5,
-                weeklyTarget: 5,
-                weeklyProgress: "5/5",
-              },
-            }),
-          };
-        }
-        if (input.url.includes("activation/status")) {
-          return {
-            statusCode: 200,
-            body: JSON.stringify({
-              code: 1,
-              value: handlers.activation ?? {
-                status: 1,
-                isPurchased: 0,
-                listenTrialUsed: null,
-                speakTrialUsed: null,
-                trialUsageLimit: null,
               },
             }),
           };
@@ -437,7 +430,7 @@ describe("listWeekProgress paid trainingReport path", () => {
     };
   }
 
-  test("null trial fields do not PARSE_ERROR when trainingReport has week", async () => {
+  test("listen and speak both return week count and target", async () => {
     const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
     const http = paidHttp({});
     const result = await listWeekProgress({
@@ -449,13 +442,40 @@ describe("listWeekProgress paid trainingReport path", () => {
     assert.equal(result.status, "ok");
     assert.equal(result.listen_done, 5);
     assert.equal(result.listen_total, 5);
-    assert.equal(result.speak_done, null);
-    assert.equal(result.speak_total, null);
+    assert.equal(result.speak_done, 6);
+    assert.equal(result.speak_total, 3);
+    assert.equal(result.progress_done, 5);
+    assert.equal(result.progress_total, 5);
     assert.equal(result.level, "S15");
-    assert.doesNotMatch(result.message, /试用/);
     assert.match(result.message, /听力\s*5\/5/);
-    assert.ok(http.calls.some((c) => c.url.includes("getUserStatus")));
-    assert.ok(http.calls.some((c) => c.url.includes("trainingReport") && c.method === "POST"));
+    assert.match(result.message, /口语\s*6\/3/);
+    assert.equal(http.calls.length, 2);
+    assert.ok(http.calls.every((c) => c.method === "GET"));
+    assert.ok(http.calls.every((c) => c.url.startsWith("https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?")));
+    assert.ok(http.calls.some((c) => c.url.includes("flowType=listen")));
+    assert.ok(http.calls.some((c) => c.url.includes("flowType=speak")));
+    assert.ok(http.calls.every((c) => c.authorization === jwt));
+    assert.ok(http.calls.every((c) => c.appId === "116"));
+    assert.ok(!http.calls.some((c) => c.url.includes("trainingReport")));
+  });
+
+  test("UNIPUS_U_APP_ID overrides the u-app-id header", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = paidHttp({});
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: { UNIPUS_U_APP_ID: "116" },
+    });
+    assert.equal(result.isError, false);
+    assert.ok(http.calls.every((c) => c.appId === "116"));
+    const custom = paidHttp({});
+    await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http: custom,
+      env: { UNIPUS_U_APP_ID: "20840" },
+    });
+    assert.ok(custom.calls.every((c) => c.appId === "20840"));
   });
 
   test("legacy forced URL with only null trials still PARSE_ERROR (no invented speak 3)", async () => {
@@ -483,59 +503,20 @@ describe("listWeekProgress paid trainingReport path", () => {
     assert.doesNotMatch(JSON.stringify(result), /"speak_done":\s*3/);
   });
 
-  test("maps trainingReport weeklyCompleted/weeklyTarget and POSTs taskId", async () => {
+  test("达标数 is weekFrequency, not weekTotalTaskCount", async () => {
     const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
     const http = paidHttp({
-      status: {
-        type: "train",
-        taskId: "99",
-        ansVersion: 1,
-        currentLevel: "S12",
-      },
-      report: {
-        weeklyCompleted: 2,
-        weeklyTarget: 5,
-        weeklyProgress: "2/5",
-      },
-    });
-    const result = await listWeekProgress({
-      credentials: { getJwt: async () => jwt },
-      http,
-      env: {},
-    });
-    assert.equal(result.isError, false);
-    assert.equal(result.listen_done, 2);
-    assert.equal(result.listen_total, 5);
-    assert.equal(result.speak_done, null);
-    assert.equal(result.speak_total, null);
-    assert.equal(result.level, "S12");
-    const reportCall = http.calls.find((c) => c.url.includes("trainingReport"));
-    assert.ok(reportCall);
-    assert.equal(reportCall?.method, "POST");
-    assert.deepEqual(JSON.parse(reportCall?.body ?? "{}"), {
-      taskId: "99",
-      ansVersion: 1,
-    });
-  });
-
-  test("weeklyTarget=0 still yields listen 5/5 via paid fallback (no speak invent)", async () => {
-    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
-    const http = paidHttp({
-      status: {
-        type: "train",
-        taskId: "42",
-        ansVersion: 1,
+      listen: {
+        weekDoneTaskCount: 5,
+        weekFrequency: 5,
+        weekTotalTaskCount: 6,
         currentLevel: "S15",
       },
-      report: {
-        weeklyCompleted: 5,
-        weeklyTarget: 0,
-        weeklyProgress: "5/0",
-      },
-      activation: {
-        listenTrialUsed: null,
-        speakTrialUsed: null,
-        trialUsageLimit: null,
+      speak: {
+        weekDoneTaskCount: 6,
+        weekFrequency: 3,
+        weekTotalTaskCount: 7,
+        currentLevel: "S12-13",
       },
     });
     const result = await listWeekProgress({
@@ -543,11 +524,27 @@ describe("listWeekProgress paid trainingReport path", () => {
       http,
       env: {},
     });
-    assert.equal(result.isError, false);
-    assert.equal(result.listen_done, 5);
+    assert.equal(result.speak_done, 6);
+    assert.equal(result.speak_total, 3);
+    assert.notEqual(result.speak_total, 7);
     assert.equal(result.listen_total, 5);
-    assert.equal(result.speak_done, null);
-    assert.equal(result.speak_total, null);
+    assert.notEqual(result.listen_total, 6);
+  });
+
+  test("missing weekFrequency is PARSE_ERROR and does not invent 3 or 5", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = paidHttp({
+      speak: { weekDoneTaskCount: 6, weekTotalTaskCount: 7, currentLevel: "S12-13" },
+    });
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.code, "PARSE_ERROR");
+    assert.doesNotMatch(JSON.stringify(result), /"speak_total":\s*3/);
+    assert.doesNotMatch(JSON.stringify(result), /"listen_total":\s*5/);
   });
 
   test("trial activation fields still work via legacy weekProgressUrl override", async () => {
