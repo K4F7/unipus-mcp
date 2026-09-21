@@ -39,6 +39,7 @@
 - `openId`：可选；存在时作为 `openId` 请求头发送。
 - 请求体为 `{ taskId, ansVersion }`，`Authorization` 使用**原始 JWT**，不加 `Bearer ` 前缀。
 - 默认地址为 `https://uadaptive.unipus.cn/api/uls/user/loadPaper`；可用 `UNIPUS_ULS_ADAPTIVE_ORIGIN` / `UNIPUS_ULS_LOAD_PAPER_PATH` 覆盖。
+- 口语「继续训练」是同一个 `loadPaper`。`taskId` / `ansVersion` 来自 `getUserStatusForApp?flowType=speak`。请求体没有 `flowType`。WebView 会带 `sourceid: 116`；无头只带裸 JWT 也能 `code=1`，响应里有 `token` 和 `paperJson`。
 - 业务成功码接受 `0`、`1`、`200`；成功结果带 `task_id`、`paper_token`，以及从 paperJson 提取的 **`instance_ids`（精确字符串）**。
 - 所有雪花 id（`q_qinstid` / `questionInstanceId`）**禁止** `Number()` / 裸 `JSON.parse`；内部用 `parseJsonPreservingLargeInts`。
 
@@ -191,7 +192,7 @@ Headless grade via `POST /api/uls/rate/gradeQuestion` (raw JWT, no Bearer).
 - Args: `taskId`, `questionInstanceId` (**exact string** snowflake), `questionContent` (answer JSON string), optional `ansVersion` / `isObjective` / `openId`.
 - Override URL: `UNIPUS_ULS_GRADE_QUESTION_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
 - **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer device-shaped `EN_SENT_SCORE` under `children[0].record` (+ child `isDone`) from `score_speech` / `buildEnSentScoreQuestionContent`. Do **not** put `recordDetail` in answer JSON. Already-submitted tasks may empty userAnswer — retest needs unsubmitted + speak quota.
-- After `submit_answer`, results may be readable at `/api/uls/user/loadGradedQuestions` (config URL helper only; **no MCP tool yet**).
+- After `submit_answer`, `POST /api/uls/user/loadGradedQuestions` with `{ taskId, ansVersion }` and `u-app-id: 116` returns graded items (no MCP tool yet). GET with query returns code 500.
 - Paid week quota 5/3 path still **unverified**.
 
 ## `score_speech`

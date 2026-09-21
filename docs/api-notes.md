@@ -47,10 +47,38 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 - Uses `Authorization: <raw JWT>` with no `Bearer ` prefix; JWT remains env/CLI-only, never a tool argument.
 - Default URL is `https://uadaptive.unipus.cn/api/uls/user/loadPaper`; override with `UNIPUS_ULS_ADAPTIVE_ORIGIN` / `UNIPUS_ULS_LOAD_PAPER_PATH`.
 - Accepts business codes `0`, `1`, and `200`; returns observable `task_id` and `paper_token` when present. MVP does not auto-finish the exercise set.
+- The same `loadPaper` body starts **口语**. Take `taskId` / `ansVersion` from `getUserStatusForApp?flowType=speak`. There is no `flowType` field in the body.
 
-## 口语（app 内下一步，暂缓实现）
+## 口语开始训练（模拟器 2026-09-22）
 
-SPA refs: `/api/uls/oral/train/free-speaking-report`, share-card `ai-oral`. Capture after listening app flow is done.
+口语首页「继续训练」打开 `https://uadaptive.unipus.cn/speak?taskId=&ansVersion=`，然后：
+
+| Item | Value |
+|------|--------|
+| Method | `POST` |
+| URL | `https://uadaptive.unipus.cn/api/uls/user/loadPaper`（`ucloud` 同样 200） |
+| Body | `{ "taskId", "ansVersion" }` |
+| WebView headers | `authorization` 裸 JWT，`sourceid: 116`，`x-requested-with: cn.unipus.cloud`，`openid` / `u-openid` |
+| Headless | 裸 JWT + 上述 body 即 `code=1`。`sourceid: 116` 和 `u-app-id: 116` 也可带，但这个接口不强制 |
+| `value` | `token`（提交用，约 32 字符）、`taskId`、`paperJson`、`tags`、`audioVisual` |
+| `paperJson` | `chr` / `id` / `tp`；题目实例在 `q_qinstid`（必须当字符串） |
+
+第二次 `loadPaper` 会让端内 `POST /api/uls/part/submit` 返回 `code=4021`（请勿多设备同时作答）。无头复现不要和正在作答的 WebView 抢 token。
+
+### 范例学习（三关里已解锁的一关）
+
+`GET /api/uls/part/get?taskId=&ansVersion=` 返回 `value.partList[]`：`partId`、`partName`、`questionInstanceIds`、`reportStatus`、`submitted`，以及 `paperName`、`score`。这次三关是「范例学习」「AI口语对话」「自由表达」。裸 JWT 即可，`sourceid` / `u-app-id` 都接受。
+
+进入范例学习后实际请求（**没有**打到 `/api/uls/oral/train`）：
+
+- `POST /api/uls/user/loadTaskRes` body `{ taskId, ansVersion }`，头 `u-app-id: 116` 或 WebView 的 `sourceid: 116`。`value` 是音频 URL 列表。
+- `POST /api/uls/part/submit` body `{ action: "snapshot", ansVersion, duration, partId, taskId, token, userData: [{ instanceId, answer, answerVersion, context, contextVersion, instStatus }] }`。`token` 来自 `loadPaper`。
+
+「AI口语对话」「自由表达」当时有锁，SPA 上的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 这次没有出现。
+
+### 交卷后读分
+
+`POST https://ucloud.unipus.cn/api/uls/user/loadGradedQuestions`（`uadaptive` 同样）body `{ taskId, ansVersion }`，头 `u-app-id: 116` + 裸 JWT。`code=1`，`value` 为列表。条目键：`questionInstanceId`、`score`、`scoreDetail`、`review`、`questionContent`、`questionAnswer`、`rateStatus`、`rateType`、`actualRateType`、`objectiveReview`、`questionAnalysis`、`iwriteReview`、`userId`。GET 带 query 会 `code=500`。当前未交卷的任务列表可以为空；已做完的历史任务能返回条目。尚无 MCP 工具。
 
 ## Week progress
 
@@ -152,13 +180,11 @@ MVP acceptance: one 跟读/口头填空/口语题 auto-filled by generated audio
 | **AI口语对话** | 锁 | 需完成范例后解锁；对应 SPA `/speak/training/ai-dialog` |
 | **自由表达** | 锁 | 对应 `/speak/training/free` 等 |
 
-口语首页 `tvWeekProgress`（例 **2/3**）= activation `speakTrialUsed`/`trialUsageLimit`（**本周试用进度**，试用号已对齐）。
-任务卡 **0%** = 本篇完成度（旧 UI 曾写 0/3）。`trialRemainDesc`（例「2天」）对齐「体验还剩 2天」。
-付费周配额 3：**BLOCKED**（SPA+probe 无 path；勿编造）。
+口语首页本周计数 / 达标数见上一节 `getUserStatusForApp`，不要再用试用 2/3 或写死 3。
+任务卡 **0%** = 本篇完成度，不是周进度。
 
-关键 API（静态）：
-- `GET/POST` 族 `/api/uls/oral/train?ansVersion&questionId&taskId&openId…`
-- `POST /api/uls/user/answer/query-upload-url`（拿上传凭证，注音/无头上传答案用）
+范例学习的真请求是 `loadPaper` + `part/get` + `loadTaskRes` + `part/submit`，不是 `/api/uls/oral/train`。`/api/uls/oral/train` 仍只是 SPA 静态引用，AI 对话和自由表达解锁前没有抓到。
+`POST /api/uls/user/answer/query-upload-url` 仍是答案上传凭证。
 
 本周计数和达标数都从 `getUserStatusForApp` 读：`weekDoneTaskCount` / `weekFrequency`。听力和口语各一次。不要写死 3 或 6。
 
@@ -228,8 +254,8 @@ Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
 - Helper: `buildEnSentScoreQuestionContent` / `clioToEnSentScoreFields({ qiniuUrl })`. Optional `reviewScores` maps Clio `overall→score`, `fluency→smooth`, etc. for callers — **not** embedded in answer JSON.
 - Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists**. Pre-submit: `score_speech` → optional Qiniu upload → `grade_question` with children-shaped content.
 - **Retest caveat:** grading an **already-submitted** task may empty `userAnswer` / return score=0. Need an **unsubmitted** task + remaining speak quota to live-verify non-zero grade.
-- After submit: **`/api/uls/user/loadGradedQuestions`** can read results (URL helper in config; **no MCP tool yet**).
-- Paid week quota 5/3 still **unverified**.
+- After submit: **`POST /api/uls/user/loadGradedQuestions`** `{ taskId, ansVersion }` with raw JWT and `u-app-id: 116` (see speak section). No MCP tool yet.
+- Paid week counters are `getUserStatusForApp` `weekDoneTaskCount` / `weekFrequency`. Do not hardcode 3 or 6.
 
 MCP: `grade_question`; `start_listening_training` returns `instance_ids` as exact strings.
 
