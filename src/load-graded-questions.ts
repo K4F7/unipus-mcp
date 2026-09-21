@@ -9,7 +9,10 @@ import {
   toolError,
   type ToolResult,
 } from "./result.js";
-import { asExactIdString } from "./safe-json.js";
+import {
+  asExactIdString,
+  parseJsonPreservingLargeInts,
+} from "./safe-json.js";
 
 export type LoadGradedQuestionsInput = {
   taskId: string;
@@ -124,7 +127,8 @@ export function parseLoadGradedQuestionsBody(
 ): { items: unknown[]; raw_code: number | null } | null {
   let value: unknown;
   try {
-    value = JSON.parse(body);
+    // Preserve snowflake questionInstanceId (see safe-json.ts).
+    value = parseJsonPreservingLargeInts(body);
   } catch {
     return null;
   }

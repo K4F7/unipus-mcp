@@ -175,4 +175,15 @@ describe("parseLoadGradedQuestionsBody", () => {
     );
     assert.equal(parseLoadGradedQuestionsBody("nope"), null);
   });
+
+  test("preserves snowflake questionInstanceId in items", () => {
+    const snowflake = "1984905701219868673";
+    const parsed = parseLoadGradedQuestionsBody(
+      `{"code":1,"value":[{"questionInstanceId":${snowflake},"score":80}]}`,
+    );
+    assert.deepEqual(parsed, {
+      items: [{ questionInstanceId: snowflake, score: 80 }],
+      raw_code: 1,
+    });
+  });
 });

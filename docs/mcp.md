@@ -47,7 +47,7 @@
 
 `start_speaking_training`：
 
-- 可选 `taskId` / `ansVersion` / `openId`；两者都缺省时先 `GET …/getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`，默认 `116`），再复用听力同一 `loadPaper`。
+- 可选 `taskId` / `ansVersion` / `openId`；缺 `taskId` 或 `ansVersion` 任一则先 `GET …/getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`，默认 `116`）补全，再复用听力同一 `loadPaper`。
 - 返回形状与 `start_listening_training` 相同；成功 message 含「口语」。
 - **不要**在 App WebView 已打开同一任务时调用 — `part/submit` 可能 `4021`（多设备）。
 - **不要**臆造 `/api/uls/oral/train`。AI对话 / 自由表达仍见 issue **#18**。

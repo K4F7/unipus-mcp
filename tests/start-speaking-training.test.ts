@@ -177,9 +177,25 @@ describe("parseSpeakStatusBody", () => {
       null,
     );
     assert.equal(
+      parseSpeakStatusBody(
+        JSON.stringify({ code: "500", value: { taskId: "t" } }),
+      ),
+      null,
+    );
+    assert.equal(
       parseSpeakStatusBody(JSON.stringify({ code: 1, value: {} })),
       null,
     );
     assert.equal(parseSpeakStatusBody("not-json"), null);
+  });
+
+  test("preserves snowflake taskId from bare integer JSON", () => {
+    const snowflake = "1984905701219868673";
+    assert.deepEqual(
+      parseSpeakStatusBody(
+        `{"code":1,"value":{"taskId":${snowflake},"ansVersion":1}}`,
+      ),
+      { taskId: snowflake, ansVersion: 1 },
+    );
   });
 });

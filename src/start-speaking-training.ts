@@ -12,7 +12,10 @@ import {
   toolError,
   type StartListeningResult,
 } from "./result.js";
-import { asExactIdString } from "./safe-json.js";
+import {
+  asExactIdString,
+  parseJsonPreservingLargeInts,
+} from "./safe-json.js";
 import {
   startListeningTraining,
   type StartListeningPorts,
@@ -154,7 +157,7 @@ export function parseSpeakStatusBody(
 ): { taskId: string; ansVersion: number } | null {
   let value: unknown;
   try {
-    value = JSON.parse(body);
+    value = parseJsonPreservingLargeInts(body);
   } catch {
     return null;
   }
@@ -162,17 +165,13 @@ export function parseSpeakStatusBody(
     return null;
   }
   const root = value as Record<string, unknown>;
-  const code = root.code;
-  if (
-    typeof code === "number" &&
-    code !== 0 &&
-    code !== 1 &&
-    code !== 200
-  ) {
+  const code = numericCode(root.code);
+  // Same success codes as loadPaper / loadGradedQuestions.
+  if (code != null && code !== 0 && code !== 1 && code !== 200) {
     return null;
   }
   const data =
-    nested(root, "value") ?? nested(root, "data") ?? root;
+    nestedRecord(root, "value") ?? nestedRecord(root, "data") ?? root;
   const taskId =
     asExactIdString(data.taskId) ??
     asExactIdString(data.task_id) ??
@@ -193,13 +192,24 @@ export function parseSpeakStatusBody(
   return { taskId, ansVersion };
 }
 
-function nested(
+function nestedRecord(
   root: Record<string, unknown>,
   key: string,
 ): Record<string, unknown> | null {
   const value = root[key];
   if (value != null && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function numericCode(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
 }
