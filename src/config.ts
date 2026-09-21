@@ -242,7 +242,7 @@ export function resolveGradeQuestionUrl(
   return `${resolveAdaptiveOrigin(env)}${resolveGradeQuestionPath(env)}`;
 }
 
-/** Read graded results after submit (2026-09-21 device). Not an MCP tool yet. */
+/** Read graded results after submit (2026-09-21 device). MCP: load_graded_questions. */
 export const DEFAULT_ULS_LOAD_GRADED_QUESTIONS_PATH =
   "/api/uls/user/loadGradedQuestions";
 

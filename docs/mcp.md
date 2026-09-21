@@ -4,7 +4,7 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活。`list_week_progress` 默认对听力和口语各请求一次 `GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen|speak`，并带请求头 `u-app-id: 116`（可用 `UNIPUS_U_APP_ID` 覆盖）。服务端把这个头当作 `sourceId`；不带它会返回 `sourceId不能为空`。本周计数是 `weekDoneTaskCount`，达标数是 `weekFrequency`。不要把 3 或 6 写死。`weekTotalTaskCount` 不是这两个数。试用账号仍可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` 走 activation。`start_listening_training` 已实现：`POST /api/uls/user/loadPaper`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活。`list_week_progress` 默认对听力和口语各请求一次 `GET https://ucloud.unipus.cn/api/uls/user/getUserStatusForApp?flowType=listen|speak`，并带请求头 `u-app-id: 116`（可用 `UNIPUS_U_APP_ID` 覆盖）。服务端把这个头当作 `sourceId`；不带它会返回 `sourceId不能为空`。本周计数是 `weekDoneTaskCount`，达标数是 `weekFrequency`。不要把 3 或 6 写死。`weekTotalTaskCount` 不是这两个数。试用账号仍可用 `UNIPUS_ULS_WEEK_PROGRESS_PATH` 走 activation。`start_listening_training` / `start_speaking_training` 走同一 `POST loadPaper`；`load_graded_questions` 读已评分题目。
 
 ## 工具
 
@@ -13,6 +13,8 @@
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
+| `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021）；AI对话/自由表达见 #18 |
+| `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
@@ -42,6 +44,19 @@
 - 口语「继续训练」是同一个 `loadPaper`。`taskId` / `ansVersion` 来自 `getUserStatusForApp?flowType=speak`。请求体没有 `flowType`。WebView 会带 `sourceid: 116`；无头只带裸 JWT 也能 `code=1`，响应里有 `token` 和 `paperJson`。
 - 业务成功码接受 `0`、`1`、`200`；成功结果带 `task_id`、`paper_token`，以及从 paperJson 提取的 **`instance_ids`（精确字符串）**。
 - 所有雪花 id（`q_qinstid` / `questionInstanceId`）**禁止** `Number()` / 裸 `JSON.parse`；内部用 `parseJsonPreservingLargeInts`。
+
+`start_speaking_training`：
+
+- 可选 `taskId` / `ansVersion` / `openId`；两者都缺省时先 `GET …/getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`，默认 `116`），再复用听力同一 `loadPaper`。
+- 返回形状与 `start_listening_training` 相同；成功 message 含「口语」。
+- **不要**在 App WebView 已打开同一任务时调用 — `part/submit` 可能 `4021`（多设备）。
+- **不要**臆造 `/api/uls/oral/train`。AI对话 / 自由表达仍见 issue **#18**。
+
+`load_graded_questions`：
+
+- 必填 `taskId`；可选 `ansVersion`（默认 `1`）、`openId`。
+- `POST /api/uls/user/loadGradedQuestions`（默认 host `UNIPUS_ULS_ADAPTIVE_ORIGIN` / uadaptive；ucloud 亦可），裸 JWT + `u-app-id`；body `{ taskId, ansVersion }`。
+- 返回 `items` 数组；进行中任务空列表为成功。GET + query → 业务 500，勿用。
 
 有效时：`status: "ok"`，并带 `authenticated`、`expired`、`expiresAt`、`userId`（若可从 payload 安全取得）。
 
@@ -177,6 +192,20 @@ Submit one answer after silent upload:
 - Args: `taskId`, `paperToken`, `instanceId`, `answer` (oral CDN URL auto-wrapped as `{record:{url}}`), optional `ansVersion` / `durationSec`.
 - Live-confirmed 2026-09-21: `POST /api/uls/user/submitAnswer` returns `code:1`.
 
+## `start_speaking_training`
+
+Headless U口语 start (same `loadPaper` as listening):
+
+- Optional `taskId` / `ansVersion` / `openId`; otherwise resolves via `getUserStatusForApp?flowType=speak` + `u-app-id`.
+- Do **not** call while WebView is mid-task (4021). Do **not** invent `/oral/train`.
+- AI对话 / 自由表达 capture remains **#18**.
+
+## `load_graded_questions`
+
+- Required `taskId`; optional `ansVersion` (default 1), `openId`.
+- `POST …/loadGradedQuestions` with raw JWT + `u-app-id`; empty `items` OK.
+- Override: `UNIPUS_ULS_LOAD_GRADED_QUESTIONS_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
+
 ## `speak_and_submit`
 
 One-shot silent oral path: Edge TTS → 16 kHz mono WAV → `upload_answer_audio` → `submit_answer`.
@@ -192,8 +221,8 @@ Headless grade via `POST /api/uls/rate/gradeQuestion` (raw JWT, no Bearer).
 - Args: `taskId`, `questionInstanceId` (**exact string** snowflake), `questionContent` (answer JSON string), optional `ansVersion` / `isObjective` / `openId`.
 - Override URL: `UNIPUS_ULS_GRADE_QUESTION_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
 - **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer device-shaped `EN_SENT_SCORE` under `children[0].record` (+ child `isDone`) from `score_speech` / `buildEnSentScoreQuestionContent`. Do **not** put `recordDetail` in answer JSON. Already-submitted tasks may empty userAnswer — retest needs unsubmitted + speak quota.
-- After `submit_answer`, `POST /api/uls/user/loadGradedQuestions` with `{ taskId, ansVersion }` and `u-app-id: 116` returns graded items (no MCP tool yet). GET with query returns code 500.
-- Paid week quota 5/3 path still **unverified**.
+- After `submit_answer`, use MCP `load_graded_questions` (`POST loadGradedQuestions` + `u-app-id: 116`). GET with query returns code 500.
+- Paid week counters come from `getUserStatusForApp` (`weekDoneTaskCount` / `weekFrequency`); do not hardcode 3/5/6.
 
 ## `score_speech`
 

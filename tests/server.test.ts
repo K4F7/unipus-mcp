@@ -12,6 +12,8 @@ const EXPECTED_TOOLS = [
   "auth_status",
   "list_week_progress",
   "start_listening_training",
+  "start_speaking_training",
+  "load_graded_questions",
   "upload_answer_audio",
   "submit_answer",
   "speak_and_submit",
@@ -83,6 +85,26 @@ describe("unipus MCP server", () => {
       assert.equal(trainPayload.status, "auth_required");
       assert.equal(trainPayload.code, "AUTH_REQUIRED");
       assert.match(String(trainPayload.message), /需登录|登录|JWT/);
+
+      const speakTrain = await client.callTool({
+        name: "start_speaking_training",
+        arguments: {},
+      });
+      assert.equal("isError" in speakTrain && speakTrain.isError, true);
+      const speakTrainPayload = structuredPayload(speakTrain);
+      assert.equal(speakTrainPayload.status, "auth_required");
+      assert.equal(speakTrainPayload.code, "AUTH_REQUIRED");
+      assert.match(String(speakTrainPayload.message), /需登录|登录|JWT/);
+
+      const graded = await client.callTool({
+        name: "load_graded_questions",
+        arguments: { taskId: "t1" },
+      });
+      assert.equal("isError" in graded && graded.isError, true);
+      const gradedPayload = structuredPayload(graded);
+      assert.equal(gradedPayload.status, "auth_required");
+      assert.equal(gradedPayload.code, "AUTH_REQUIRED");
+      assert.match(String(gradedPayload.message), /需登录|登录|JWT/);
 
       const upload = await client.callTool({
         name: "upload_answer_audio",

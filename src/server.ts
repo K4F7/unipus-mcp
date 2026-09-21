@@ -8,6 +8,14 @@ import {
   startListeningTraining,
   type StartListeningPorts,
 } from "./start-listening-training.js";
+import {
+  startSpeakingTraining,
+  type StartSpeakingPorts,
+} from "./start-speaking-training.js";
+import {
+  loadGradedQuestions,
+  type LoadGradedQuestionsPorts,
+} from "./load-graded-questions.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
 import {
   uploadAnswerAudio,
@@ -55,14 +63,34 @@ const START_LISTENING_TRAINING_DESCRIPTION = [
   "Does not accept credentials (JWT from env/CLI only).",
 ].join(" ");
 
+const START_SPEAKING_TRAINING_DESCRIPTION = [
+  "Start U口语「开始/继续训练」: resolve taskId/ansVersion via",
+  "GET getUserStatusForApp?flowType=speak (u-app-id default 116), then same POST loadPaper as listening.",
+  "Optional overrides: taskId, ansVersion, openId. Do not invent /oral/train.",
+  "Do NOT call while an App WebView session is open — part/submit may return 4021 (multi-device).",
+  "AI对话 / 自由表达 still need emulator capture (#18). Returns same shape as start_listening_training.",
+  "Does not accept credentials (JWT from env/CLI only).",
+].join(" ");
+
+const LOAD_GRADED_QUESTIONS_DESCRIPTION = [
+  "Read graded results via POST /api/uls/user/loadGradedQuestions (adaptive or ucloud).",
+  "Args: taskId (required), optional ansVersion (default 1) and openId.",
+  "Headers: raw JWT + u-app-id (default 116). Empty list is OK for in-progress tasks.",
+  "GET with query returns code 500 — use POST only. Does not invent scores.",
+  "Does not accept credentials (JWT from env/CLI only).",
+].join(" ");
+
 export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<StartListeningPorts> &
+  Partial<StartSpeakingPorts> &
+  Partial<LoadGradedQuestionsPorts> &
   Partial<UploadAnswerAudioPorts> &
   Partial<SubmitAnswerPorts> &
   Partial<SpeakAndSubmitPorts> &
   Partial<GradeQuestionPorts> &
   Partial<ScoreEnSentPorts> & {
     loadPaperUrl?: string;
+    loadGradedQuestionsUrl?: string;
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
     gradeQuestionUrl?: string;
@@ -128,6 +156,72 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     async (args) =>
       toMcpToolResponse(
         await startListeningTraining(startPorts, {
+          taskId: args.taskId,
+          ansVersion: args.ansVersion,
+          openId: args.openId,
+        }),
+      ),
+  );
+
+  const speakStartPorts: StartSpeakingPorts = {
+    ...authPorts,
+    env: ports?.env,
+    loadPaperUrl: ports?.loadPaperUrl,
+  };
+
+  server.registerTool(
+    "start_speaking_training",
+    {
+      title: "Start speaking training",
+      description: START_SPEAKING_TRAINING_DESCRIPTION,
+      inputSchema: {
+        taskId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional; default from getUserStatusForApp?flowType=speak"),
+        ansVersion: z
+          .number()
+          .positive()
+          .optional()
+          .describe("Optional; default from speak status (else 1 after resolve)"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await startSpeakingTraining(speakStartPorts, {
+          taskId: args.taskId,
+          ansVersion: args.ansVersion,
+          openId: args.openId,
+        }),
+      ),
+  );
+
+  const gradedPorts: LoadGradedQuestionsPorts = {
+    ...authPorts,
+    env: ports?.env,
+    loadGradedQuestionsUrl: ports?.loadGradedQuestionsUrl,
+  };
+
+  server.registerTool(
+    "load_graded_questions",
+    {
+      title: "Load graded questions",
+      description: LOAD_GRADED_QUESTIONS_DESCRIPTION,
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id from loadPaper / status"),
+        ansVersion: z
+          .number()
+          .positive()
+          .optional()
+          .describe("Default 1"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await loadGradedQuestions(gradedPorts, {
           taskId: args.taskId,
           ansVersion: args.ansVersion,
           openId: args.openId,
@@ -277,7 +371,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     "CDN-url-only oral record often returns score=0; prefer children[0].record",
     "EN_SENT_SCORE (type/text/url/path/replayUrl/list + child isDone) from score_speech.",
     "Pre-submit scoring: use score_speech (Clio WSS en.sent.score); do not invent scores.",
-    "After submit, results can be read via /api/uls/user/loadGradedQuestions (no MCP tool yet).",
+    "After submit, use load_graded_questions (POST loadGradedQuestions + u-app-id).",
     "Does not accept credentials (JWT from env/CLI only).",
   ].join(" ");
 
