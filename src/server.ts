@@ -38,14 +38,16 @@ const AUTH_STATUS_DESCRIPTION = [
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
-  "List U听力 + U口语 week progress from the configured endpoint.",
-  "Default GET /api/uls/user/activation/status on uadaptive = **本周试用进度**",
-  "(listenTrialUsed / speakTrialUsed / trialUsageLimit; trial UI tvWeekProgress aligned).",
-  "Paid weekly quota (听力5/口语3) path still unverified — do not treat as paid quota.",
-  "Task-card percent (e.g. 0%) is chapter completion, separate from these counters.",
+  "List U听力 + U口语 week progress.",
+  "Default (paid): getUserStatus(listen) → POST /api/uls/report/listen/trainingReport",
+  "→ weeklyCompleted/weeklyTarget/weeklyProgress (e.g. 5/5).",
+  "activation/status trial counters (listenTrialUsed/speakTrialUsed/trialUsageLimit) are optional",
+  "(trial accounts); null after unlock must not PARSE_ERROR.",
+  "Speak week path still unverified — speak_done/speak_total may be null (do not invent 3).",
+  "Legacy single-GET: set UNIPUS_ULS_WEEK_PROGRESS_PATH or ports.weekProgressUrl.",
   "Returns listen_done/listen_total, speak_done/speak_total; progress_* aliases listen.",
   "Auth: raw JWT (no Bearer). Host: UNIPUS_ULS_ORIGIN or UNIPUS_ULS_ADAPTIVE_ORIGIN.",
-  "Optional UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH for a dedicated second fetch.",
+  "Optional UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH for a dedicated speak fetch.",
 ].join(" ");
 
 const START_LISTENING_TRAINING_DESCRIPTION = [
