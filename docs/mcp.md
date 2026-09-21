@@ -4,14 +4,14 @@
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 
-`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` **默认按付费账号**：`getUserStatus?flowType=listen` → `POST /api/uls/report/listen/trainingReport`，字段 `weeklyCompleted`/`weeklyTarget`/`weeklyProgress`（例 5/5）。activation/status 的 `*TrialUsed`/`trialUsageLimit` 仅作**试用可选**；解锁后为 null 时不得 PARSE_ERROR。口语周 path 仍未验证 → `speak_*` 可为 null（勿编造 3）。`start_listening_training` 已实现：`POST /api/uls/user/loadPaper`。
+`auth_status` 会读取环境变量/文件中的 JWT 并对 `https://ucloud.unipus.cn/api/uls/` 做探活；`list_week_progress` **默认按付费账号**：`getUserStatus?flowType=listen` → `POST /api/uls/report/listen/trainingReport`，字段 `weeklyCompleted`/`weeklyTarget`/`weeklyProgress`（例 5/5）。activation/status 的 `*TrialUsed`/`trialUsageLimit` 仅作**试用可选**；解锁后为 null 时不得 PARSE_ERROR。口语付费周 path **BLOCKED**（SPA 无 `/report/speak/trainingReport`，对称猜测 404；需设备抓包）→ `speak_*` 保持 null（勿编造 3）。详见 `docs/api-notes.md`「BLOCKED: paid speak weekly progress」。`start_listening_training` 已实现：`POST /api/uls/user/loadPaper`。
 
 ## 工具
 
 | 工具 | 说明 |
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
-| `list_week_progress` | 本周听+口（**付费默认** trainingReport）：`listen_done`/`listen_total` 来自 `weeklyCompleted`/`weeklyTarget`；`speak_done`/`speak_total` 仅试用 activation 有值时填充否则 `null`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
+| `list_week_progress` | 本周听+口（**付费默认** trainingReport）：`listen_done`/`listen_total` 来自 `weeklyCompleted`/`weeklyTarget`；`speak_done`/`speak_total` 仅试用 activation 有值时填充，付费口语周 **BLOCKED**→`null`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
