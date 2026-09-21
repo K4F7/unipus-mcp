@@ -1,18 +1,28 @@
 import { UADAPTIVE_ORIGIN, UCLOUD_ORIGIN } from "./http.js";
 
 /**
- * Default progress probe: GET activation/status on uadaptive.
- * Fields listenTrialUsed / speakTrialUsed / trialUsageLimit = **本周试用进度**
- * (trial UI tvWeekProgress aligned, e.g. speak 2/3). Task-card percent (0%) is
- * chapter completion. Paid weekly quota (听力5 / 口语3) path still unverified.
- * Path override: UNIPUS_ULS_WEEK_PROGRESS_PATH.
+ * Legacy single-GET progress probe (trial accounts): activation/status.
+ * Paid default for list_week_progress is multi-step trainingReport (see
+ * resolveUserStatusUrl / resolveListenTrainingReportUrl). Set
+ * UNIPUS_ULS_WEEK_PROGRESS_PATH or ports.weekProgressUrl to force this legacy GET.
  * Host: UNIPUS_ULS_ORIGIN if set, else UNIPUS_ULS_ADAPTIVE_ORIGIN / uadaptive.
  */
 export const DEFAULT_ULS_WEEK_PROGRESS_PATH = "/api/uls/user/activation/status";
 
+/** Paid listen week: getUserStatus?flowType=listen → taskId for trainingReport. */
+export const DEFAULT_ULS_USER_STATUS_PATH = "/api/uls/user/getUserStatus";
+
+/** Paid listen week report (verified): weeklyCompleted / weeklyTarget / weeklyProgress. */
+export const DEFAULT_ULS_LISTEN_TRAINING_REPORT_PATH =
+  "/api/uls/report/listen/trainingReport";
+
+/** Product paid listen weekly quota (used when report returns weeklyTarget<=0). */
+export const PAID_LISTEN_WEEK_TARGET = 5;
+
 /**
- * Recommended speak path (same activation/status body already has speakTrialUsed).
+ * Recommended speak path (activation/status may carry speakTrialUsed on trial).
  * Optional second fetch via UNIPUS_ULS_SPEAK_WEEK_PROGRESS_PATH; unset = no 2nd request.
+ * Paid speak week path is still unverified — leave speak_* null rather than invent 3.
  */
 export const RECOMMENDED_ULS_SPEAK_WEEK_PROGRESS_PATH =
   "/api/uls/user/activation/status";
@@ -47,6 +57,46 @@ export function resolveWeekProgressUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return `${resolveWeekProgressOrigin(env)}${resolveWeekProgressPath(env)}`;
+}
+
+/** True when caller set UNIPUS_ULS_WEEK_PROGRESS_PATH (legacy single-GET mode). */
+export function hasExplicitWeekProgressPath(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return envTrim(env.UNIPUS_ULS_WEEK_PROGRESS_PATH) != null;
+}
+
+export function resolveUserStatusPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_USER_STATUS_PATH) ?? DEFAULT_ULS_USER_STATUS_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+/** GET getUserStatus?flowType=listen|speak on adaptive host. */
+export function resolveUserStatusUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  flowType: "listen" | "speak" = "listen",
+): string {
+  const base = `${resolveWeekProgressOrigin(env)}${resolveUserStatusPath(env)}`;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}flowType=${encodeURIComponent(flowType)}`;
+}
+
+export function resolveListenTrainingReportPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_LISTEN_TRAINING_REPORT_PATH) ??
+    DEFAULT_ULS_LISTEN_TRAINING_REPORT_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveListenTrainingReportUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveWeekProgressOrigin(env)}${resolveListenTrainingReportPath(env)}`;
 }
 
 /**

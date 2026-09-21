@@ -18,7 +18,7 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 6. `score_speech` — Clio WSS `en.sent.score`（真实口语分；勿伪造）
 
 `auth_status` 已接入：从 `UNIPUS_JWT` / `UNIPUS_JWT_FILE`（或 `~/.config/unipus-mcp/jwt`）读取 JWT，探活 `ucloud.unipus.cn/api/uls/`。
-`list_week_progress` 已接入 activation/status（本周试用进度）。静默上传 / submit / grade 见 `docs/mcp.md` 与 `docs/api-notes.md`。
+`list_week_progress` 默认付费路径：listen **trainingReport**（试用 activation 字段可选）。静默上传 / submit / grade 见 `docs/mcp.md` 与 `docs/api-notes.md`。
 
 ## 登录（env / 文件，永不作为工具参数）
 

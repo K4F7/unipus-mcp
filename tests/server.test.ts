@@ -242,6 +242,7 @@ describe("unipus MCP server", () => {
   test("list_week_progress returns structured fields when JWT ok", async () => {
     const jwt = makeJwt({ openId: "oid-ok", exp: 4_000_000_000 });
     const calls: string[] = [];
+    const weekUrl = resolveWeekProgressUrl({});
     const http: UnipusHttp = {
       async request(input) {
         calls.push(input.url);
@@ -258,6 +259,8 @@ describe("unipus MCP server", () => {
     const server = createUnipusMcpServer({
       credentials: { getJwt: async () => jwt },
       http,
+      // Force legacy single-GET so this smoke stays independent of paid multi-step.
+      weekProgressUrl: weekUrl,
     });
     const client = new Client({ name: "test-client", version: "0.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -276,7 +279,7 @@ describe("unipus MCP server", () => {
       assert.equal(payload.speak_done, null);
       assert.equal(payload.speak_total, null);
       assert.equal(payload.level, "S15");
-      assert.deepEqual(calls, [resolveWeekProgressUrl({})]);
+      assert.deepEqual(calls, [weekUrl]);
       assert.doesNotMatch(JSON.stringify(payload), /eyJhbGci/);
     } finally {
       await client.close();
