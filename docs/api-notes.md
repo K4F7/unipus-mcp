@@ -74,11 +74,17 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 - `POST /api/uls/user/loadTaskRes` body `{ taskId, ansVersion }`，头 `u-app-id: 116` 或 WebView 的 `sourceid: 116`。`value` 是音频 URL 列表。
 - `POST /api/uls/part/submit` body `{ action: "snapshot", ansVersion, duration, partId, taskId, token, userData: [{ instanceId, answer, answerVersion, context, contextVersion, instStatus }] }`。`token` 来自 `loadPaper`。
 
-「AI口语对话」「自由表达」当时有锁，SPA 上的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 这次没有出现。
+「AI口语对话」「自由表达」当时有锁，SPA 上的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 这次没有出现。解锁/抓包仍见 issue **#18**；本仓库不要臆造这些路径。
 
-### 交卷后读分
+### MCP `start_speaking_training` (#20)
 
-`POST https://ucloud.unipus.cn/api/uls/user/loadGradedQuestions`（`uadaptive` 同样）body `{ taskId, ansVersion }`，头 `u-app-id: 116` + 裸 JWT。`code=1`，`value` 为列表。条目键：`questionInstanceId`、`score`、`scoreDetail`、`review`、`questionContent`、`questionAnswer`、`rateStatus`、`rateType`、`actualRateType`、`objectiveReview`、`questionAnalysis`、`iwriteReview`、`userId`。GET 带 query 会 `code=500`。当前未交卷的任务列表可以为空；已做完的历史任务能返回条目。尚无 MCP 工具。
+- Thin alias：可选覆盖 `taskId`/`ansVersion`，否则 `GET getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`）→ 同一 `POST loadPaper`。
+- 返回与 `start_listening_training` 相同（`task_id` / `paper_token` / `instance_ids`）。
+- 勿与打开的 WebView 抢 token（`part/submit` → `4021`）。
+
+### 交卷后读分 / MCP `load_graded_questions` (#20)
+
+`POST https://ucloud.unipus.cn/api/uls/user/loadGradedQuestions`（`uadaptive` 同样）body `{ taskId, ansVersion }`，头 `u-app-id: 116` + 裸 JWT。`code=1`，`value` 为列表。条目键：`questionInstanceId`、`score`、`scoreDetail`、`review`、`questionContent`、`questionAnswer`、`rateStatus`、`rateType`、`actualRateType`、`objectiveReview`、`questionAnalysis`、`iwriteReview`、`userId`。GET 带 query 会 `code=500`。当前未交卷的任务列表可以为空；已做完的历史任务能返回条目。MCP 工具：`load_graded_questions`。
 
 ## Week progress
 
@@ -102,7 +108,7 @@ Official app homepage uses `getUserStatusForApp`, not `trainingReport`. The note
 
 ### Earlier probes (trainingReport is not the homepage counter)
 
-**Status (2026-09-21):** path **not findable** from H5 SPA static + JWT probes. Do **not** wire guessed paths. Needs **unipus device capture** (PCAPdroid / Frida) while opening 口语首页 so `tvWeekProgress` (native UTSS) refreshes.
+**Historical (2026-09-21, superseded):** trainingReport-style speak week path was **not findable** from H5 SPA + JWT probes. Homepage counters are now **`getUserStatusForApp`** (see table above) — do **not** treat this subsection as current BLOCKED status.
 
 **SPA static (`tmp-speech-probe/index.js`):**
 
@@ -128,7 +134,7 @@ Official app homepage uses `getUserStatusForApp`, not `trainingReport`. The note
 | `POST /api/uls/report/listen/trainingReport` + **listen** taskId | OK: `weeklyCompleted` (e.g. 5) |
 | same + **speak** taskId | business **500** |
 
-**Capture ask (unipus):** short PCAPdroid burst → open 口语 tab / pull-to-refresh until `tvWeekProgress` shows x/3 → stop VPN. Prefer hosts `uadaptive.unipus.cn` / `ucloud.unipus.cn`. Record method+path+JSON keys that carry done/total (expect ~3). Then wire `list_week_progress` `speak_*` like listen trainingReport.
+**Note:** speak homepage week is wired via `getUserStatusForApp` (PR #17). AI对话 / 自由表达 emulator leftovers remain **#18**.
 
 ## Ops: PCAPdroid
 
@@ -254,7 +260,7 @@ Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
 - Helper: `buildEnSentScoreQuestionContent` / `clioToEnSentScoreFields({ qiniuUrl })`. Optional `reviewScores` maps Clio `overall→score`, `fluency→smooth`, etc. for callers — **not** embedded in answer JSON.
 - Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists**. Pre-submit: `score_speech` → optional Qiniu upload → `grade_question` with children-shaped content.
 - **Retest caveat:** grading an **already-submitted** task may empty `userAnswer` / return score=0. Need an **unsubmitted** task + remaining speak quota to live-verify non-zero grade.
-- After submit: **`POST /api/uls/user/loadGradedQuestions`** `{ taskId, ansVersion }` with raw JWT and `u-app-id: 116` (see speak section). No MCP tool yet.
+- After submit: **`POST /api/uls/user/loadGradedQuestions`** `{ taskId, ansVersion }` with raw JWT and `u-app-id: 116` (see speak section). MCP: `load_graded_questions`.
 - Paid week counters are `getUserStatusForApp` `weekDoneTaskCount` / `weekFrequency`. Do not hardcode 3 or 6.
 
 MCP: `grade_question`; `start_listening_training` returns `instance_ids` as exact strings.
