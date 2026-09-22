@@ -65,16 +65,49 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 
 第二次 `loadPaper` 会让端内 `POST /api/uls/part/submit` 返回 `code=4021`（请勿多设备同时作答）。无头复现不要和正在作答的 WebView 抢 token。
 
-### 范例学习（三关里已解锁的一关）
+### 范例学习（三关均已交卷；模拟器 2026-09-22）
 
-`GET /api/uls/part/get?taskId=&ansVersion=` 返回 `value.partList[]`：`partId`、`partName`、`questionInstanceIds`、`reportStatus`、`submitted`，以及 `paperName`、`score`。这次三关是「范例学习」「AI口语对话」「自由表达」。裸 JWT 即可，`sourceid` / `u-app-id` 都接受。
+`GET /api/uls/part/get?taskId=&ansVersion=` 返回 `value.partList[]`：`partId`、`partName`、`questionInstanceIds`、`reportStatus`、`submitted`，以及 `paperName`、`score`。三关名：「范例学习」「AI口语对话」「自由表达」。裸 JWT 即可，`sourceid` / `u-app-id` 都接受。交完后三关均为 `reportStatus=completed` / `submitted=true`（一份 `part/get` 的 `score` 示例为 90）。
 
 进入范例学习后实际请求（**没有**打到 `/api/uls/oral/train`）：
 
 - `POST /api/uls/user/loadTaskRes` body `{ taskId, ansVersion }`，头 `u-app-id: 116` 或 WebView 的 `sourceid: 116`。`value` 是音频 URL 列表。
-- `POST /api/uls/part/submit` body `{ action: "snapshot", ansVersion, duration, partId, taskId, token, userData: [{ instanceId, answer, answerVersion, context, contextVersion, instStatus }] }`。`token` 来自 `loadPaper`。
+- `POST /api/uls/part/submit` — **同一 URL**；作答中 `action:"snapshot"`，最终交卷 `action:"submit"`（**没有**另一条交卷 path）。Body：`{ action, ansVersion, duration, partId, taskId, token, userData: [{ instanceId, answer, answerVersion, context, contextVersion, instStatus }] }`。`token` 来自 `loadPaper`。成功 `code=1`。
+- Step 3 题型：资源 `u-listen-speak-sentence-scoop-follow-read.js`，卷内 `type`=`sentence-scoop-record`（听译朗读）。跟读子题 `record.type`=`EN_SENT_SCORE`；有声快照含 `recordDetail` / `specific_scores`（见下方 MCP diffs）。
 
-「AI口语对话」「自由表达」当时有锁，SPA 上的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 这次没有出现。解锁/抓包仍见 issue **#18**；本仓库不要臆造这些路径。
+### AI口语对话（进关到出关；模拟器 2026-09-22）
+
+**没有**请求 `/api/uls/oral/train`。真实 path 如下（多数在 **ucloud**；业务成功码是 **`code=200`**，不是 uls 用户接口那种 `1`）。业务头：`sourceid: 116`（小写）、`x-requested-with: cn.unipus.cloud`、裸 JWT。`create` body 里 `sourceId` 也是 116。
+
+| 请求 | 位置 | body / query 键 | 成功时 |
+| --- | --- | --- | --- |
+| `POST /api/uls/conversation/create` | **ucloud** | `ansVersion` `questionId` `role` `sourceId` `taskId` `title` | `code=200`。`data`: `conversationId` `sceneId` `token` `level` |
+| `GET /api/uls/conversation/chat/info` | ucloud（作答中也会打 uadaptive） | query `conversationId` | `code=200`。`data.record` 含 `recordDetail` `list` `role`，另有 `duration` |
+| `GET /api/uls/conversation/max-count` | ucloud | 无 body | `code=200`，`data` 为数字（界面「话轮数 /10」） |
+| `POST /api/uls/ebcp/auth` | ucloud | `scene` `bizExt`（内有 `questionId` `taskId` `ansVersion` `openId` `sourceId` `partId`） | `code=200`。`data`: `pAppId` `pCipTxt` `sourceId`（勿抄这些值） |
+| `POST /api/uls/ebcp/speakers` | ucloud | `scene` `bizExt` | `code=200`。`data.speakers[]`、`data.speakVoiceTones[]` |
+| `POST /api/uls/conversation/save` | ucloud | `duration` `speakTaskId` `speakAddTaskRecord` | `code=200`。`data.id` |
+| `POST /api/uls/conversation/stop` | ucloud | `evaluation` `evaluationContent` `speakTaskId` `voiceToneId` | `code=200`（退出并完成「你认为 AI 表现如何」之后） |
+| `POST /api/uls/part/submit` | 退出时在 **ucloud** | 仍是 `action:"submit"` + `partId` `taskId` `ansVersion` `token` `duration` `userData` | `code=1` |
+
+`speakAddTaskRecord` 键：`aiType` `botAudioDuration` `botAudioUrl` `botChContent` `botEnContent` `digitalPersonId` `sort` `speakType` `speed` `userAudioDuration` `userAudioUrl` `userChContent` `userEnContent` `voiceToneId`。
+
+对话 WebSocket：`GET https://oral.unipus.cn/oral_api/ws//{conversationId}` — **不是** `/api/uls/oral/train`。用户音频仍走 `query-upload-url`（文件名如 `ai-dialog-….wav` → birdflock ans-prod）。退出后 `part/get`：`reportStatus=completed`，`submitted=true`。
+
+### 自由表达（模拟器 2026-09-22）
+
+资源名 `mobile-speak-free-….js`，卷内类型 `oral-personal-state`。**没有**新的 path 前缀。进关仍是 `getUserStatus`、`part/get`、`loadAnswer`、`loadGradedQuestions`、`loadPaper`、`loadTaskRes`。
+
+录音是「点击录音」（不是按住）。答体 `record.type` 是 **`EN_PRED_SCORE`**（不是跟读的 `EN_SENT_SCORE`），`children[0].isDone=true`，`recordDetail.score` 为界面分。先 `part/submit` `action=snapshot`（`context` 为 `{"state":"doing"}`），再 `action=submit`，`code=1`。交卷后 `part/get`：`completed` / `submitted=true`。
+
+### MCP diffs vs App（文档对照；#18 抓包）
+
+1. **打分引擎**：端内是 `zt.unipus.cn/soe/api/{initialize,acquire,release,log}/v2`（另有 `acquire/v3`）；MCP `score_speech` 走 Clio WSS `en.sent.score`。SOE 字段名 `overall`/`fluency`/`integrity`/`pronunciation`；Clio `result` 数字键是 `accuracy`/`completeness`/`total`/`audio_time`（另有 `fluency`/`detail`）。同一句可两边都非 0，但字段集合不同。
+2. **范例 / 口语 part 交卷**：用 `POST /api/uls/part/submit`（`snapshot` → `submit`），**不是** `submit_answer` 的 `POST /api/uls/user/submitAnswer`。
+3. **上传链**与 MCP `upload_answer_audio` 一致：`query-upload-url` → 七牛 `up-z1.qiniup.com`。
+4. **答体形状**：`children[].record` + 子项 `isDone`；有声 snapshot 的 `record` 还带 `recordDetail` / `specific_scores`。MCP `buildEnSentScoreRecord` 目前只组 `type`/`text`/`url`/`path`/`replayUrl`/`list`，**不**放那两块（文档差异；本 PR 不改代码）。
+5. SPA 静态曾出现的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 在整段交卷抓包中**仍未出现** — 勿臆造。
+
 
 ### MCP `start_speaking_training` (#20)
 
@@ -134,7 +167,7 @@ Official app homepage uses `getUserStatusForApp`, not `trainingReport`. The note
 | `POST /api/uls/report/listen/trainingReport` + **listen** taskId | OK: `weeklyCompleted` (e.g. 5) |
 | same + **speak** taskId | business **500** |
 
-**Note:** speak homepage week is wired via `getUserStatusForApp` (PR #17). AI对话 / 自由表达 emulator leftovers remain **#18**.
+**Note:** speak homepage week is wired via `getUserStatusForApp` (PR #17). AI口语对话 / 自由表达 contracts captured 2026-09-22 (issue **#18**); see sections above — still **no** `/oral/train`.
 
 ## Ops: PCAPdroid
 
@@ -157,7 +190,9 @@ Note: 口语首页 `tvWeekProgress` (e.g. **2/3**) **matches** activation `speak
 ## 口语 SPA routes (static)
 
 `/speak`, `/speak/custom`, `/speak/custom/ai-dialog`, `/speak/custom/ai-dialog-report`, `/speak/custom/free`, `/speak/custom/free-report`, …
-API refs: `/api/uls/oral/train`, `/api/uls/user/answer/query-upload-url`, share cards `ai-oral` / `free-expression`.
+API refs in bundle: `/api/uls/oral/train`, `/api/uls/user/answer/query-upload-url`, share cards `ai-oral` / `free-expression`.
+
+**Live capture (2026-09-22):** AI口语对话 uses `conversation/*` + `ebcp/*` (ucloud); free speak reuses `part/submit` with `EN_PRED_SCORE`. `/api/uls/oral/train` remains SPA-only — not observed on the wire. See captured sections above.
 
 ## Auto audio inject (hard requirement)
 
@@ -176,21 +211,21 @@ Goal: App `AudioRecord` / WebView mic sees our TTS/WAV without human speech.
 MVP acceptance: one 跟读/口头填空/口语题 auto-filled by generated audio end-to-end.
 
 
-## 口语题型（App 实勘 2026-09-21）
+## 口语题型（App 实勘；三关已交卷 2026-09-22）
 
-入口：底栏「口语」→ 当前任务卡（例：讲述大学期间追求成长的目标）→「开始训练」→ 三关：
+入口：底栏「口语」→ 当前任务卡 →「开始训练」→ 三关：
 
-| 关卡 | 状态 | 内容形态 |
-|------|------|----------|
-| **范例学习** | 解锁 | Step1–3；先听范文音频+跟读文本；可长按查词；后续 Step 预计跟读/录音 |
-| **AI口语对话** | 锁 | 需完成范例后解锁；对应 SPA `/speak/training/ai-dialog` |
-| **自由表达** | 锁 | 对应 `/speak/training/free` 等 |
+| 关卡 | 状态（2026-09-22） | 内容形态 / 真实 API |
+|------|-------------------|---------------------|
+| **范例学习** | 已交卷 | Step1–3；跟读 `EN_SENT_SCORE`；Step3 `sentence-scoop-record`；`part/submit` snapshot→submit |
+| **AI口语对话** | 已交卷 | `conversation/*` + `ebcp/*` on **ucloud**（`code=200`）；退出再 `part/submit`；WS `oral.unipus.cn/oral_api/ws//{conversationId}` — **不是** `/oral/train` |
+| **自由表达** | 已交卷 | 无新 path 前缀；`record.type=EN_PRED_SCORE`；`part/submit` snapshot→submit |
 
 口语首页本周计数 / 达标数见上一节 `getUserStatusForApp`，不要再用试用 2/3 或写死 3。
 任务卡 **0%** = 本篇完成度，不是周进度。
 
-范例学习的真请求是 `loadPaper` + `part/get` + `loadTaskRes` + `part/submit`，不是 `/api/uls/oral/train`。`/api/uls/oral/train` 仍只是 SPA 静态引用，AI 对话和自由表达解锁前没有抓到。
-`POST /api/uls/user/answer/query-upload-url` 仍是答案上传凭证。
+范例 / AI对话 / 自由表达的真请求见上方「范例学习」「AI口语对话」「自由表达」小节。SPA 静态仍引用 `/api/uls/oral/train`，但整段抓包**从未**打到该 path — 勿臆造。
+`POST /api/uls/user/answer/query-upload-url` 仍是答案上传凭证（含 `ai-dialog-….wav`）。
 
 本周计数和达标数都从 `getUserStatusForApp` 读：`weekDoneTaskCount` / `weekFrequency`。听力和口语各一次。不要写死 3 或 6。
 

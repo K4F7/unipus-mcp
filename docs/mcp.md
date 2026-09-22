@@ -13,7 +13,7 @@
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
-| `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021）；AI对话/自由表达见 #18 |
+| `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021）；conversation/free-speak 契约见 `docs/api-notes.md`（尚无专用 MCP 工具） |
 | `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
@@ -50,7 +50,7 @@
 - 可选 `taskId` / `ansVersion` / `openId`；缺 `taskId` 或 `ansVersion` 任一则先 `GET …/getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`，默认 `116`）补全，再复用听力同一 `loadPaper`。
 - 返回形状与 `start_listening_training` 相同；成功 message 含「口语」。
 - **不要**在 App WebView 已打开同一任务时调用 — `part/submit` 可能 `4021`（多设备）。
-- **不要**臆造 `/api/uls/oral/train`。AI对话 / 自由表达仍见 issue **#18**。
+- **不要**臆造 `/api/uls/oral/train`。AI口语对话 / 自由表达契约已写入 `docs/api-notes.md`（`conversation/*`、`EN_PRED_SCORE`、`part/submit`）；**尚无**专用 MCP 工具（follow-up issue）。
 
 `load_graded_questions`：
 
@@ -198,7 +198,7 @@ Headless U口语 start (same `loadPaper` as listening):
 
 - Optional `taskId` / `ansVersion` / `openId`; otherwise resolves via `getUserStatusForApp?flowType=speak` + `u-app-id`.
 - Do **not** call while WebView is mid-task (4021). Do **not** invent `/oral/train`.
-- AI对话 / 自由表达 capture remains **#18**.
+- AI口语对话 (`conversation/create|save|stop` + `ebcp/*` on ucloud) and 自由表达 (`EN_PRED_SCORE` + `part/submit`) contracts are in `docs/api-notes.md`. **No dedicated MCP tools yet** for `conversation/*` (follow-up issue).
 
 ## `load_graded_questions`
 
