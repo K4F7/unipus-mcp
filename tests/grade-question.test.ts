@@ -110,6 +110,53 @@ describe("buildEnSentScore*", () => {
       list: [],
     });
   });
+
+  test("embeds app snapshot recordDetail and specific_scores", () => {
+    const record = buildEnSentScoreRecord({
+      text: "This helps me get important work done earlier.",
+      url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      reviewScores: {
+        score: 98,
+        smooth: 93,
+        completed: 100,
+        correctness: 97,
+        relevance: 0,
+      },
+    });
+    assert.deepEqual(record.recordDetail, {
+      asrDetail: "",
+      audioUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
+      comment: "",
+      completed: 100,
+      correctness: 97,
+      details: [],
+      detailsWords: [],
+      relevance: 0,
+      score: 98,
+      smooth: 93,
+    });
+    assert.deepEqual(record.specific_scores, {
+      accuracy: 0.97,
+      fluency: 0.93,
+      integrity: 1,
+      relevance: 0,
+      total: 0.98,
+    });
+  });
+
+  test("omits score keys the engine did not return", () => {
+    const record = buildEnSentScoreRecord({
+      text: "hi",
+      url: "https://birdflock.unipus.cn/a.mp3",
+      reviewScores: { score: 76 },
+    });
+    const detail = record.recordDetail as Record<string, unknown>;
+    const specific = record.specific_scores as Record<string, unknown>;
+    assert.equal(detail.score, 76);
+    assert.equal("smooth" in detail, false);
+    assert.equal("correctness" in detail, false);
+    assert.deepEqual(specific, { total: 0.76 });
+  });
 });
 
 describe("parseGradeQuestionBody", () => {
