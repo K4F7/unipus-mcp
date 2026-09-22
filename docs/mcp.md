@@ -14,7 +14,7 @@
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
 | `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021）；conversation/free-speak 契约见 `docs/api-notes.md`（尚无专用 MCP 工具） |
-| `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK |
+| `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK；已交卷口语非空时分在 `review[].recordDetail` / `specificScores`（驼峰，≠ 快照蛇形 `specific_scores`） |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
@@ -221,7 +221,7 @@ Headless grade via `POST /api/uls/rate/gradeQuestion` (raw JWT, no Bearer).
 - Args: `taskId`, `questionInstanceId` (**exact string** snowflake), `questionContent` (answer JSON string), optional `ansVersion` / `isObjective` / `openId`.
 - Override URL: `UNIPUS_ULS_GRADE_QUESTION_PATH` / `UNIPUS_ULS_ADAPTIVE_ORIGIN`.
 - **CDN-url-only** oral `{record:{url}}` often returns **score=0**. Prefer device-shaped `EN_SENT_SCORE` under `children[0].record` (+ child `isDone`) from `score_speech` / `buildEnSentScoreQuestionContent`. When the engine returns finite review scores, the record also includes `recordDetail` and `specific_scores` (in-app snapshot: `specific_scores.total = recordDetail.score/100`). Already-submitted tasks may empty userAnswer — retest needs unsubmitted + speak quota.
-- After `submit_answer`, use MCP `load_graded_questions` (`POST loadGradedQuestions` + `u-app-id: 116`). GET with query returns code 500.
+- After `submit_answer`, use MCP `load_graded_questions` (`POST loadGradedQuestions` + `u-app-id: 116`). GET with query returns code 500. Completed speak papers put scores in `review[]` (`recordDetail` + camelCase `specificScores`); snapshot submit still uses snake_case `specific_scores`.
 - Paid week counters come from `getUserStatusForApp` (`weekDoneTaskCount` / `weekFrequency`); do not hardcode 3/5/6.
 
 ## `score_speech`

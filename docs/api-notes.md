@@ -105,7 +105,7 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 1. **打分引擎**：端内是 `zt.unipus.cn/soe/api/{initialize,acquire,release,log}/v2`（另有 `acquire/v3`）；MCP `score_speech` 走 Clio WSS `en.sent.score`。SOE 字段名 `overall`/`fluency`/`integrity`/`pronunciation`；Clio `result` 数字键是 `accuracy`/`completeness`/`total`/`audio_time`（另有 `fluency`/`detail`）。同一句可两边都非 0，但字段集合不同。
 2. **范例 / 口语 part 交卷**：用 `POST /api/uls/part/submit`（`snapshot` → `submit`），**不是** `submit_answer` 的 `POST /api/uls/user/submitAnswer`。
 3. **上传链**与 MCP `upload_answer_audio` 一致：`query-upload-url` → 七牛 `up-z1.qiniup.com`。
-4. **答体形状**：`children[].record` + 子项 `isDone`；有声 snapshot 的 `record` 还带 `recordDetail` / `specific_scores`。MCP `buildEnSentScoreRecord` 目前只组 `type`/`text`/`url`/`path`/`replayUrl`/`list`，**不**放那两块（文档差异；本 PR 不改代码）。
+4. **答体形状**：`children[].record` + 子项 `isDone`；有声 snapshot 的 `record` 还带 `recordDetail` / `specific_scores`。MCP `buildEnSentScoreRecord`（#24）在有有限 `reviewScores` 时同样写入这两块：`recordDetail.score/smooth/completed/correctness/relevance` 为 0–100；`specific_scores.total/fluency/integrity/accuracy/relevance` 为前者 /100；`recordDetail.audioUrl` = 答体 `url`。引擎没给的字段不补 0。Clio 独有键不改名塞进 `recordDetail`。
 5. SPA 静态曾出现的 `/api/uls/oral/train`、`part-report`、`free-speaking-report` 在整段交卷抓包中**仍未出现** — 勿臆造。
 
 
@@ -115,9 +115,20 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 - 返回与 `start_listening_training` 相同（`task_id` / `paper_token` / `instance_ids`）。
 - 勿与打开的 WebView 抢 token（`part/submit` → `4021`）。
 
-### 交卷后读分 / MCP `load_graded_questions` (#20)
+### 交卷后读分 / MCP `load_graded_questions` (#20; 非空样例 #18)
 
-`POST https://ucloud.unipus.cn/api/uls/user/loadGradedQuestions`（`uadaptive` 同样）body `{ taskId, ansVersion }`，头 `u-app-id: 116` + 裸 JWT。`code=1`，`value` 为列表。条目键：`questionInstanceId`、`score`、`scoreDetail`、`review`、`questionContent`、`questionAnswer`、`rateStatus`、`rateType`、`actualRateType`、`objectiveReview`、`questionAnalysis`、`iwriteReview`、`userId`。GET 带 query 会 `code=500`。当前未交卷的任务列表可以为空；已做完的历史任务能返回条目。MCP 工具：`load_graded_questions`。
+`POST https://ucloud.unipus.cn/api/uls/user/loadGradedQuestions`（`uadaptive` 同样）body `{ taskId, ansVersion }`，头 `u-app-id: 116` + 裸 JWT。`code=1`，`value` 为列表。GET 带 query 会 `code=500`。当前未做的口语任务是空数组；已交完三关的口语篇 `value` 长度 3。MCP 工具：`load_graded_questions`。
+
+条目顶层键（已抓非空样例）：`rateType` `actualRateType` `rateStatus` `score` `scoreDetail` `review` `iwriteReview` `objectiveReview` `questionContent` `questionAnswer` `questionAnalysis`。
+
+`review[]` 里才是分数明细，**不是** `questionAnswer`（`questionAnswer.children[].answers` 常为空数组）：
+
+| 块 | 键 | 备注 |
+| --- | --- | --- |
+| `review[].recordDetail` | `score` `correctness` `details` `comment` `completed` `detailsWords` `asrDetail` `relevance` `smooth` | `details[]` 为 `{score, char}` |
+| `review[].specificScores` | `total` `integrity` `accuracy` `fluency` `relevance` | **驼峰** |
+
+交卷快照（`part/submit`）用蛇形 `specific_scores`；读分接口用驼峰 `specificScores`。听力已交卷体裁对照（`loadAnswer` / `loadGradedQuestions`）：篇章常有 3 条 `EN_SENT_SCORE`、`replyType` 多为 `singlechoice`；新闻可有 `oral-fillblank` / `recordParagraph`；长对话这篇 `loadGradedQuestions` 曾为空。已交卷听力再 `loadPaper` 会 `code=4013`（训练已经提交）。
 
 ## Week progress
 
