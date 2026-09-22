@@ -180,6 +180,34 @@ export function buildEnSentScoreQuestionContent(
 }
 
 /**
+ * Free-speak (`oral-personal-state`) record — same children shape as EN_SENT_SCORE
+ * but `record.type` = **EN_PRED_SCORE** (docs/api-notes.md 自由表达).
+ */
+export function buildEnPredScoreRecord(
+  input: EnSentScoreRecordInput,
+): Record<string, unknown> {
+  const record = buildEnSentScoreRecord(input);
+  record.type = "EN_PRED_SCORE";
+  return record;
+}
+
+/** questionContent / part/submit answer JSON for 自由表达. */
+export function buildEnPredScoreQuestionContent(
+  input: EnSentScoreRecordInput,
+): string {
+  return JSON.stringify({
+    children: [
+      {
+        record: buildEnPredScoreRecord(input),
+        value: [],
+        isDone: true,
+      },
+    ],
+    value: [],
+  });
+}
+
+/**
  * Grade one answer via POST /api/uls/rate/gradeQuestion
  * { taskId, questionInstanceId, ansVersion, questionContent, isObjective? }.
  * Auth: raw JWT (no Bearer). questionInstanceId must stay a string end-to-end.

@@ -94,11 +94,15 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 
 对话 WebSocket：`GET https://oral.unipus.cn/oral_api/ws//{conversationId}` — **不是** `/api/uls/oral/train`。用户音频仍走 `query-upload-url`（文件名如 `ai-dialog-….wav` → birdflock ans-prod）。退出后 `part/get`：`reportStatus=completed`，`submitted=true`。
 
+MCP（#23）：`conversation_create` / `conversation_save` / `conversation_stop`（及 `conversation_chat_info` / `conversation_max_count` / `ebcp_auth` / `ebcp_speakers`）+ 出关 `part_submit`。业务码：conversation/ebcp = **200**；`part/submit` = **1**。详见 `docs/mcp.md`。
+
 ### 自由表达（模拟器 2026-09-22）
 
 资源名 `mobile-speak-free-….js`，卷内类型 `oral-personal-state`。**没有**新的 path 前缀。进关仍是 `getUserStatus`、`part/get`、`loadAnswer`、`loadGradedQuestions`、`loadPaper`、`loadTaskRes`。
 
 录音是「点击录音」（不是按住）。答体 `record.type` 是 **`EN_PRED_SCORE`**（不是跟读的 `EN_SENT_SCORE`），`children[0].isDone=true`，`recordDetail.score` 为界面分。先 `part/submit` `action=snapshot`（`context` 为 `{"state":"doing"}`），再 `action=submit`，`code=1`。交卷后 `part/get`：`completed` / `submitted=true`。
+
+MCP（#23）：`part_submit` + `buildEnPredScoreRecord` / `buildEnPredScoreQuestionContent`（`EN_PRED_SCORE`）。见 `docs/mcp.md`。
 
 ### MCP diffs vs App（文档对照；#18 抓包）
 
@@ -114,6 +118,7 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 - Thin alias：可选覆盖 `taskId`/`ansVersion`，否则 `GET getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`）→ 同一 `POST loadPaper`。
 - 返回与 `start_listening_training` 相同（`task_id` / `paper_token` / `instance_ids`）。
 - 勿与打开的 WebView 抢 token（`part/submit` → `4021`）。
+- AI对话 / 自由表达专用工具见 #23：`conversation_*` / `part_submit` / `EN_PRED_SCORE` helpers（`docs/mcp.md`）。
 
 ### 交卷后读分 / MCP `load_graded_questions` (#20; 非空样例 #18)
 
