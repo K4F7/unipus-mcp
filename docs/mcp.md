@@ -16,6 +16,7 @@
 | `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021） |
 | `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK；已交卷口语非空时分在 `review[].recordDetail` / `specificScores`（驼峰，≠ 快照蛇形 `specific_scores`） |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
+| `save_snapshot` | `POST /api/uls/user/saveSnapshot`（听力口语位 S5 落快照；`code=1`；**勿**用 `submit_answer` / `part_submit` 冒充；圆环分≠`grade_question.score`） |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
 | `grade_question` | `POST /api/uls/rate/gradeQuestion`；`questionInstanceId` 必须字符串；CDN-only 常 score=0 |
@@ -191,6 +192,15 @@ Does **not** call `submitAnswer` yet (needs a fresh `loadPaper` token).
 Args: `filePath` (required), optional `fileName`, `openId`. No credentials in tool args.
 
 SSO helper: `npx tsx scripts/sso-login.ts` with `UNIPUS_USERNAME` / `UNIPUS_PASSWORD` → `~/.config/unipus-mcp/jwt`.
+
+
+## `save_snapshot`（听力口语位 S5）
+
+- `POST /api/uls/user/saveSnapshot`；业务成功 **`code=1`**。
+- 参数：`taskId`、`paperToken`（loadPaper token）、`instanceId`、`answer`（JSON；常含 `EN_SENT_SCORE` / `EN_SENT_REC`）；可选 `ansVersion` / `durationSec` / `openId`。
+- 头：裸 JWT + `sourceid` / `u-app-id`（默认 116）+ `x-requested-with: cn.unipus.cloud`。
+- **分流**：听力 Post-listening 口头填空 / 跟读 → `upload_answer_audio` →（端内 SOE）→ **`save_snapshot`** → `grade_question`。不要用 `submit_answer`，也不要打口语 `part_submit`。
+- **分数 caveat**：界面圆环（例口头填空 87）与 `grade_question.value.score`（同次曾为 173）是不同字段；跟读题两者可一致（例 95）。勿混用。
 
 ## `submit_answer`
 

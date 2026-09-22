@@ -374,6 +374,32 @@ SPA passes `appKey`/`appSecret` into SOE `initConfig` — **not present in main 
 
 MCP: `score_speech` ships the Clio WSS path; `grade_question` stays separate (persist).
 
+
+## 听力口语位 S5（Post-listening 口头填空 / 跟读；#27 → #28）
+
+听力卷 **Post-listening** 错题讲解里的口语位（口头填空 / 跟读）走独立落分链，**不要**用 `submit_answer`（`POST /api/uls/user/submitAnswer`）冒充，也**不要**打口语 `part/submit`。
+
+| 步骤 | Path | MCP | 成功码 |
+|------|------|-----|--------|
+| 1. 上传凭证 | `POST /api/uls/user/answer/query-upload-url` `{fileName}` | `upload_answer_audio` | 1 |
+| 2. 端内打分 | `zt.unipus.cn/soe/...`（acquire/log/release） | （非 MCP；端内 SOE） | 业务 0 |
+| 3. 落快照 | `POST /api/uls/user/saveSnapshot` | **`save_snapshot`**（#28） | **1** |
+| 4. 单题出分 | `POST /api/uls/rate/gradeQuestion` | `grade_question` | 1 |
+
+`saveSnapshot` body 键：`ansVersion` `duration` `taskId` `token` `userData`（答体常含 `EN_SENT_SCORE` / `EN_SENT_REC`）。头：`u-app-id` / `sourceid` 116，`x-requested-with: cn.unipus.cloud`，裸 JWT。
+
+### 分流
+
+| 场景 | 正确工具 / path | 不要用 |
+|------|-----------------|--------|
+| 听力卷内口语位（本 S5） | `save_snapshot` → `grade_question` | `submit_answer`、`part_submit` |
+| 听力常规客观题 / 定级全卷 | `submit_answer` | `save_snapshot` 冒充终交 |
+| 口语范例 / AI对话退出 / 自由表达 | `part_submit`（snapshot→submit） | `save_snapshot`、`submit_answer` |
+
+### 分数字段 caveat（87 vs 173）
+
+跟读题 `gradeQuestion.value.score` 可与界面一致（例 95）。口头填空界面圆环曾为 **87**，同次 `gradeQuestion.value.score` 为 **173** —— **不是同一字段**，勿混用、勿把圆环分当成 `grade_question` 的 score 写回。
+
 ## Placement / 定级 completion path (SPA reverse 2026-09-21)
 
 Source: `uadaptive` chunks `mobile-speak-placement-*.js` / `mobile-listen-placement-*.js` + main `index-*.js` API map. **No skip/bypass API** in SPA (no `skipPlacement` / 免测 / 跳过定级).

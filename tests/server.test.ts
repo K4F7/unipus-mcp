@@ -24,6 +24,7 @@ const EXPECTED_TOOLS = [
   "part_submit",
   "upload_answer_audio",
   "submit_answer",
+  "save_snapshot",
   "speak_and_submit",
   "grade_question",
   "score_speech",
