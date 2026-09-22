@@ -17,16 +17,7 @@ import {
 } from "./ebcp.js";
 import { toMcpToolResponse } from "./result.js";
 
-export type ConversationToolPorts = ConversationPorts &
-  EbcpPorts & {
-    conversationCreateUrl?: string;
-    conversationSaveUrl?: string;
-    conversationStopUrl?: string;
-    conversationChatInfoUrl?: string;
-    conversationMaxCountUrl?: string;
-    ebcpAuthUrl?: string;
-    ebcpSpeakersUrl?: string;
-  };
+export type ConversationToolPorts = ConversationPorts & EbcpPorts;
 
 export function registerConversationTools(
   server: McpServer,

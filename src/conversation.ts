@@ -111,15 +111,6 @@ export function parseConversationDataBody(
   return { data: parsed.data, raw_code: parsed.raw_code };
 }
 
-/** @deprecated Prefer ulsCloudHeaders from uls-business; kept for callers/tests. */
-export function cloudConversationHeaders(
-  jwt: string,
-  env?: NodeJS.ProcessEnv,
-  openId?: string,
-): Record<string, string> {
-  return ulsCloudHeaders(jwt, env, openId);
-}
-
 export async function conversationCreate(
   ports: ConversationPorts,
   input: ConversationCreateInput,
@@ -167,15 +158,11 @@ export async function conversationCreate(
     },
     mapOk(parsed) {
       const data = asRecord(parsed.data) ?? {};
-      const conversationId =
-        asExactIdString(data.conversationId) ??
-        asExactIdString(data.conversation_id) ??
-        (typeof data.conversationId === "string"
-          ? data.conversationId
-          : undefined);
-      const sceneId =
-        asExactIdString(data.sceneId) ??
-        (typeof data.sceneId === "string" ? data.sceneId : undefined);
+      const conversationId = firstExactId(
+        data.conversationId,
+        data.conversation_id,
+      );
+      const sceneId = firstExactId(data.sceneId);
       const token =
         typeof data.token === "string" && data.token.length > 0
           ? data.token
@@ -231,9 +218,7 @@ export async function conversationSave(
     },
     mapOk(parsed) {
       const data = asRecord(parsed.data) ?? {};
-      const recordId =
-        asExactIdString(data.id) ??
-        (typeof data.id === "string" ? data.id : undefined);
+      const recordId = firstExactId(data.id);
       return {
         message: recordId
           ? `已保存对话轮次 id=${recordId}`
@@ -262,8 +247,9 @@ export async function conversationStop(
   if (input.evaluationContent != null) {
     body.evaluationContent = input.evaluationContent;
   }
-  if (input.voiceToneId != null && String(input.voiceToneId).trim().length > 0) {
-    body.voiceToneId = String(input.voiceToneId).trim();
+  const voiceToneId = input.voiceToneId?.trim();
+  if (voiceToneId != null && voiceToneId.length > 0) {
+    body.voiceToneId = voiceToneId;
   }
 
   return conversationRequest(ports, {
@@ -381,6 +367,17 @@ async function conversationRequest(
   };
 }
 
+/** First non-null asExactIdString among candidates (no String(number) fallback). */
+function firstExactId(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    const id = asExactIdString(candidate);
+    if (id != null) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Prefer speakTaskId; accept conversationId as alias (create’s conversation_id).
  * Never String(number) after asExactIdString fails.
@@ -389,11 +386,7 @@ function resolveSpeakTaskId(input: {
   speakTaskId?: string;
   conversationId?: string;
 }): string | null {
-  const raw = input.speakTaskId ?? input.conversationId;
-  if (raw == null) {
-    return null;
-  }
-  return asExactIdString(raw);
+  return firstExactId(input.speakTaskId, input.conversationId) ?? null;
 }
 
 function resolveSourceId(

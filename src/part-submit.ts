@@ -9,6 +9,7 @@ import {
   numericCode,
   parseBusinessBody,
   ulsAuthedJsonRequest,
+  ulsCloudHeaders,
 } from "./uls-business.js";
 
 /**
@@ -78,6 +79,14 @@ export function parsePartSubmitBody(
   return { data: parsed.data, raw_code: parsed.raw_code };
 }
 
+function finiteOrDefault(value: number | undefined, fallback: number): number {
+  return value != null && Number.isFinite(value) ? Number(value) : fallback;
+}
+
+function asJsonOrString(value: string | Record<string, unknown>): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
 /**
  * Build the wire body for part/submit (snapshot or submit).
  * context objects are JSON-stringified; answer objects likewise.
@@ -89,41 +98,18 @@ export function buildPartSubmitBody(
   const taskId = asExactIdString(input.taskId) ?? "";
   const partId = asExactIdString(input.partId) ?? "";
   const token = input.token.trim();
-  const ansVersion =
-    input.ansVersion != null && Number.isFinite(input.ansVersion)
-      ? Number(input.ansVersion)
-      : 1;
-  const duration =
-    input.duration != null && Number.isFinite(input.duration)
-      ? Math.max(0, Number(input.duration))
-      : 0;
+  const ansVersion = finiteOrDefault(input.ansVersion, 1);
+  const duration = Math.max(0, finiteOrDefault(input.duration, 0));
 
   const userData = input.userData.map((item) => {
-    const instanceId = asExactIdString(item.instanceId) ?? "";
-    const answer =
-      typeof item.answer === "string"
-        ? item.answer
-        : JSON.stringify(item.answer);
-    const context =
-      item.context == null
-        ? undefined
-        : typeof item.context === "string"
-          ? item.context
-          : JSON.stringify(item.context);
     const row: Record<string, unknown> = {
-      instanceId,
-      answer,
-      answerVersion:
-        item.answerVersion != null && Number.isFinite(item.answerVersion)
-          ? Number(item.answerVersion)
-          : 1,
-      contextVersion:
-        item.contextVersion != null && Number.isFinite(item.contextVersion)
-          ? Number(item.contextVersion)
-          : 1,
+      instanceId: asExactIdString(item.instanceId) ?? "",
+      answer: asJsonOrString(item.answer),
+      answerVersion: finiteOrDefault(item.answerVersion, 1),
+      contextVersion: finiteOrDefault(item.contextVersion, 1),
     };
-    if (context != null) {
-      row.context = context;
+    if (item.context != null) {
+      row.context = asJsonOrString(item.context);
     }
     if (item.instStatus != null) {
       row.instStatus = item.instStatus;
@@ -193,20 +179,20 @@ export async function partSubmit(
     url,
     method: "POST",
     headers: (jwt) => {
-      const headers: Record<string, string> = {
-        authorization: jwt,
-        "content-type": "application/json",
-      };
       // AI dialog exit used ucloud with sourceid; 范例学习 also accepted u-app-id.
-      if (input.cloudHeaders !== false) {
-        headers.sourceid = resolveUAppId(ports.env);
-        headers["x-requested-with"] = "cn.unipus.cloud";
-        headers["u-app-id"] = resolveUAppId(ports.env);
+      if (input.cloudHeaders === false) {
+        const headers: Record<string, string> = {
+          authorization: jwt,
+          "content-type": "application/json",
+        };
+        const openId = input.openId?.trim();
+        if (openId != null && openId.length > 0) {
+          headers.openId = openId;
+        }
+        return headers;
       }
-      const openId = input.openId?.trim();
-      if (openId != null && openId.length > 0) {
-        headers.openId = openId;
-      }
+      const headers = ulsCloudHeaders(jwt, ports.env, input.openId);
+      headers["u-app-id"] = resolveUAppId(ports.env);
       return headers;
     },
     jsonBody: body,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { UnipusHttp } from "../src/http.js";
+import { mockHttp } from "./mock-http.js";
 import {
   DEFAULT_ULS_PART_SUBMIT_PATH,
   resolvePartSubmitUrl,
@@ -16,42 +16,6 @@ import {
   buildEnPredScoreQuestionContent,
   buildEnPredScoreRecord,
 } from "../src/grade-question.js";
-
-function mockHttp(
-  handler: (input: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body?: string;
-  }) => Promise<{ statusCode: number; body: string }>,
-): UnipusHttp & {
-  calls: Array<{
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body?: string;
-  }>;
-} {
-  const calls: Array<{
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body?: string;
-  }> = [];
-  return {
-    calls,
-    async request(input) {
-      const call = {
-        url: input.url,
-        method: input.method ?? "GET",
-        headers: input.headers ?? {},
-        body: input.body,
-      };
-      calls.push(call);
-      return handler(call);
-    },
-  };
-}
 
 describe("resolvePartSubmitUrl", () => {
   test("defaults to ucloud part/submit (not oral/train)", () => {

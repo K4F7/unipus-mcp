@@ -66,7 +66,7 @@ async function ebcpPost(
   mapOk: (data: unknown) => Partial<EbcpResult> & { message: string },
 ): Promise<EbcpResult> {
   const validated = validateEbcpInput(input);
-  if ("isError" in validated) {
+  if (!("scene" in validated)) {
     return validated;
   }
 

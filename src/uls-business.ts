@@ -60,22 +60,23 @@ export function parseBusinessBody(
   }
   const root = value as Record<string, unknown>;
   const code = numericCode(root.code);
-  const msg =
-    typeof root.msg === "string"
-      ? root.msg
-      : typeof root.message === "string"
-        ? root.message
-        : undefined;
+  const msg = [root.msg, root.message].find(
+    (value): value is string => typeof value === "string",
+  );
   if (code == null) {
     return { ok: false, kind: "parse", raw_code: null, msg };
   }
   if (code !== opts.successCode) {
     return { ok: false, kind: "business", raw_code: code, msg };
   }
-  const keys = opts.dataKeys ?? ["data", "value"];
-  const primary = root[keys[0] ?? "data"];
-  const secondary = keys[1] != null ? root[keys[1]] : undefined;
-  const data = primary ?? secondary ?? null;
+  let data: unknown = null;
+  for (const key of opts.dataKeys ?? ["data", "value"]) {
+    const value = root[key];
+    if (value !== undefined && value !== null) {
+      data = value;
+      break;
+    }
+  }
   return { ok: true, data, raw_code: code };
 }
 
