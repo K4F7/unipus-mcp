@@ -164,19 +164,25 @@ export function buildEnSentScoreRecord(
  * Device sample: `{ children:[{ record, value:[], isDone:true }], value:[] }`
  * — record is under children[0], isDone on the child (not inside record).
  */
-export function buildEnSentScoreQuestionContent(
-  input: EnSentScoreRecordInput,
+function buildChildrenQuestionContent(
+  record: Record<string, unknown>,
 ): string {
   return JSON.stringify({
     children: [
       {
-        record: buildEnSentScoreRecord(input),
+        record,
         value: [],
         isDone: true,
       },
     ],
     value: [],
   });
+}
+
+export function buildEnSentScoreQuestionContent(
+  input: EnSentScoreRecordInput,
+): string {
+  return buildChildrenQuestionContent(buildEnSentScoreRecord(input));
 }
 
 /**
@@ -195,16 +201,7 @@ export function buildEnPredScoreRecord(
 export function buildEnPredScoreQuestionContent(
   input: EnSentScoreRecordInput,
 ): string {
-  return JSON.stringify({
-    children: [
-      {
-        record: buildEnPredScoreRecord(input),
-        value: [],
-        isDone: true,
-      },
-    ],
-    value: [],
-  });
+  return buildChildrenQuestionContent(buildEnPredScoreRecord(input));
 }
 
 /**

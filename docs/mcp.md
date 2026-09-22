@@ -20,9 +20,9 @@
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
 | `grade_question` | `POST /api/uls/rate/gradeQuestion`；`questionInstanceId` 必须字符串；CDN-only 常 score=0 |
 | `score_speech` | Clio WSS `en.sent.score`（transcript + wavPath）→ overall/total + `en_sent_score_content`；凭据走 env |
-| `conversation_create` | AI口语对话开场：`POST /api/uls/conversation/create`（ucloud，`code=200`）；头 `sourceid` + `x-requested-with: cn.unipus.cloud` + 裸 JWT；返回 `conversation_id` / `scene_id` / `token` / `level`；**勿**臆造 `/oral/train` |
-| `conversation_save` | 保存话轮：`POST …/conversation/save`（`code=200`）；`speakTaskId` + `duration` + `speakAddTaskRecord` |
-| `conversation_stop` | 结束对话：`POST …/conversation/stop`（`code=200`）；随后用 `part_submit` `action=submit` 出关 |
+| `conversation_create` | AI口语对话开场：`POST /api/uls/conversation/create`（ucloud，`code=200`）；头 `sourceid` + `x-requested-with: cn.unipus.cloud` + 裸 JWT；返回 `conversation_id` / `scene_id` / `token` / `level`；**create token ≠ paper token**；**勿**臆造 `/oral/train` |
+| `conversation_save` | 保存话轮：`POST …/conversation/save`（`code=200`）；`speakTaskId`（= create 的 `conversation_id`，别名 `conversationId`）+ `duration` + `speakAddTaskRecord` |
+| `conversation_stop` | 结束对话：`POST …/conversation/stop`（`code=200`）；`speakTaskId`=create 的 `conversation_id`；随后 `part_submit`（**paper token**，非 create token） |
 | `conversation_chat_info` | `GET …/conversation/chat/info?conversationId=`（`code=200`） |
 | `conversation_max_count` | `GET …/conversation/max-count`（`code=200`，话轮上限） |
 | `ebcp_auth` | `POST …/ebcp/auth`（`code=200`）；`scene` + `bizExt` |
@@ -251,6 +251,11 @@ Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接
 2. 可选 `ebcp_auth` / `ebcp_speakers`、`conversation_max_count`、`conversation_chat_info`
 3. 每轮用户音频仍走 `upload_answer_audio`（`query-upload-url` → 七牛）；`conversation_save` 写入 `speakAddTaskRecord`
 4. `conversation_stop`（评价）→ `part_submit` `action=submit` 出关（**`code=1`**）
+
+### Agent footguns（必读）
+
+- **`speakTaskId` === create 的 `conversation_id`**：`conversation_save` / `conversation_stop` 的 `speakTaskId` 必须填 create 返回的 `conversation_id`。也接受别名参数 **`conversationId`**（与 `speakTaskId` 二选一）。
+- **create 的 `token` ≠ loadPaper / `part_submit` 的 paper token**：create 返回的 `token` 是对话侧 token；出关 `part_submit` 的 `token` 必须来自 `start_speaking_training` / `loadPaper` 的 `paper_token`，不要把 create token 塞进 part/submit。
 
 请求头：`Authorization` 裸 JWT、`sourceid`（默认 `116`）、`x-requested-with: cn.unipus.cloud`。JWT 仅 env/CLI。
 

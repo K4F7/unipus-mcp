@@ -20,11 +20,10 @@ import {
   conversationStop,
   conversationChatInfo,
   conversationMaxCount,
-  ebcpAuth,
-  ebcpSpeakers,
   isConversationSuccessCode,
   parseConversationDataBody,
 } from "../src/conversation.js";
+import { ebcpAuth, ebcpSpeakers } from "../src/ebcp.js";
 
 function mockHttp(
   handler: (input: {
@@ -336,5 +335,59 @@ describe("conversation helpers (info / max-count / ebcp)", () => {
     assert.ok(Array.isArray(speakers.speakers));
     assert.equal(http.calls.length, 2);
     assert.equal(http.calls[0]?.headers["x-requested-with"], "cn.unipus.cloud");
+  });
+});
+
+describe("speakTaskId / conversationId alias + ID safety", () => {
+  test("save accepts conversationId alias for speakTaskId", async () => {
+    const http = mockHttp(async () => ({
+      statusCode: 200,
+      body: JSON.stringify({ code: 200, data: { id: "rec-2" } }),
+    }));
+    const result = await conversationSave(
+      { credentials: { getJwt: async () => "jwt" }, http },
+      {
+        conversationId: "cid-alias",
+        duration: 1,
+        speakAddTaskRecord: { sort: 1 },
+      },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(JSON.parse(http.calls[0]?.body ?? "{}").speakTaskId, "cid-alias");
+  });
+
+  test("unsafe number questionId is INVALID_ARGUMENT (no String(number))", async () => {
+    const http = mockHttp(async () => ({ statusCode: 200, body: "{}" }));
+    const result = await conversationCreate(
+      { credentials: { getJwt: async () => "jwt" }, http },
+      {
+        taskId: "t1",
+        // Unsafe integer loses precision if String()'d — must reject.
+        questionId: Number.MAX_SAFE_INTEGER + 2,
+        title: "t",
+        role: "r",
+      } as unknown as {
+        taskId: string;
+        questionId: string;
+        title: string;
+        role: string;
+      },
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.code, "INVALID_ARGUMENT");
+    assert.deepEqual(http.calls, []);
+  });
+});
+
+describe("ebcpSpeakers shares validation with ebcpAuth", () => {
+  test("empty scene is INVALID_ARGUMENT for speakers", async () => {
+    const http = mockHttp(async () => ({ statusCode: 200, body: "{}" }));
+    const result = await ebcpSpeakers(
+      { credentials: { getJwt: async () => "jwt" }, http },
+      { scene: "   ", bizExt: { taskId: "t" } },
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.code, "INVALID_ARGUMENT");
+    assert.deepEqual(http.calls, []);
   });
 });

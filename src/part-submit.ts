@@ -1,15 +1,15 @@
-import { requireConfiguredJwt, type AuthPorts } from "./auth.js";
+import type { AuthPorts } from "./auth.js";
 import { resolvePartSubmitUrl, resolveUAppId } from "./config.js";
-import { summarizeHttpErrorBody } from "./http.js";
 import {
-  authRequired,
   toolError,
   type ToolResult,
 } from "./result.js";
+import { asExactIdString } from "./safe-json.js";
 import {
-  asExactIdString,
-  parseJsonPreservingLargeInts,
-} from "./safe-json.js";
+  numericCode,
+  parseBusinessBody,
+  ulsAuthedJsonRequest,
+} from "./uls-business.js";
 
 /**
  * POST /api/uls/part/submit — 范例学习 / AI对话退出 / 自由表达.
@@ -61,42 +61,33 @@ export type PartSubmitResult = ToolResult & {
 
 /** Exported for unit tests. */
 export function isPartSubmitSuccessCode(value: unknown): boolean {
-  const code = numericCode(value);
-  return code === 1;
+  return numericCode(value) === 1;
 }
 
-/** Exported for unit tests. */
+/** Exported for unit tests — thin wrapper over single-parse helper. */
 export function parsePartSubmitBody(
   body: string,
 ): { data: unknown; raw_code: number | null } | null {
-  let value: unknown;
-  try {
-    value = parseJsonPreservingLargeInts(body);
-  } catch {
+  const parsed = parseBusinessBody(body, {
+    successCode: 1,
+    dataKeys: ["value", "data"],
+  });
+  if (!parsed.ok) {
     return null;
   }
-  if (value == null || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const root = value as Record<string, unknown>;
-  if (!isPartSubmitSuccessCode(root.code)) {
-    return null;
-  }
-  return {
-    data: root.value ?? root.data ?? null,
-    raw_code: numericCode(root.code),
-  };
+  return { data: parsed.data, raw_code: parsed.raw_code };
 }
 
 /**
  * Build the wire body for part/submit (snapshot or submit).
  * context objects are JSON-stringified; answer objects likewise.
+ * Callers must validate IDs first (asExactIdString); never String(number).
  */
 export function buildPartSubmitBody(
   input: PartSubmitBodyInput,
 ): Record<string, unknown> {
-  const taskId = (asExactIdString(input.taskId) ?? input.taskId).trim();
-  const partId = (asExactIdString(input.partId) ?? input.partId).trim();
+  const taskId = asExactIdString(input.taskId) ?? "";
+  const partId = asExactIdString(input.partId) ?? "";
   const token = input.token.trim();
   const ansVersion =
     input.ansVersion != null && Number.isFinite(input.ansVersion)
@@ -108,9 +99,7 @@ export function buildPartSubmitBody(
       : 0;
 
   const userData = input.userData.map((item) => {
-    const instanceId =
-      asExactIdString(item.instanceId) ??
-      String(item.instanceId ?? "").trim();
+    const instanceId = asExactIdString(item.instanceId) ?? "";
     const answer =
       typeof item.answer === "string"
         ? item.answer
@@ -163,15 +152,21 @@ export async function partSubmit(
       'action 必须是 "snapshot" 或 "submit"',
     );
   }
-  const taskId = (asExactIdString(input.taskId) ?? input.taskId).trim();
-  const partId = (asExactIdString(input.partId) ?? input.partId).trim();
+  const taskId = asExactIdString(input.taskId);
+  if (taskId == null) {
+    return toolError(
+      "INVALID_ARGUMENT",
+      "taskId 不能为空或无法安全解析为精确 id",
+    );
+  }
+  const partId = asExactIdString(input.partId);
+  if (partId == null) {
+    return toolError(
+      "INVALID_ARGUMENT",
+      "partId 不能为空或无法安全解析为精确 id",
+    );
+  }
   const token = input.token.trim();
-  if (taskId.length === 0) {
-    return toolError("INVALID_ARGUMENT", "taskId 不能为空");
-  }
-  if (partId.length === 0) {
-    return toolError("INVALID_ARGUMENT", "partId 不能为空");
-  }
   if (token.length === 0) {
     return toolError(
       "INVALID_ARGUMENT",
@@ -182,92 +177,44 @@ export async function partSubmit(
     return toolError("INVALID_ARGUMENT", "userData 不能为空");
   }
   for (const item of input.userData) {
-    const instanceId =
-      asExactIdString(item.instanceId) ??
-      String(item.instanceId ?? "").trim();
-    if (instanceId.length === 0) {
-      return toolError("INVALID_ARGUMENT", "userData.instanceId 不能为空");
+    if (asExactIdString(item.instanceId) == null) {
+      return toolError(
+        "INVALID_ARGUMENT",
+        "userData.instanceId 不能为空或无法安全解析为精确 id",
+      );
     }
   }
 
   const url = ports.partSubmitUrl ?? resolvePartSubmitUrl(ports.env);
-  if (url.includes("/oral/train")) {
-    return toolError(
-      "INVALID_ARGUMENT",
-      "禁止使用 /oral/train（抓包未出现；请用 part/submit）",
-    );
-  }
-
-  const loaded = await requireConfiguredJwt(ports.credentials);
-  if (!loaded.ok) {
-    return loaded.result;
-  }
-
-  const headers: Record<string, string> = {
-    authorization: loaded.jwt,
-    "content-type": "application/json",
-  };
-  // AI dialog exit used ucloud with sourceid; 范例学习 also accepted u-app-id.
-  if (input.cloudHeaders !== false) {
-    headers.sourceid = resolveUAppId(ports.env);
-    headers["x-requested-with"] = "cn.unipus.cloud";
-    headers["u-app-id"] = resolveUAppId(ports.env);
-  }
-  const openId = input.openId?.trim();
-  if (openId != null && openId.length > 0) {
-    headers.openId = openId;
-  }
-
   const body = buildPartSubmitBody(input);
 
-  let response: { statusCode: number; body: string };
-  try {
-    response = await ports.http.request({
-      url,
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return toolError("NETWORK_ERROR", `part/submit 网络失败：${detail}`);
-  }
-
-  if (response.statusCode === 401) {
-    const hint = summarizeHttpErrorBody(response.body);
-    return authRequired(
-      hint != null
-        ? `part/submit 401：${hint}`
-        : "part/submit 401：JWT 无效或已过期",
-    );
-  }
-
-  if (response.statusCode < 200 || response.statusCode >= 300) {
-    const hint = summarizeHttpErrorBody(response.body);
-    return toolError(
-      "HTTP_ERROR",
-      hint != null
-        ? `part/submit HTTP ${response.statusCode}：${hint}`
-        : `part/submit HTTP ${response.statusCode}`,
-    );
-  }
-
-  const business = peekBusinessCode(response.body);
-  if (business != null && !isPartSubmitSuccessCode(business.code)) {
-    return toolError(
-      "BUSINESS_ERROR",
-      `part/submit 业务码 ${business.code}${
-        business.msg != null ? `：${business.msg}` : "（需 code=1）"
-      }`,
-    );
-  }
-
-  const parsed = parsePartSubmitBody(response.body);
-  if (parsed == null) {
-    return toolError(
-      "PARSE_ERROR",
-      "part/submit 响应无法解析（需业务成功码 code=1）",
-    );
+  const response = await ulsAuthedJsonRequest(ports, {
+    label: "part/submit",
+    url,
+    method: "POST",
+    headers: (jwt) => {
+      const headers: Record<string, string> = {
+        authorization: jwt,
+        "content-type": "application/json",
+      };
+      // AI dialog exit used ucloud with sourceid; 范例学习 also accepted u-app-id.
+      if (input.cloudHeaders !== false) {
+        headers.sourceid = resolveUAppId(ports.env);
+        headers["x-requested-with"] = "cn.unipus.cloud";
+        headers["u-app-id"] = resolveUAppId(ports.env);
+      }
+      const openId = input.openId?.trim();
+      if (openId != null && openId.length > 0) {
+        headers.openId = openId;
+      }
+      return headers;
+    },
+    jsonBody: body,
+    successCode: 1,
+    dataKeys: ["value", "data"],
+  });
+  if (!response.ok) {
+    return response.result;
   }
 
   return {
@@ -278,43 +225,7 @@ export async function partSubmit(
     action: input.action,
     task_id: taskId,
     part_id: partId,
-    raw_code: parsed.raw_code,
-    data: parsed.data,
+    raw_code: response.raw_code,
+    data: response.data,
   };
-}
-
-function numericCode(value: unknown): number | null {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function peekBusinessCode(
-  body: string,
-): { code: number; msg?: string } | null {
-  try {
-    const value = parseJsonPreservingLargeInts(body);
-    if (value == null || typeof value !== "object" || Array.isArray(value)) {
-      return null;
-    }
-    const root = value as Record<string, unknown>;
-    const code = numericCode(root.code);
-    if (code == null) {
-      return null;
-    }
-    const msg =
-      typeof root.msg === "string"
-        ? root.msg
-        : typeof root.message === "string"
-          ? root.message
-          : undefined;
-    return { code, msg };
-  } catch {
-    return null;
-  }
 }

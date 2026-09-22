@@ -285,25 +285,34 @@ function resolveUlsPath(
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+/** Shared ucloud ULS URL: origin + env-overridable path. */
+export function resolveUlsUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  envKey: string,
+  fallbackPath: string,
+): string {
+  return `${resolveUlsOrigin(env)}${resolveUlsPath(env, envKey, fallbackPath)}`;
+}
+
 export function resolveConversationCreateUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_CONVERSATION_CREATE_PATH",
     DEFAULT_ULS_CONVERSATION_CREATE_PATH,
-  )}`;
+  );
 }
 
 export function resolveConversationChatInfoUrl(
   env: NodeJS.ProcessEnv = process.env,
   conversationId: string,
 ): string {
-  const base = `${resolveUlsOrigin(env)}${resolveUlsPath(
+  const base = resolveUlsUrl(
     env,
     "UNIPUS_ULS_CONVERSATION_CHAT_INFO_PATH",
     DEFAULT_ULS_CONVERSATION_CHAT_INFO_PATH,
-  )}`;
+  );
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}conversationId=${encodeURIComponent(conversationId)}`;
 }
@@ -311,61 +320,61 @@ export function resolveConversationChatInfoUrl(
 export function resolveConversationMaxCountUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_CONVERSATION_MAX_COUNT_PATH",
     DEFAULT_ULS_CONVERSATION_MAX_COUNT_PATH,
-  )}`;
+  );
 }
 
 export function resolveConversationSaveUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_CONVERSATION_SAVE_PATH",
     DEFAULT_ULS_CONVERSATION_SAVE_PATH,
-  )}`;
+  );
 }
 
 export function resolveConversationStopUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_CONVERSATION_STOP_PATH",
     DEFAULT_ULS_CONVERSATION_STOP_PATH,
-  )}`;
+  );
 }
 
 export function resolveEbcpAuthUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_EBCP_AUTH_PATH",
     DEFAULT_ULS_EBCP_AUTH_PATH,
-  )}`;
+  );
 }
 
 export function resolveEbcpSpeakersUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_EBCP_SPEAKERS_PATH",
     DEFAULT_ULS_EBCP_SPEAKERS_PATH,
-  )}`;
+  );
 }
 
 export function resolvePartSubmitUrl(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `${resolveUlsOrigin(env)}${resolveUlsPath(
+  return resolveUlsUrl(
     env,
     "UNIPUS_ULS_PART_SUBMIT_PATH",
     DEFAULT_ULS_PART_SUBMIT_PATH,
-  )}`;
+  );
 }
 
 /** Clio / speech.unipus.cn WSS (prod business path — NOT bare /wss). */
