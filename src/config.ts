@@ -224,6 +224,23 @@ export function resolveSubmitAnswerUrl(
   return `${resolveAdaptiveOrigin(env)}${resolveSubmitAnswerPath(env)}`;
 }
 
+/** Listening oral S5 snapshot (2026-09-22 capture #27). MCP: save_snapshot. */
+export const DEFAULT_ULS_SAVE_SNAPSHOT_PATH = "/api/uls/user/saveSnapshot";
+
+export function resolveSaveSnapshotPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_SAVE_SNAPSHOT_PATH) ?? DEFAULT_ULS_SAVE_SNAPSHOT_PATH;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function resolveSaveSnapshotUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return `${resolveAdaptiveOrigin(env)}${resolveSaveSnapshotPath(env)}`;
+}
+
 /** SPA grade-before-submit path (2026-09-21). */
 export const DEFAULT_ULS_GRADE_QUESTION_PATH = "/api/uls/rate/gradeQuestion";
 

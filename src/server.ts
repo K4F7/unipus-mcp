@@ -31,6 +31,10 @@ import {
   type SubmitAnswerPorts,
 } from "./submit-answer.js";
 import {
+  saveSnapshot,
+  type SaveSnapshotPorts,
+} from "./save-snapshot.js";
+import {
   speakAndSubmit,
   type SpeakAndSubmitPorts,
 } from "./speak-and-submit.js";
@@ -94,6 +98,7 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<PartSubmitPorts> &
   Partial<UploadAnswerAudioPorts> &
   Partial<SubmitAnswerPorts> &
+  Partial<SaveSnapshotPorts> &
   Partial<SpeakAndSubmitPorts> &
   Partial<GradeQuestionPorts> &
   Partial<ScoreEnSentPorts> & {
@@ -101,6 +106,7 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
     loadGradedQuestionsUrl?: string;
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
+    saveSnapshotUrl?: string;
     gradeQuestionUrl?: string;
     partSubmitUrl?: string;
   };
@@ -327,7 +333,62 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       ),
   );
 
-  const SPEAK_AND_SUBMIT_DESCRIPTION = [
+  
+  const SAVE_SNAPSHOT_DESCRIPTION = [
+    "Save a listening-paper oral snapshot via POST /api/uls/user/saveSnapshot",
+    "(raw JWT + sourceid/u-app-id 116 + x-requested-with: cn.unipus.cloud).",
+    "Listening Post-listening oral fill / read-aloud path:",
+    "upload_answer_audio → in-app SOE → save_snapshot → grade_question.",
+    "Do NOT use submit_answer or part_submit for these items (capture #27 S5).",
+    "Body: { taskId, ansVersion, token, duration, userData };",
+    "userData answers often contain EN_SENT_SCORE / EN_SENT_REC.",
+    "Success business code=1. Keep large ids as strings.",
+    "Does not accept credentials (JWT from env/CLI only).",
+    "Score caveat: UI ring (e.g. 87) and grade_question.value.score (e.g. 173)",
+    "are different fields — do not conflate.",
+  ].join(" ");
+
+  const saveSnapshotPorts: SaveSnapshotPorts = {
+    ...authPorts,
+    env: ports?.env,
+    saveSnapshotUrl: ports?.saveSnapshotUrl,
+  };
+
+  server.registerTool(
+    "save_snapshot",
+    {
+      title: "Save snapshot",
+      description: SAVE_SNAPSHOT_DESCRIPTION,
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id from getUserStatus / loadPaper"),
+        paperToken: z
+          .string()
+          .min(1)
+          .describe("Token from loadPaper / start_listening_training"),
+        ansVersion: z.number().positive().optional().describe("Default 1"),
+        durationSec: z.number().nonnegative().optional().describe("Seconds spent; default 1"),
+        instanceId: z.string().min(1).describe("Question instance id (q_qinstid, exact string)"),
+        answer: z
+          .string()
+          .min(1)
+          .describe("Answer JSON (often EN_SENT_SCORE / EN_SENT_REC under children)"),
+        openId: z.string().optional().describe("Optional openId header"),
+      },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await saveSnapshot(saveSnapshotPorts, {
+          taskId: args.taskId,
+          paperToken: args.paperToken,
+          ansVersion: args.ansVersion,
+          durationSec: args.durationSec,
+          openId: args.openId,
+          userData: [{ instanceId: args.instanceId, answer: args.answer }],
+        }),
+      ),
+  );
+
+const SPEAK_AND_SUBMIT_DESCRIPTION = [
     "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
     "Requires paperToken from start_listening_training / loadPaper.",
     "Args: text, taskId, paperToken, instanceId; optional voice / ansVersion / durationSec / openId.",
