@@ -293,9 +293,11 @@ export type ClioReviewScores = {
 };
 
 /**
- * Map Clio finalResult → device answer JSON + optional review-side scores.
- * Answer record never includes recordDetail / specific_scores (those appear
- * in gradeResult.review after the server grades).
+ * Map Clio finalResult → device answer JSON.
+ * Finite review scores are copied onto the record as `recordDetail` /
+ * `specific_scores` (same blocks as an in-app part/submit snapshot).
+ * Clio-only names (`accuracy`, `completeness`, `total`, `audio_time`) are not
+ * renamed into those blocks; only overall/fluency/integrity/pronunciation/relevance.
  */
 export function clioToEnSentScoreFields(
   transcript: string,
@@ -305,7 +307,7 @@ export function clioToEnSentScoreFields(
   record: Record<string, unknown>;
   questionContent: string;
   input: EnSentScoreRecordInput;
-  /** Mapped from Clio result for review helpers — not embedded in answer. */
+  /** Same numbers embedded on record.recordDetail / specific_scores. */
   reviewScores?: ClioReviewScores;
 } {
   const clioUrl = scored.audioUrl?.trim() || "";
@@ -314,11 +316,12 @@ export function clioToEnSentScoreFields(
   const replayUrl = options.replayUrl?.trim() || url || undefined;
   const path = options.path?.trim() || clioUrl || undefined;
 
+  const reviewScores = mapClioResultToReviewScores(scored.result);
   const input: EnSentScoreRecordInput = { text: transcript, url };
   if (path) input.path = path;
   if (replayUrl) input.replayUrl = replayUrl;
+  if (reviewScores != null) input.reviewScores = reviewScores;
 
-  const reviewScores = mapClioResultToReviewScores(scored.result);
   return {
     input,
     record: buildEnSentScoreRecord(input),

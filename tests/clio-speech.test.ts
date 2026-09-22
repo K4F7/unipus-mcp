@@ -230,7 +230,8 @@ describe("scoreEnSent (mocked WSS)", () => {
     assert.equal(parsed.children[0].record.url, "https://clio-audios.unipus.cn/x.wav");
     assert.equal(parsed.children[0].record.path, "https://clio-audios.unipus.cn/x.wav");
     assert.deepEqual(parsed.children[0].record.list, []);
-    assert.equal("recordDetail" in parsed.children[0].record, false);
+    assert.equal(parsed.children[0].record.recordDetail.score, 55);
+    assert.deepEqual(parsed.children[0].record.specific_scores, { total: 0.55 });
   });
 });
 
@@ -245,9 +246,26 @@ describe("clioToEnSentScoreFields", () => {
     assert.equal(mapped.record.replayUrl, "https://clio-audios.unipus.cn/a.wav");
     assert.equal(mapped.record.path, "https://clio-audios.unipus.cn/a.wav");
     assert.deepEqual(mapped.record.list, []);
-    assert.equal("recordDetail" in mapped.record, false);
-    assert.equal("specific_scores" in mapped.record, false);
     assert.equal("isDone" in mapped.record, false);
+    assert.deepEqual(mapped.record.recordDetail, {
+      asrDetail: "",
+      audioUrl: "https://clio-audios.unipus.cn/a.wav",
+      comment: "",
+      completed: 70,
+      correctness: 75,
+      details: [],
+      detailsWords: [],
+      relevance: 90,
+      score: 76,
+      smooth: 80,
+    });
+    assert.deepEqual(mapped.record.specific_scores, {
+      accuracy: 0.75,
+      fluency: 0.8,
+      integrity: 0.7,
+      relevance: 0.9,
+      total: 0.76,
+    });
 
     const content = JSON.parse(mapped.questionContent);
     assert.equal(content.children[0].isDone, true);
@@ -272,14 +290,17 @@ describe("clioToEnSentScoreFields", () => {
       },
       { qiniuUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3" },
     );
-    assert.deepEqual(mapped.record, {
-      type: "EN_SENT_SCORE",
-      text: "Hey, future me!",
-      url: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
-      replayUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3",
-      path: "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
-      list: [],
-    });
+    assert.equal(mapped.record.url, "https://birdflock.unipus.cn/ans-prod/u/a.mp3");
+    assert.equal(mapped.record.replayUrl, "https://birdflock.unipus.cn/ans-prod/u/a.mp3");
+    assert.equal(
+      mapped.record.path,
+      "https://clio-audios.unipus.cn/clio/speech-proxy/uls-x/y.mp3",
+    );
+    const detail = mapped.record.recordDetail as { score: number; audioUrl: string };
+    assert.equal(detail.score, 76);
+    assert.equal(detail.audioUrl, "https://birdflock.unipus.cn/ans-prod/u/a.mp3");
+    assert.equal("smooth" in detail, false);
+    assert.deepEqual(mapped.record.specific_scores, { total: 0.76 });
     assert.equal(mapped.reviewScores?.score, 76);
     assert.equal(mapped.reviewScores?.smooth, undefined);
   });

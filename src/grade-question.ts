@@ -29,6 +29,20 @@ export type GradeQuestionPorts = AuthPorts & {
   gradeQuestionUrl?: string;
 };
 
+/**
+ * 0–100 review numbers. Same mapping as the in-app snapshot:
+ * score←overall, smooth←fluency, completed←integrity,
+ * correctness←pronunciation, relevance←relevance.
+ * Absent fields stay omitted — do not invent 0.
+ */
+export type EnSentReviewScores = {
+  score?: number;
+  smooth?: number;
+  completed?: number;
+  correctness?: number;
+  relevance?: number;
+};
+
 export type EnSentScoreRecordInput = {
   text: string;
   /** Birdflock ans-prod (or Clio CDN when upload skipped). */
@@ -38,14 +52,80 @@ export type EnSentScoreRecordInput = {
   /** Usually same as url (birdflock). */
   replayUrl?: string;
   list?: unknown[];
+  /**
+   * When any finite score is present, the record also gets `recordDetail`
+   * and `specific_scores` (app part/submit snapshot). Ratios are score/100.
+   */
+  reviewScores?: EnSentReviewScores;
+  /** recordDetail.details items. Default [] when scores are attached. */
+  details?: Array<{ char: string; score: number }>;
 };
 
+function finiteScore(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 /**
- * Oral `record` matching a device-persisted ~76-score answer.
+ * App snapshot blocks. `specific_scores.*` are the 0–100 fields divided by 100
+ * (98 → total 0.98, 100 → integrity 1). Structural strings stay empty.
+ */
+export function enSentScoreDetail(
+  scores: EnSentReviewScores | undefined,
+  audioUrl: string,
+  details: Array<{ char: string; score: number }> = [],
+): { recordDetail: Record<string, unknown>; specific_scores: Record<string, unknown> } | null {
+  const score = finiteScore(scores?.score);
+  const smooth = finiteScore(scores?.smooth);
+  const completed = finiteScore(scores?.completed);
+  const correctness = finiteScore(scores?.correctness);
+  const relevance = finiteScore(scores?.relevance);
+  if (
+    score == null &&
+    smooth == null &&
+    completed == null &&
+    correctness == null &&
+    relevance == null
+  ) {
+    return null;
+  }
+
+  const recordDetail: Record<string, unknown> = {
+    asrDetail: "",
+    audioUrl,
+    comment: "",
+    details,
+    detailsWords: [],
+  };
+  const specific: Record<string, unknown> = {};
+  if (score != null) {
+    recordDetail.score = score;
+    specific.total = score / 100;
+  }
+  if (smooth != null) {
+    recordDetail.smooth = smooth;
+    specific.fluency = smooth / 100;
+  }
+  if (completed != null) {
+    recordDetail.completed = completed;
+    specific.integrity = completed / 100;
+  }
+  if (correctness != null) {
+    recordDetail.correctness = correctness;
+    specific.accuracy = correctness / 100;
+  }
+  if (relevance != null) {
+    recordDetail.relevance = relevance;
+    specific.relevance = relevance / 100;
+  }
+  return { recordDetail, specific_scores: specific };
+}
+
+/**
+ * Oral `record` for part/submit and grade questionContent.
  *
- * Shape (fields only): type / text / url / path? / replayUrl? / list.
- * Scores (`recordDetail` / `specific_scores`) live in **gradeResult.review**
- * after grade — never in questionContent.
+ * Always: type / text / url / path? / replayUrl? / list.
+ * When `reviewScores` has a finite number, also `recordDetail` / `specific_scores`
+ * (in-app voiced snapshot). URL-only records omit those blocks.
  *
  * CDN-url-only `{ record: { url } }` may grade but score stays 0; prefer this
  * EN_SENT_SCORE shape after Clio score + (optional) Qiniu upload.
@@ -66,6 +146,15 @@ export function buildEnSentScoreRecord(
   const replayUrl = input.replayUrl?.trim();
   if (replayUrl != null && replayUrl.length > 0) {
     record.replayUrl = replayUrl;
+  }
+  const detail = enSentScoreDetail(
+    input.reviewScores,
+    input.url,
+    Array.isArray(input.details) ? input.details : [],
+  );
+  if (detail != null) {
+    record.recordDetail = detail.recordDetail;
+    record.specific_scores = detail.specific_scores;
   }
   return record;
 }
