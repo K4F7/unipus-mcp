@@ -162,6 +162,28 @@ describe("saveSnapshot", () => {
     assert.match(body.userData[0].answer, /EN_PRED_SCORE/);
   });
 
+  test("rejects unsafe numeric instanceId (no String() coercion)", async () => {
+    const http = mockHttp(async () => ({ statusCode: 200, body: "{}" }));
+    const unsafe = Number(SNOWFLAKE); // past MAX_SAFE_INTEGER — precision already lost
+    const r = await saveSnapshot(
+      { credentials: { getJwt: async () => "jwt" }, http },
+      {
+        taskId: "t1",
+        paperToken: "tok",
+        userData: [
+          {
+            instanceId: unsafe as unknown as string,
+            answer: "{}",
+          },
+        ],
+      },
+    );
+    assert.equal(r.isError, true);
+    assert.equal(r.code, "INVALID_ARGUMENT");
+    assert.match(r.message ?? "", /instanceId/);
+    assert.deepEqual(http.calls, []);
+  });
+
   test("business error code is surfaced", async () => {
     const http = mockHttp(async () => ({
       statusCode: 200,

@@ -333,7 +333,6 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       ),
   );
 
-  
   const SAVE_SNAPSHOT_DESCRIPTION = [
     "Save a listening-paper oral snapshot via POST /api/uls/user/saveSnapshot",
     "(raw JWT + sourceid/u-app-id 116 + x-requested-with: cn.unipus.cloud).",
@@ -388,7 +387,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       ),
   );
 
-const SPEAK_AND_SUBMIT_DESCRIPTION = [
+  const SPEAK_AND_SUBMIT_DESCRIPTION = [
     "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
     "Requires paperToken from start_listening_training / loadPaper.",
     "Args: text, taskId, paperToken, instanceId; optional voice / ansVersion / durationSec / openId.",

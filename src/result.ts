@@ -187,28 +187,9 @@ export function okSubmitAnswer(input: {
   };
 }
 
-export type SaveSnapshotResult = ToolResult & {
-  task_id?: string;
-  instance_id?: string;
-  raw_code?: number | null;
-};
-
-export function okSaveSnapshot(input: {
-  message: string;
-  task_id: string;
-  instance_id: string;
-  raw_code: number | null;
-}): SaveSnapshotResult {
-  return {
-    isError: false,
-    status: "ok",
-    code: "OK",
-    message: input.message,
-    task_id: input.task_id,
-    instance_id: input.instance_id,
-    raw_code: input.raw_code,
-  };
-}
+/** Same shape as submit_answer success; named alias for the save_snapshot tool. */
+export type SaveSnapshotResult = SubmitAnswerResult;
+export const okSaveSnapshot = okSubmitAnswer;
 
 export type GradeQuestionResult = ToolResult & {
   task_id?: string;
