@@ -122,9 +122,12 @@ export async function saveSnapshot(
   ports: SaveSnapshotPorts,
   input: SaveSnapshotInput,
 ): Promise<SaveSnapshotResult> {
-  const taskId = asExactIdString(input.taskId) ?? input.taskId.trim();
-  if (taskId.length === 0) {
-    return toolError("INVALID_ARGUMENT", "taskId 不能为空");
+  const taskId = asExactIdString(input.taskId);
+  if (taskId == null) {
+    return toolError(
+      "INVALID_ARGUMENT",
+      "taskId 不能为空或无法安全解析为精确 id",
+    );
   }
   const paperToken = input.paperToken.trim();
   if (paperToken.length === 0) {
@@ -142,13 +145,16 @@ export async function saveSnapshot(
     return toolError("INVALID_ARGUMENT", "ansVersion 必须是正数");
   }
 
+  const instanceIds: string[] = [];
   for (const item of input.userData) {
-    const instanceId =
-      asExactIdString(item.instanceId) ??
-      String(item.instanceId ?? "").trim();
-    if (instanceId.length === 0) {
-      return toolError("INVALID_ARGUMENT", "userData.instanceId 不能为空");
+    const instanceId = asExactIdString(item.instanceId);
+    if (instanceId == null) {
+      return toolError(
+        "INVALID_ARGUMENT",
+        "userData.instanceId 不能为空或无法安全解析为精确 id",
+      );
     }
+    instanceIds.push(instanceId);
   }
 
   const url = ports.saveSnapshotUrl ?? resolveSaveSnapshotUrl(ports.env);
@@ -176,10 +182,6 @@ export async function saveSnapshot(
   if (!response.ok) {
     return response.result;
   }
-
-  const instanceIds = (body.userData as Array<{ instanceId: string }>).map(
-    (u) => u.instanceId,
-  );
 
   return okSaveSnapshot({
     message: `已保存快照 taskId=${taskId} instances=${instanceIds.length}`,
