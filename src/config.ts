@@ -261,6 +261,122 @@ export function resolveLoadGradedQuestionsUrl(
   return `${resolveAdaptiveOrigin(env)}${resolveLoadGradedQuestionsPath(env)}`;
 }
 
+
+/** AI口语对话 on ucloud (business code=200). Never /oral/train. */
+export const DEFAULT_ULS_CONVERSATION_CREATE_PATH = "/api/uls/conversation/create";
+export const DEFAULT_ULS_CONVERSATION_CHAT_INFO_PATH =
+  "/api/uls/conversation/chat/info";
+export const DEFAULT_ULS_CONVERSATION_MAX_COUNT_PATH =
+  "/api/uls/conversation/max-count";
+export const DEFAULT_ULS_CONVERSATION_SAVE_PATH = "/api/uls/conversation/save";
+export const DEFAULT_ULS_CONVERSATION_STOP_PATH = "/api/uls/conversation/stop";
+export const DEFAULT_ULS_EBCP_AUTH_PATH = "/api/uls/ebcp/auth";
+export const DEFAULT_ULS_EBCP_SPEAKERS_PATH = "/api/uls/ebcp/speakers";
+
+/** Part snapshot/submit (范例 / AI对话退出 / 自由表达). Success code=1. */
+export const DEFAULT_ULS_PART_SUBMIT_PATH = "/api/uls/part/submit";
+
+function resolveUlsPath(
+  env: NodeJS.ProcessEnv,
+  envKey: string,
+  fallback: string,
+): string {
+  const path = envTrim(env[envKey]) ?? fallback;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+/** Shared ucloud ULS URL: origin + env-overridable path. */
+export function resolveUlsUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  envKey: string,
+  fallbackPath: string,
+): string {
+  return `${resolveUlsOrigin(env)}${resolveUlsPath(env, envKey, fallbackPath)}`;
+}
+
+export function resolveConversationCreateUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_CONVERSATION_CREATE_PATH",
+    DEFAULT_ULS_CONVERSATION_CREATE_PATH,
+  );
+}
+
+export function resolveConversationChatInfoUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  conversationId: string,
+): string {
+  const base = resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_CONVERSATION_CHAT_INFO_PATH",
+    DEFAULT_ULS_CONVERSATION_CHAT_INFO_PATH,
+  );
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}conversationId=${encodeURIComponent(conversationId)}`;
+}
+
+export function resolveConversationMaxCountUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_CONVERSATION_MAX_COUNT_PATH",
+    DEFAULT_ULS_CONVERSATION_MAX_COUNT_PATH,
+  );
+}
+
+export function resolveConversationSaveUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_CONVERSATION_SAVE_PATH",
+    DEFAULT_ULS_CONVERSATION_SAVE_PATH,
+  );
+}
+
+export function resolveConversationStopUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_CONVERSATION_STOP_PATH",
+    DEFAULT_ULS_CONVERSATION_STOP_PATH,
+  );
+}
+
+export function resolveEbcpAuthUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_EBCP_AUTH_PATH",
+    DEFAULT_ULS_EBCP_AUTH_PATH,
+  );
+}
+
+export function resolveEbcpSpeakersUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_EBCP_SPEAKERS_PATH",
+    DEFAULT_ULS_EBCP_SPEAKERS_PATH,
+  );
+}
+
+export function resolvePartSubmitUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_PART_SUBMIT_PATH",
+    DEFAULT_ULS_PART_SUBMIT_PATH,
+  );
+}
+
 /** Clio / speech.unipus.cn WSS (prod business path — NOT bare /wss). */
 export const DEFAULT_CLIO_WSS_URL =
   "wss://speech.unipus.cn/speech/proxy/wss";

@@ -13,13 +13,21 @@
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
-| `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021）；conversation/free-speak 契约见 `docs/api-notes.md`（尚无专用 MCP 工具） |
+| `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021） |
 | `load_graded_questions` | 交卷后读分：`POST loadGradedQuestions` `{ taskId, ansVersion }` + 裸 JWT + `u-app-id`；空列表 OK；已交卷口语非空时分在 `review[].recordDetail` / `specificScores`（驼峰，≠ 快照蛇形 `specific_scores`） |
 | `upload_answer_audio` | 静默上传答案音频（query-upload-url → Qiniu）；返回 `storage_key` / `cdn_url` |
 | `submit_answer` | 提交答案（需 loadPaper `paperToken`）；口语 CDN URL 可自动包成 `record.url` |
 | `speak_and_submit` | TTS → 上传 → submit 一键静默口语 |
 | `grade_question` | `POST /api/uls/rate/gradeQuestion`；`questionInstanceId` 必须字符串；CDN-only 常 score=0 |
 | `score_speech` | Clio WSS `en.sent.score`（transcript + wavPath）→ overall/total + `en_sent_score_content`；凭据走 env |
+| `conversation_create` | AI口语对话开场：`POST /api/uls/conversation/create`（ucloud，`code=200`）；头 `sourceid` + `x-requested-with: cn.unipus.cloud` + 裸 JWT；返回 `conversation_id` / `scene_id` / `token` / `level`；**create token ≠ paper token**；**勿**臆造 `/oral/train` |
+| `conversation_save` | 保存话轮：`POST …/conversation/save`（`code=200`）；`speakTaskId`（= create 的 `conversation_id`，别名 `conversationId`）+ `duration` + `speakAddTaskRecord` |
+| `conversation_stop` | 结束对话：`POST …/conversation/stop`（`code=200`）；`speakTaskId`=create 的 `conversation_id`；随后 `part_submit`（**paper token**，非 create token） |
+| `conversation_chat_info` | `GET …/conversation/chat/info?conversationId=`（`code=200`） |
+| `conversation_max_count` | `GET …/conversation/max-count`（`code=200`，话轮上限） |
+| `ebcp_auth` | `POST …/ebcp/auth`（`code=200`）；`scene` + `bizExt` |
+| `ebcp_speakers` | `POST …/ebcp/speakers`（`code=200`）；speakers / speakVoiceTones |
+| `part_submit` | `POST /api/uls/part/submit`（`action=snapshot|submit`，业务成功 **`code=1`**）；范例 / AI对话退出 / 自由表达；自由表达答体 `EN_PRED_SCORE`（`buildEnPredScoreQuestionContent`） |
 
 错误形状（`structuredContent` 与 text JSON 一致）：
 
@@ -50,7 +58,7 @@
 - 可选 `taskId` / `ansVersion` / `openId`；缺 `taskId` 或 `ansVersion` 任一则先 `GET …/getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`，默认 `116`）补全，再复用听力同一 `loadPaper`。
 - 返回形状与 `start_listening_training` 相同；成功 message 含「口语」。
 - **不要**在 App WebView 已打开同一任务时调用 — `part/submit` 可能 `4021`（多设备）。
-- **不要**臆造 `/api/uls/oral/train`。AI口语对话 / 自由表达契约已写入 `docs/api-notes.md`（`conversation/*`、`EN_PRED_SCORE`、`part/submit`）；**尚无**专用 MCP 工具（follow-up issue）。
+- **不要**臆造 `/api/uls/oral/train`。AI口语对话 / 自由表达：见下方 `conversation_*` / `part_submit` / `buildEnPredScore*`；契约细节 `docs/api-notes.md`。
 
 `load_graded_questions`：
 
@@ -198,7 +206,7 @@ Headless U口语 start (same `loadPaper` as listening):
 
 - Optional `taskId` / `ansVersion` / `openId`; otherwise resolves via `getUserStatusForApp?flowType=speak` + `u-app-id`.
 - Do **not** call while WebView is mid-task (4021). Do **not** invent `/oral/train`.
-- AI口语对话 (`conversation/create|save|stop` + `ebcp/*` on ucloud) and 自由表达 (`EN_PRED_SCORE` + `part/submit`) contracts are in `docs/api-notes.md`. **No dedicated MCP tools yet** for `conversation/*` (follow-up issue).
+- AI口语对话 / 自由表达：MCP `conversation_*`、`ebcp_*`、`part_submit` + helper `buildEnPredScoreQuestionContent`；契约见 `docs/api-notes.md`。WS `oral.unipus.cn` 仅为传输，本工具不驱动。
 
 ## `load_graded_questions`
 
@@ -234,6 +242,33 @@ Headless Clio sentence score over `wss://speech.unipus.cn/speech/proxy/wss` (`en
 - Live smoke: `UNIPUS_CLIO_LIVE_SMOKE=1 npx tsx scripts/clio-score-smoke.ts ["hello world"]`.
 - initialize/v2 appKey rotation and native `aiengine.provision` — see `docs/api-notes.md` (provision = native TBD; not in soe-sdk JS).
 
+
+## `conversation_*` / `ebcp_*`（AI口语对话）
+
+Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接口的 `1`）：
+
+1. `conversation_create` → `conversation_id` / `scene_id` / `token`
+2. 可选 `ebcp_auth` / `ebcp_speakers`、`conversation_max_count`、`conversation_chat_info`
+3. 每轮用户音频仍走 `upload_answer_audio`（`query-upload-url` → 七牛）；`conversation_save` 写入 `speakAddTaskRecord`
+4. `conversation_stop`（评价）→ `part_submit` `action=submit` 出关（**`code=1`**）
+
+### Agent footguns（必读）
+
+- **`speakTaskId` === create 的 `conversation_id`**：`conversation_save` / `conversation_stop` 的 `speakTaskId` 必须填 create 返回的 `conversation_id`。也接受别名参数 **`conversationId`**（与 `speakTaskId` 二选一）。
+- **create 的 `token` ≠ loadPaper / `part_submit` 的 paper token**：create 返回的 `token` 是对话侧 token；出关 `part_submit` 的 `token` 必须来自 `start_speaking_training` / `loadPaper` 的 `paper_token`，不要把 create token 塞进 part/submit。
+
+请求头：`Authorization` 裸 JWT、`sourceid`（默认 `116`）、`x-requested-with: cn.unipus.cloud`。JWT 仅 env/CLI。
+
+**不要**请求 `/api/uls/oral/train`（SPA 静态有、抓包从未出现）。对话 WS：`oral.unipus.cn/oral_api/ws//{conversationId}` — MCP 不驱动。
+
+覆盖：`UNIPUS_ULS_ORIGIN`（默认 ucloud）、`UNIPUS_ULS_CONVERSATION_*_PATH` / `UNIPUS_ULS_EBCP_*_PATH`、`UNIPUS_U_APP_ID`。
+
+## `part_submit` / `EN_PRED_SCORE`（自由表达 + part 交卷）
+
+- 同一 `POST /api/uls/part/submit`：作答中 `action=snapshot`，交卷 `action=submit`；成功 **`code=1`**。
+- 自由表达答体：`record.type=EN_PRED_SCORE`（不是跟读的 `EN_SENT_SCORE`）。Helper：`buildEnPredScoreRecord` / `buildEnPredScoreQuestionContent`（与 `buildEnSentScore*` 同形，含可选 `recordDetail` / `specific_scores`）。
+- snapshot 常见 `context={"state":"doing"}`。出关 / 范例学习同样用本工具。
+- 覆盖：`UNIPUS_ULS_PART_SUBMIT_PATH`（默认 `/api/uls/part/submit` on `UNIPUS_ULS_ORIGIN`）。
 
 ## Placement / 定级（无新 MCP 工具）
 

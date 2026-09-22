@@ -16,6 +16,11 @@ import {
   loadGradedQuestions,
   type LoadGradedQuestionsPorts,
 } from "./load-graded-questions.js";
+import type { ConversationPorts } from "./conversation.js";
+import type { EbcpPorts } from "./ebcp.js";
+import type { PartSubmitPorts } from "./part-submit.js";
+import { registerConversationTools } from "./register-conversation-tools.js";
+import { registerPartSubmitTool } from "./register-part-submit-tool.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
 import {
   uploadAnswerAudio,
@@ -68,7 +73,7 @@ const START_SPEAKING_TRAINING_DESCRIPTION = [
   "GET getUserStatusForApp?flowType=speak (u-app-id default 116), then same POST loadPaper as listening.",
   "Optional overrides: taskId, ansVersion, openId. Do not invent /oral/train.",
   "Do NOT call while an App WebView session is open — part/submit may return 4021 (multi-device).",
-  "AI对话 / 自由表达 still need emulator capture (#18). Returns same shape as start_listening_training.",
+  "AI对话: conversation_* + part_submit; 自由表达: EN_PRED_SCORE + part_submit. Returns same shape as start_listening_training.",
   "Does not accept credentials (JWT from env/CLI only).",
 ].join(" ");
 
@@ -84,6 +89,9 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
   Partial<StartListeningPorts> &
   Partial<StartSpeakingPorts> &
   Partial<LoadGradedQuestionsPorts> &
+  Partial<ConversationPorts> &
+  Partial<EbcpPorts> &
+  Partial<PartSubmitPorts> &
   Partial<UploadAnswerAudioPorts> &
   Partial<SubmitAnswerPorts> &
   Partial<SpeakAndSubmitPorts> &
@@ -94,6 +102,7 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
     queryUploadUrl?: string;
     submitAnswerUrl?: string;
     gradeQuestionUrl?: string;
+    partSubmitUrl?: string;
   };
 
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
@@ -461,6 +470,10 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         }),
       ),
   );
+
+
+  registerConversationTools(server, authPorts, ports);
+  registerPartSubmitTool(server, authPorts, ports);
 
   return server;
 }
