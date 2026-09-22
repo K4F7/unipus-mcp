@@ -290,9 +290,10 @@ Without a fresh loadPaper `token`, API returns multi-device lock (`4021`).
   ```
   - Record lives under **`children[0].record`** (not top-level `record`).
   - **`isDone` is on the child**, not inside `record`.
-  - Record fields only: `type` / `text` / `url` / `path` / `replayUrl` / `list` — **no** `recordDetail` / `specific_scores` in questionContent (those appear in **gradeResult.review** after grade).
+  - URL-only records: `type` / `text` / `url` / `path` / `replayUrl` / `list`.
+  - Voiced in-app `part/submit` snapshots also include `recordDetail` and `specific_scores`. `buildEnSentScoreRecord` adds those blocks when `reviewScores` has a finite number. `recordDetail.audioUrl` is the answer `url` (birdflock when uploaded). Ratios: `specific_scores.total = score/100`, `accuracy = correctness/100`, `fluency = smooth/100`, `integrity = completed/100`, `relevance = relevance/100` (98 → 0.98, 100 → 1). Engine fields that were absent are omitted, not filled with 0.
   - Production URLs: `url`/`replayUrl` = birdflock ans-prod (Qiniu upload); `path` = clio-audios speech-proxy.
-- Helper: `buildEnSentScoreQuestionContent` / `clioToEnSentScoreFields({ qiniuUrl })`. Optional `reviewScores` maps Clio `overall→score`, `fluency→smooth`, etc. for callers — **not** embedded in answer JSON.
+- Helper: `buildEnSentScoreQuestionContent` / `clioToEnSentScoreFields({ qiniuUrl })`. `reviewScores` maps Clio `overall→score`, `fluency→smooth`, `integrity→completed`, `pronunciation→correctness`, `relevance→relevance`, and those numbers are embedded on the record. Clio-only names (`accuracy`, `completeness`, `total`, `audio_time`) stay on the Clio result; they are not renamed into `recordDetail`.
 - Scoring engine is **client SDK** (Clio WSS / speech.cdn); server grade mostly **persists**. Pre-submit: `score_speech` → optional Qiniu upload → `grade_question` with children-shaped content.
 - **Retest caveat:** grading an **already-submitted** task may empty `userAnswer` / return score=0. Need an **unsubmitted** task + remaining speak quota to live-verify non-zero grade.
 - After submit: **`POST /api/uls/user/loadGradedQuestions`** `{ taskId, ansVersion }` with raw JWT and `u-app-id: 116` (see speak section). MCP: `load_graded_questions`.
