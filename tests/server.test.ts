@@ -10,6 +10,7 @@ import type { UnipusHttp } from "../src/http.js";
 
 const EXPECTED_TOOLS = [
   "auth_status",
+  "list_accounts",
   "list_week_progress",
   "start_listening_training",
   "start_speaking_training",
