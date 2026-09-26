@@ -5,9 +5,12 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import {
+  NOTE_MAX_LENGTH,
   listAccounts,
+  readAccountMeta,
   readActiveAccountId,
   saveAccountTokens,
+  setAccountNote,
   setActiveAccountId,
   sanitizeAccountId,
 } from "../src/accounts.js";
@@ -88,5 +91,89 @@ describe("account token store", () => {
     // Ensure list payload has no secret-looking fields
     assert.equal("jwt" in b!, false);
     assert.equal("rt" in b!, false);
+  });
+});
+
+describe("account note", () => {
+  test("setAccountNote writes note; listAccounts returns it; clear sets null", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-note-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "note-user", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.n" },
+      { home, env },
+    );
+
+    await setAccountNote("note-user", "临时号 / 室友", { home, env });
+    const meta = await readAccountMeta("note-user", { home, env });
+    assert.equal(meta?.note, "临时号 / 室友");
+
+    const listed = await listAccounts({ home, env });
+    const row = listed.find((x) => x.account_id === "note-user");
+    assert.ok(row);
+    assert.equal(row!.note, "临时号 / 室友");
+    assert.equal(row!.alias, null);
+    assert.equal("jwt" in row!, false);
+    assert.equal("rt" in row!, false);
+
+    await setAccountNote("note-user", null, { home, env });
+    const cleared = await readAccountMeta("note-user", { home, env });
+    assert.equal(cleared?.note ?? null, null);
+    const listed2 = await listAccounts({ home, env });
+    assert.equal(listed2.find((x) => x.account_id === "note-user")?.note ?? null, null);
+  });
+
+  test("setAccountNote rejects missing account and overlong note", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-note-err-"));
+    const env = {};
+
+    await assert.rejects(
+      () => setAccountNote("ghost", "x", { home, env }),
+      /不存在|找不到|无此/,
+    );
+
+    await saveAccountTokens(
+      { accountId: "long-user", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.l" },
+      { home, env },
+    );
+    const tooLong = "a".repeat(NOTE_MAX_LENGTH + 1);
+    await assert.rejects(
+      () => setAccountNote("long-user", tooLong, { home, env }),
+      /500|过长|太长|上限/,
+    );
+  });
+
+  test("saveAccountTokens preserves existing note via metaPatch", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-note-preserve-"));
+    const env = {};
+
+    await saveAccountTokens(
+      {
+        accountId: "keep",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.k",
+        metaPatch: { note: "本人", alias: "me" },
+      },
+      { home, env },
+    );
+    let meta = await readAccountMeta("keep", { home, env });
+    assert.equal(meta?.note, "本人");
+    assert.equal(meta?.alias, "me");
+
+    await saveAccountTokens(
+      {
+        accountId: "keep",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.k2",
+        makeActive: false,
+        syncLegacy: false,
+      },
+      { home, env },
+    );
+    meta = await readAccountMeta("keep", { home, env });
+    assert.equal(meta?.note, "本人");
+    assert.equal(meta?.alias, "me");
+
+    await setAccountNote("keep", "更新备注", { home, env });
+    meta = await readAccountMeta("keep", { home, env });
+    assert.equal(meta?.note, "更新备注");
+    assert.equal(meta?.alias, "me");
   });
 });

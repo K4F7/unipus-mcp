@@ -31,9 +31,14 @@ export type AccountFs = {
   readdir?: (path: string) => Promise<string[]>;
 };
 
+/** Max length for account note (用途标记); reject longer with clear error. */
+export const NOTE_MAX_LENGTH = 500;
+
 export type AccountMeta = {
   account_id: string;
   alias?: string | null;
+  /** Free-text usage tag; never secrets. */
+  note?: string | null;
   last_login_at?: string | null;
   last_refresh_at?: string | null;
   jwt_expire?: unknown;
@@ -45,6 +50,7 @@ export type ListedAccount = {
   has_jwt: boolean;
   has_rt: boolean;
   alias: string | null;
+  note: string | null;
   last_login_at: string | null;
   last_refresh_at: string | null;
 };
@@ -145,6 +151,7 @@ export async function readAccountMeta(
     return {
       account_id: sanitizeAccountId(accountId),
       alias: typeof rec.alias === "string" ? rec.alias : null,
+      note: typeof rec.note === "string" ? rec.note : null,
       last_login_at: typeof rec.last_login_at === "string" ? rec.last_login_at : null,
       last_refresh_at:
         typeof rec.last_refresh_at === "string" ? rec.last_refresh_at : null,
@@ -168,6 +175,7 @@ export async function writeAccountMeta(
   const safe: AccountMeta = {
     account_id: sanitizeAccountId(accountId),
     alias: meta.alias ?? null,
+    note: meta.note ?? null,
     last_login_at: meta.last_login_at ?? null,
     last_refresh_at: meta.last_refresh_at ?? null,
     jwt_expire: meta.jwt_expire ?? null,
@@ -214,6 +222,7 @@ export async function listAccounts(
       has_jwt: await fileExists(join(dir, "jwt"), p.readFile),
       has_rt: await fileExists(join(dir, "rt"), p.readFile),
       alias: meta?.alias ?? null,
+      note: meta?.note ?? null,
       last_login_at: meta?.last_login_at ?? null,
       last_refresh_at: meta?.last_refresh_at ?? null,
     });
@@ -265,6 +274,7 @@ export async function saveAccountTokens(
     {
       account_id: id,
       alias: patch.alias !== undefined ? patch.alias : existing.alias ?? null,
+      note: patch.note !== undefined ? patch.note : existing.note ?? null,
       last_login_at:
         patch.last_login_at !== undefined
           ? patch.last_login_at
@@ -327,6 +337,47 @@ export async function readLegacyRt(
     if (isNotFound(error)) return null;
     throw error;
   }
+}
+
+
+/** Normalize / validate note text. null/empty → null; reject if > NOTE_MAX_LENGTH. */
+export function normalizeAccountNote(note: string | null | undefined): string | null {
+  if (note == null) return null;
+  const trimmed = note.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > NOTE_MAX_LENGTH) {
+    throw new Error(`note 过长：上限 ${NOTE_MAX_LENGTH} 字符（当前 ${trimmed.length}）`);
+  }
+  return trimmed;
+}
+
+/**
+ * Set or clear account note (用途标记). Requires existing account dir with jwt.
+ * Pass null to clear.
+ */
+export async function setAccountNote(
+  accountId: string,
+  note: string | null,
+  options: AccountFs = {},
+): Promise<void> {
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  const dir = accountDir(id, p.env, p.home);
+  const hasJwt = await fileExists(join(dir, "jwt"), p.readFile);
+  if (!hasJwt) {
+    throw new Error(`账户 ${id} 不存在或缺少 jwt（期望目录 ${dir}）`);
+  }
+  const normalized = normalizeAccountNote(note);
+  const existing = (await readAccountMeta(id, options)) ?? { account_id: id };
+  await writeAccountMeta(
+    id,
+    {
+      ...existing,
+      account_id: id,
+      note: normalized,
+    },
+    options,
+  );
 }
 
 
