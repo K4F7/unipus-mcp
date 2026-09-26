@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -76,5 +76,52 @@ describe("env credential store", () => {
       defaultJwtFilePath({}, "/home/user"),
       "/home/user/.config/unipus-mcp/jwt",
     );
+  });
+});
+
+describe("active-account credential resolution", () => {
+  test("prefers accounts/<active>/jwt over legacy", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-cred-"));
+    const config = join(home, ".config", "unipus-mcp");
+    const accountDir = join(config, "accounts", "acct1");
+    await mkdir(accountDir, { recursive: true, mode: 0o700 });
+    const accountJwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuSWQiOiJhY2N0In0.sig";
+    const legacyJwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuSWQiOiJsZWdhY3kifQ.sig";
+    await writeFile(join(accountDir, "jwt"), `${accountJwt}\n`, { mode: 0o600 });
+    await writeFile(join(config, "jwt"), `${legacyJwt}\n`, { mode: 0o600 });
+    await writeFile(join(config, "active-account.txt"), "acct1\n", { mode: 0o600 });
+
+    const store = createEnvCredentialStore({
+      env: {},
+      homedir: home,
+    });
+    assert.equal(await store.getJwt(), accountJwt);
+  });
+
+  test("falls back to legacy jwt when no active-account", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-cred-leg-"));
+    const config = join(home, ".config", "unipus-mcp");
+    await mkdir(config, { recursive: true, mode: 0o700 });
+    const legacyJwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuSWQiOiJsZWdhY3kifQ.sig";
+    await writeFile(join(config, "jwt"), `${legacyJwt}\n`, { mode: 0o600 });
+
+    const store = createEnvCredentialStore({
+      env: {},
+      homedir: home,
+    });
+    assert.equal(await store.getJwt(), legacyJwt);
+  });
+
+  test("UNIPUS_JWT still wins over active account", async () => {
+    const envJwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuSWQiOiJlbnYifQ.sig";
+    const store = createEnvCredentialStore({
+      env: { UNIPUS_JWT: envJwt },
+      homedir: "/tmp/no-such-home-for-active",
+    });
+    assert.equal(await store.getJwt(), envJwt);
   });
 });

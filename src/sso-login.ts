@@ -1,11 +1,12 @@
 /**
- * Unipus SSO password login (AES-CBC encrypt + cip/login).
+ * Unipus SSO password login (AES-CBC encrypt + cip/login) and refresh_jwt.
  * Username/password stay in env / CLI argv — never MCP tool args.
  */
 import { createCipheriv } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { saveAccountTokens, type AccountFs } from "./accounts.js";
 import { defaultJwtFilePath } from "./credentials.js";
 
 /** Public AES key/IV from sso.unipus.cn helper.js (not a credential secret). */
@@ -14,7 +15,11 @@ const SSO_AES_IV_HEX = "0102030405060708090A0B0C0D0E0F10";
 
 export const DEFAULT_SSO_ORIGIN = "https://sso.unipus.cn";
 export const DEFAULT_SSO_CIP_LOGIN_PATH = "/sso/0.1/sso/cip/login";
+export const DEFAULT_SSO_REFRESH_PATH = "/sso/4.0/sso/refresh_jwt";
 export const DEFAULT_SSO_SERVICE = "https://ucloud.unipus.cn/";
+
+/** Distinct process exit code for CAPTCHA_REQUIRED (CLI). */
+export const EXIT_CAPTCHA_REQUIRED = 3;
 
 export function encryptSsoField(plain: string): string {
   const key = Buffer.from(SSO_AES_KEY_HEX, "hex");
@@ -102,7 +107,62 @@ export async function loginWithPassword(
     };
   }
 
-  const text = await response.text();
+  return parseSsoTokenResponse(await response.text(), response.status, "登录");
+}
+
+export type SsoRefreshPorts = {
+  fetch?: typeof fetch;
+  ssoOrigin?: string;
+  refreshPath?: string;
+};
+
+export type SsoRefreshResult = SsoLoginResult;
+
+/** POST refresh_jwt with {rt}; returns rotated jwt + rt on success. */
+export async function refreshWithRt(
+  refreshToken: string,
+  ports: SsoRefreshPorts = {},
+): Promise<SsoRefreshResult> {
+  const rt = refreshToken.trim();
+  if (rt.length === 0) {
+    return { ok: false, code: "INVALID_ARGUMENT", message: "rt 不能为空" };
+  }
+
+  const origin = (ports.ssoOrigin ?? DEFAULT_SSO_ORIGIN).replace(/\/+$/, "");
+  const path = ports.refreshPath ?? DEFAULT_SSO_REFRESH_PATH;
+  const url = `${origin}${path.startsWith("/") ? path : `/${path}`}`;
+
+  const fetchImpl = ports.fetch ?? globalThis.fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin,
+        referer: `${origin}/sso/login`,
+        "user-agent": "unipus-mcp/0.1 refresh-jwt",
+      },
+      body: JSON.stringify({ rt }),
+      redirect: "manual",
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      code: "NETWORK_ERROR",
+      message: `SSO 续期网络失败：${detail}`,
+    };
+  }
+
+  return parseSsoTokenResponse(await response.text(), response.status, "续期");
+}
+
+function parseSsoTokenResponse(
+  text: string,
+  httpStatus: number,
+  actionLabel: string,
+): SsoLoginResult {
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -110,12 +170,12 @@ export async function loginWithPassword(
     return {
       ok: false,
       code: "PARSE_ERROR",
-      message: `SSO 响应非 JSON（HTTP ${response.status}）`,
+      message: `SSO ${actionLabel}响应非 JSON（HTTP ${httpStatus}）`,
     };
   }
 
   if (data == null || typeof data !== "object" || Array.isArray(data)) {
-    return { ok: false, code: "PARSE_ERROR", message: "SSO 响应结构异常" };
+    return { ok: false, code: "PARSE_ERROR", message: `SSO ${actionLabel}响应结构异常` };
   }
 
   const record = data as Record<string, unknown>;
@@ -125,7 +185,8 @@ export async function loginWithPassword(
       ok: false,
       code: "CAPTCHA_REQUIRED",
       ssoCode: "1506",
-      message: "SSO 要求极验验证码，请用浏览器登录一次或稍后再试",
+      message:
+        "SSO 要求极验验证码。请用有头浏览器登录 sso.unipus.cn 后，将 jwt/rt 导入账户档案（勿把秘密写进 MCP 工具参数）",
     };
   }
   if (code !== "0") {
@@ -134,10 +195,10 @@ export async function loginWithPassword(
         ? record.msg.trim()
         : typeof record.error === "string"
           ? record.error
-          : `SSO 登录失败 code=${code || "?"}`;
+          : `SSO ${actionLabel}失败 code=${code || "?"}`;
     return {
       ok: false,
-      code: "SSO_LOGIN_FAILED",
+      code: actionLabel === "续期" ? "SSO_REFRESH_FAILED" : "SSO_LOGIN_FAILED",
       ssoCode: code || undefined,
       message: msg,
     };
@@ -145,12 +206,12 @@ export async function loginWithPassword(
 
   const rs = record.rs;
   if (rs == null || typeof rs !== "object" || Array.isArray(rs)) {
-    return { ok: false, code: "PARSE_ERROR", message: "SSO 成功响应缺少 rs" };
+    return { ok: false, code: "PARSE_ERROR", message: `SSO ${actionLabel}成功响应缺少 rs` };
   }
   const rsRec = rs as Record<string, unknown>;
   const jwt = typeof rsRec.jwt === "string" ? rsRec.jwt.trim() : "";
   if (jwt.length === 0) {
-    return { ok: false, code: "PARSE_ERROR", message: "SSO 成功响应缺少 jwt" };
+    return { ok: false, code: "PARSE_ERROR", message: `SSO ${actionLabel}成功响应缺少 jwt` };
   }
 
   return {
@@ -163,6 +224,7 @@ export async function loginWithPassword(
   };
 }
 
+/** Legacy helper: write only jwt to default path (chmod 0600). Prefer saveLoginTokens. */
 export async function saveJwtToDefaultPath(
   jwt: string,
   options: { env?: NodeJS.ProcessEnv; home?: string } = {},
@@ -170,8 +232,43 @@ export async function saveJwtToDefaultPath(
   const path = defaultJwtFilePath(options.env, options.home);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, `${jwt}\n`, { mode: 0o600 });
-  // mode on writeFile only applies on create; tighten on overwrite too.
   await chmod(dirname(path), 0o700);
   await chmod(path, 0o600);
   return path;
 }
+
+export type SaveLoginTokensInput = {
+  accountId: string;
+  jwt: string;
+  refreshToken?: string | null;
+  jwtExpire?: unknown;
+  /** "login" | "refresh" — stamps meta timestamps. */
+  source?: "login" | "refresh";
+  syncLegacy?: boolean;
+  makeActive?: boolean;
+};
+
+/** Persist jwt+rt under accounts/<id>/ (+ legacy when active). */
+export async function saveLoginTokens(
+  input: SaveLoginTokensInput,
+  options: AccountFs = {},
+): Promise<{ accountDir: string; legacyJwtPath: string }> {
+  const now = new Date().toISOString();
+  const metaPatch =
+    input.source === "refresh"
+      ? { last_refresh_at: now, jwt_expire: input.jwtExpire ?? null }
+      : { last_login_at: now, jwt_expire: input.jwtExpire ?? null };
+
+  return saveAccountTokens(
+    {
+      accountId: input.accountId,
+      jwt: input.jwt,
+      refreshToken: input.refreshToken,
+      syncLegacy: input.syncLegacy,
+      makeActive: input.makeActive,
+      metaPatch,
+    },
+    options,
+  );
+}
+

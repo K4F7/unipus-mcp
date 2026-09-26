@@ -2,6 +2,12 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import {
+  accountDir,
+  defaultConfigDir,
+  readActiveAccountId,
+} from "./accounts.js";
+
 export type JwtCredentialStore = {
   getJwt(): Promise<string | null>;
 };
@@ -12,11 +18,14 @@ export function defaultJwtFilePath(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): string {
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  if (xdg != null && xdg.length > 0) {
-    return join(xdg, "unipus-mcp", "jwt");
-  }
-  return join(home, ".config", "unipus-mcp", "jwt");
+  return join(defaultConfigDir(env, home), "jwt");
+}
+
+export function defaultRtFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  return join(defaultConfigDir(env, home), "rt");
 }
 
 /** Pull a JWT out of raw text, Cookie header, or portal JSON — never passwords. */
@@ -129,6 +138,23 @@ export function createEnvCredentialStore(options: {
         }
       }
 
+      // Multi-account: active-account.txt → accounts/<id>/jwt
+      const activeId = await readActiveAccountId({
+        env,
+        home,
+        readFile: async (path) => read(path),
+      });
+      if (activeId != null) {
+        const accountJwt = await readJwtFile(
+          join(accountDir(activeId, env, home), "jwt"),
+          read,
+        );
+        if (accountJwt != null) {
+          return accountJwt;
+        }
+      }
+
+      // Legacy single-account file
       return readJwtFile(defaultJwtFilePath(env, home), read);
     },
   };

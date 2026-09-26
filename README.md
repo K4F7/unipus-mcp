@@ -29,6 +29,8 @@ export UNIPUS_JWT_FILE=/path/to/jwt # 原始 JWT、jwt= cookie、或 portal JSON
 
 不要把密码、JWT 写进 MCP 工具参数或聊天。
 
+多账户：`~/.config/unipus-mcp/accounts/<id>/{jwt,rt}` + `active-account.txt`；JWT ~48h，优先 `npm run refresh-jwt`；切换 `npx tsx scripts/accounts.ts use <id>`。详见 `docs/mcp.md`「登录约定」。
+
 ## 开发
 
 ```sh

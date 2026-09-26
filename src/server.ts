@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { probeAuthStatus, type AuthPorts } from "./auth.js";
+import { listAccounts } from "./accounts.js";
 import { createEnvCredentialStore } from "./credentials.js";
 import { createFetchUnipusHttp } from "./http.js";
 import { toMcpToolResponse } from "./result.js";
@@ -47,6 +48,12 @@ import {
   type ScoreEnSentPorts,
 } from "./clio-speech.js";
 import { z } from "zod";
+
+const LIST_ACCOUNTS_DESCRIPTION = [
+  "List local Unipus account archives under ~/.config/unipus-mcp/accounts/.",
+  "Returns account_id, active flag, has_jwt/has_rt booleans, and redacted meta only.",
+  "Never returns jwt/rt/password. Switching accounts is CLI-only: npx tsx scripts/accounts.ts use <id>.",
+].join(" ");
 
 const AUTH_STATUS_DESCRIPTION = [
   "Report whether a usable U听说 / U听力 (cn.unipus.cloud) JWT or SSO session is configured.",
@@ -136,6 +143,30 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       description: AUTH_STATUS_DESCRIPTION,
     },
     async () => toMcpToolResponse(await probeAuthStatus(authPorts)),
+  );
+
+  server.registerTool(
+    "list_accounts",
+    {
+      title: "List accounts",
+      description: LIST_ACCOUNTS_DESCRIPTION,
+    },
+    async () => {
+      const accounts = await listAccounts({
+        env: ports?.env,
+      });
+      const active = accounts.find((a) => a.active)?.account_id ?? null;
+      return toMcpToolResponse({
+        isError: false,
+        status: "ok" as const,
+        code: "OK",
+        message: accounts.length
+          ? `共 ${accounts.length} 个账户档案（切换请用 CLI accounts use）`
+          : "无多账户档案；可用 legacy jwt 或 CLI sso-login",
+        accounts,
+        active_account: active,
+      });
+    },
   );
 
   server.registerTool(

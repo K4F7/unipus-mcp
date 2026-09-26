@@ -11,6 +11,7 @@
 | 工具 | 说明 |
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
+| `list_accounts` | 只读列出本机账户档案（account_id / active / has_jwt|rt / 脱敏 meta）；**永不**返回秘密；切换用 CLI `accounts use` |
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
 | `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021） |
@@ -173,8 +174,32 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 
 ## 登录约定
 
-- 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数。
-- 读取顺序：`UNIPUS_JWT` → `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` → `UNIPUS_COOKIE` → `~/.config/unipus-mcp/jwt`（或 `$XDG_CONFIG_HOME/unipus-mcp/jwt`）。
+- 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数（禁止 login/password 类工具）。
+- JWT **约 48 小时**有效（SSO `effectiveTime=172800`）；登录响应含 **`rt`（refreshToken）**，续期优先于反复账密。
+- 续期：`POST https://sso.unipus.cn/sso/4.0/sso/refresh_jwt`，body `{"rt":"…"}` → 新 jwt + **新 rt**（轮换，必须原子写回）。
+- 本机存储（目录 `0700`，秘密文件 `0600`）：
+
+```
+~/.config/unipus-mcp/          # 或 $XDG_CONFIG_HOME/unipus-mcp/
+  active-account.txt           # 当前默认 account_id
+  jwt / rt                     # legacy 单账户兼容（= active 同步副本）
+  accounts/<account_id>/
+    jwt   # 0600
+    rt    # 0600；与 jwt 同次写入
+    meta.json  # 无秘密：alias、last_login_at、last_refresh_at、jwt_expire 等
+```
+
+- JWT **读取顺序**：
+  1. `UNIPUS_JWT` / `UNIPUS_JWT_FILE` / `UNIPUS_COOKIE_FILE` / `UNIPUS_COOKIE`（现有 env）
+  2. 若存在 `active-account.txt` → `accounts/<id>/jwt`（及同目录 `rt`）
+  3. 否则 legacy `~/.config/unipus-mcp/jwt`
+- 未配置多账户时行为与以前一致：一个 jwt 文件即可用。
+- CLI：
+  - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active（密码仅 env：`UNIPUS_USERNAME`/`UNIPUS_PHONE` + `UNIPUS_PASSWORD`）
+  - `npx tsx scripts/sso-login.ts --refresh [--account <id>]` 或 `npm run refresh-jwt` — 优先 `rt` 续期；失败回退账密；极验 → 退出码 **3**（`CAPTCHA_REQUIRED`）
+  - `npx tsx scripts/accounts.ts list` / `use <id>` — 只动指针与脱敏展示；**切换账户仅 CLI**（MCP 无 `use_account`）
+- 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。
+- MCP `list_accounts`：只读、无秘密字段；切换请 CLI。
 - 进度路径（可选）：默认 host `https://ucloud.unipus.cn`（`UNIPUS_ULS_ORIGIN` 可覆盖），path `UNIPUS_ULS_USER_STATUS_FOR_APP_PATH`（默认 `/api/uls/user/getUserStatusForApp`）。请求头 `u-app-id` 默认 `116`（`UNIPUS_U_APP_ID` 可覆盖），这是服务端的 `sourceId`。`UNIPUS_ULS_WEEK_PROGRESS_PATH` 若设置则**强制** legacy 单 GET。Authorization 为**原始 JWT**（不加 `Bearer `）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。
@@ -190,8 +215,6 @@ Silent answer-audio upload (no mic):
 Does **not** call `submitAnswer` yet (needs a fresh `loadPaper` token).
 
 Args: `filePath` (required), optional `fileName`, `openId`. No credentials in tool args.
-
-SSO helper: `npx tsx scripts/sso-login.ts` with `UNIPUS_USERNAME` / `UNIPUS_PASSWORD` → `~/.config/unipus-mcp/jwt`.
 
 
 ## `save_snapshot`（听力口语位 S5）
