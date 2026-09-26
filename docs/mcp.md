@@ -200,6 +200,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` — 只动指针与脱敏展示（含 alias/note）；**切换账户仅 CLI**（MCP 无 `use_account`）
 - 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。
 - MCP `list_accounts`：只读、无秘密字段（含 `alias`/`note`）；切换与写备注请 CLI。
+- **周任务 harness**：`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all` — 无状态按账户续票+查进度+交卷缺口（听力 loadPaper+submitAnswer；口语静默 TTS→upload→submit）；stdout JSON 汇总（含 alias/note）；**永不**打印 jwt/rt/password；**不**改 active-account（除非显式）。MCP **无** `run_weekly` / 定时器，由 harness routine 调此 CLI。
 - 进度路径（可选）：默认 host `https://ucloud.unipus.cn`（`UNIPUS_ULS_ORIGIN` 可覆盖），path `UNIPUS_ULS_USER_STATUS_FOR_APP_PATH`（默认 `/api/uls/user/getUserStatusForApp`）。请求头 `u-app-id` 默认 `116`（`UNIPUS_U_APP_ID` 可覆盖），这是服务端的 `sourceId`。`UNIPUS_ULS_WEEK_PROGRESS_PATH` 若设置则**强制** legacy 单 GET。Authorization 为**原始 JWT**（不加 `Bearer `）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
 - 工具也不返回密码、cookie、JWT 原文。

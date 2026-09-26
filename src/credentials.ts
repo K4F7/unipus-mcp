@@ -99,6 +99,16 @@ function normalizeJwtCandidate(value: string): string | null {
   return trimmed;
 }
 
+/** Fixed JWT store for multi-account grind without touching active-account.txt. */
+export function createStaticJwtStore(jwt: string): JwtCredentialStore {
+  const token = jwt.trim();
+  return {
+    async getJwt() {
+      return token.length > 0 ? token : null;
+    },
+  };
+}
+
 export function createEnvCredentialStore(options: {
   env?: NodeJS.ProcessEnv;
   homedir?: string;

@@ -68,3 +68,7 @@ npm start --silent   # stdio MCP；勿关 stdin
 ## License
 
 Private use for Sein / K4F7 unless stated otherwise.
+
+## Weekly grind (harness)
+
+`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all` — stateless multi-account listen/speak gap fill for AI harness routines. MCP stays scheduler-free.
