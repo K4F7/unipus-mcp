@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "U校园AI / U听说 local stdio MCP",
+  "description": "U\u6821\u56edAI / U\u542c\u8bf4 local stdio MCP",
   "bin": {
     "unipus-mcp": "./dist/index.js"
   },
@@ -15,7 +15,8 @@
     "sso-login": "tsx scripts/sso-login.ts",
     "clio-score-smoke": "tsx scripts/clio-score-smoke.ts",
     "refresh-jwt": "tsx scripts/refresh-jwt.ts",
-    "accounts": "tsx scripts/accounts.ts"
+    "accounts": "tsx scripts/accounts.ts",
+    "weekly-grind": "tsx scripts/weekly-grind.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
