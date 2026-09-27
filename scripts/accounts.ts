@@ -7,6 +7,8 @@
  *   npx tsx scripts/accounts.ts note <account_id> <text…>
  *   npx tsx scripts/accounts.ts note <account_id> --clear
  *   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
+ *   npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
+ *   npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
  */
 import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,9 +16,11 @@ import { join } from "node:path";
 import {
   accountDir,
   defaultConfigDir,
+  isGrindMode,
   listAccounts,
   readActiveAccountId,
   sanitizeAccountId,
+  setAccountGrind,
   setAccountNote,
   setActiveAccountId,
 } from "../src/accounts.js";
@@ -28,9 +32,12 @@ function printHelp(): void {
   npx tsx scripts/accounts.ts note <account_id> <text…>
   npx tsx scripts/accounts.ts note <account_id> --clear
   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
+  npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
+  npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
 
-Only prints redacted meta (account_id, active, has_jwt/has_rt, alias, note, timestamps).
-Never prints jwt / rt / password. Switching is CLI-only (no MCP use_account).`);
+Only prints redacted meta (account_id, active, has_jwt/has_rt, alias, note, grind, timestamps).
+Never prints jwt / rt / password. Switching is CLI-only (no MCP use_account).
+grind 写入 meta.json（听/口策略）；勿从 note 文本解析。`);
 }
 
 /** Single-line escape for list display; truncate long notes. */
@@ -58,10 +65,11 @@ async function cmdList(): Promise<void> {
     const mark = a.active ? "*" : " ";
     const alias = a.alias ? ` alias=${a.alias}` : "";
     const note = formatNoteForList(a.note);
+    const grind = ` grind=${a.grind}`;
     const login = a.last_login_at ? ` login=${a.last_login_at}` : "";
     const refresh = a.last_refresh_at ? ` refresh=${a.last_refresh_at}` : "";
     console.log(
-      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"}${alias}${note}${login}${refresh}`,
+      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"}${alias}${note}${grind}${login}${refresh}`,
     );
   }
 }
@@ -151,6 +159,21 @@ async function main(): Promise<void> {
       process.exit(2);
     }
     await cmdNote(id, rest.slice(1));
+    return;
+  }
+  if (cmd === "grind" || cmd === "set-grind") {
+    const id = rest[0]?.trim();
+    const mode = rest[1]?.trim();
+    if (!id || !mode) {
+      console.error("usage: accounts.ts grind|set-grind <account_id> both|listen|speak");
+      process.exit(2);
+    }
+    if (!isGrindMode(mode)) {
+      console.error(`grind 非法：期望 both|listen|speak（收到 ${mode}）`);
+      process.exit(2);
+    }
+    await setAccountGrind(id, mode);
+    console.log(`已设置 ${id} 的 grind=${mode}（秘密未打印）`);
     return;
   }
   console.error(`未知子命令: ${cmd}`);

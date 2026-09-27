@@ -7,9 +7,11 @@ import { describe, test } from "node:test";
 import {
   NOTE_MAX_LENGTH,
   listAccounts,
+  normalizeGrind,
   readAccountMeta,
   readActiveAccountId,
   saveAccountTokens,
+  setAccountGrind,
   setAccountNote,
   setActiveAccountId,
   sanitizeAccountId,
@@ -175,5 +177,67 @@ describe("account note", () => {
     meta = await readAccountMeta("keep", { home, env });
     assert.equal(meta?.note, "更新备注");
     assert.equal(meta?.alias, "me");
+  });
+});
+
+describe("account grind policy", () => {
+  test("normalizeGrind defaults invalid/missing to both", () => {
+    assert.equal(normalizeGrind(undefined), "both");
+    assert.equal(normalizeGrind(null), "both");
+    assert.equal(normalizeGrind("nope"), "both");
+    assert.equal(normalizeGrind("speak"), "speak");
+    assert.equal(normalizeGrind("listen"), "listen");
+    assert.equal(normalizeGrind("both"), "both");
+  });
+
+  test("setAccountGrind writes meta; listAccounts returns grind; preserves note", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-grind-"));
+    const env = {};
+    await saveAccountTokens(
+      {
+        accountId: "g1",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.g",
+        metaPatch: { note: "一学期，单刷口语（1）" },
+      },
+      { home, env },
+    );
+    assert.equal((await listAccounts({ home, env }))[0]!.grind, "both");
+
+    await setAccountGrind("g1", "speak", { home, env });
+    const meta = await readAccountMeta("g1", { home, env });
+    assert.equal(meta?.grind, "speak");
+    assert.equal(meta?.note, "一学期，单刷口语（1）");
+
+    const listed = await listAccounts({ home, env });
+    assert.equal(listed[0]!.grind, "speak");
+    assert.equal("jwt" in listed[0]!, false);
+
+    await setAccountGrind("g1", "listen", { home, env });
+    assert.equal((await readAccountMeta("g1", { home, env }))?.grind, "listen");
+
+    await assert.rejects(
+      () => setAccountGrind("ghost", "both", { home, env }),
+      /不存在|缺少 jwt/,
+    );
+  });
+
+  test("saveAccountTokens preserves existing grind", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-grind-pres-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "gp", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.gp" },
+      { home, env },
+    );
+    await setAccountGrind("gp", "speak", { home, env });
+    await saveAccountTokens(
+      {
+        accountId: "gp",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoyfQ.gp2",
+        makeActive: false,
+        syncLegacy: false,
+      },
+      { home, env },
+    );
+    assert.equal((await readAccountMeta("gp", { home, env }))?.grind, "speak");
   });
 });

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { saveAccountTokens, setActiveAccountId } from "../src/accounts.js";
+import {
+  saveAccountTokens,
+  setAccountGrind,
+  setActiveAccountId,
+} from "../src/accounts.js";
 import {
   buildObjectiveAnswer,
   walkPaperLeaves,
@@ -13,21 +17,30 @@ import {
   ensureAccountAuth,
   grindOneAccount,
   parseWeeklyGrindArgs,
+  resolveEffectiveGrind,
   resolveTargetAccounts,
   runWeeklyGrind,
   sanitizeSummaryForStdout,
-  type WeeklyGrindPorts,
 } from "../src/weekly-grind.js";
 import { mockHttp } from "./mock-http.js";
 
 describe("parseWeeklyGrindArgs", () => {
   test("defaults to active; --all; multiple --account", () => {
     assert.deepEqual(parseWeeklyGrindArgs([]).mode, { kind: "active" });
+    assert.equal(parseWeeklyGrindArgs([]).grindOverride, null);
     assert.deepEqual(parseWeeklyGrindArgs(["--all"]).mode, { kind: "all" });
     assert.deepEqual(parseWeeklyGrindArgs(["--account", "a", "-a", "b"]).mode, {
       kind: "ids",
       ids: ["a", "b"],
     });
+  });
+
+  test("--listen-only / --speak-only set grindOverride; mutual exclusion errors", () => {
+    assert.equal(parseWeeklyGrindArgs(["--speak-only"]).grindOverride, "speak");
+    assert.equal(parseWeeklyGrindArgs(["--all", "--listen-only"]).grindOverride, "listen");
+    const bad = parseWeeklyGrindArgs(["--listen-only", "--speak-only"]);
+    assert.ok(bad.error);
+    assert.match(bad.error!, /互斥/);
   });
 });
 
@@ -251,11 +264,14 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
           account_id: "x",
           alias: null,
           note: null,
+          grind: "both",
           status: "error",
           before: null,
           after: null,
           listen_completed: 0,
           speak_completed: 0,
+          listen_skipped: null,
+          speak_skipped: null,
           errors: ["boom eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig end"],
         },
       ],
@@ -311,6 +327,180 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.taskId, "555");
     assert.ok(http.calls.some((c) => c.url.includes("submitAnswer")));
+  });
+});
+
+
+describe("grind side policy", () => {
+  test("resolveEffectiveGrind: CLI overrides meta; missing/invalid → both", () => {
+    assert.equal(resolveEffectiveGrind(null, undefined), "both");
+    assert.equal(resolveEffectiveGrind(undefined, "nope"), "both");
+    assert.equal(resolveEffectiveGrind(null, "speak"), "speak");
+    assert.equal(resolveEffectiveGrind("listen", "speak"), "listen");
+    assert.equal(resolveEffectiveGrind("speak", "both"), "speak");
+  });
+
+  test("--speak-only only speaks even if meta=both", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-speak-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "cli-s", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.cs" },
+      { home, env },
+    );
+    let listenCalls = 0;
+    let speakCalls = 0;
+    const row = (
+      await resolveTargetAccounts({ kind: "ids", ids: ["cli-s"] }, { home, env })
+    )[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      grindOverride: "speak",
+      listProgress: async () => ({
+        listen_done: 0,
+        listen_total: 5,
+        speak_done: 1,
+        speak_total: 3,
+      }),
+      grindListen: async () => {
+        listenCalls += 1;
+        return { completed: 1, taskIds: ["l"] };
+      },
+      grindSpeak: async (_p, need) => {
+        speakCalls += 1;
+        assert.equal(need, 2);
+        return { completed: 2, taskIds: ["s1", "s2"] };
+      },
+    });
+    assert.equal(listenCalls, 0);
+    assert.equal(speakCalls, 1);
+    assert.equal(result.grind, "speak");
+    assert.equal(result.listen_completed, 0);
+    assert.equal(result.speak_completed, 2);
+    assert.match(result.listen_skipped ?? "", /CLI --speak-only/);
+    assert.equal(result.speak_skipped, null);
+  });
+
+  test("--listen-only only listens even if meta=both", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-listen-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "cli-l", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.cl" },
+      { home, env },
+    );
+    let listenCalls = 0;
+    let speakCalls = 0;
+    const row = (
+      await resolveTargetAccounts({ kind: "ids", ids: ["cli-l"] }, { home, env })
+    )[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      grindOverride: "listen",
+      listProgress: async () => ({
+        listen_done: 1,
+        listen_total: 3,
+        speak_done: 0,
+        speak_total: 5,
+      }),
+      grindListen: async (_p, need) => {
+        listenCalls += 1;
+        assert.equal(need, 2);
+        return { completed: 2, taskIds: ["l1", "l2"] };
+      },
+      grindSpeak: async () => {
+        speakCalls += 1;
+        return { completed: 1, taskIds: ["s"] };
+      },
+    });
+    assert.equal(listenCalls, 1);
+    assert.equal(speakCalls, 0);
+    assert.equal(result.grind, "listen");
+    assert.match(result.speak_skipped ?? "", /CLI --listen-only/);
+  });
+
+  test("meta.grind=speak skips listen under --all (summary marks skip)", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-meta-speak-"));
+    const env = {};
+    await saveAccountTokens(
+      {
+        accountId: "meta-s",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.ms",
+        metaPatch: { note: "一学期，单刷口语（1）" },
+      },
+      { home, env },
+    );
+    await setAccountGrind("meta-s", "speak", { home, env });
+
+    let listenCalls = 0;
+    let speakCalls = 0;
+    const summary = await runWeeklyGrind(
+      { kind: "all" },
+      {
+        home,
+        env,
+        listProgress: async () => ({
+          listen_done: 0,
+          listen_total: 5,
+          speak_done: 0,
+          speak_total: 3,
+        }),
+        grindListen: async () => {
+          listenCalls += 1;
+          return { completed: 1, taskIds: ["l"] };
+        },
+        grindSpeak: async (_p, need) => {
+          speakCalls += 1;
+          assert.equal(need, 3);
+          return { completed: 3, taskIds: ["s1", "s2", "s3"] };
+        },
+      },
+    );
+    assert.equal(listenCalls, 0);
+    assert.equal(speakCalls, 1);
+    const row = summary.accounts[0]!;
+    assert.equal(row.grind, "speak");
+    assert.match(row.listen_skipped ?? "", /meta\.grind=speak/);
+    assert.equal(row.speak_skipped, null);
+    assert.equal(row.listen_completed, 0);
+    assert.equal(row.speak_completed, 3);
+  });
+
+  test("CLI override beats meta.grind", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-vs-meta-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "ov", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.ov" },
+      { home, env },
+    );
+    await setAccountGrind("ov", "speak", { home, env });
+    let listenCalls = 0;
+    let speakCalls = 0;
+    const row = (
+      await resolveTargetAccounts({ kind: "ids", ids: ["ov"] }, { home, env })
+    )[0]!;
+    assert.equal(row.grind, "speak");
+    await grindOneAccount(row, {
+      home,
+      env,
+      grindOverride: "listen",
+      listProgress: async () => ({
+        listen_done: 0,
+        listen_total: 2,
+        speak_done: 0,
+        speak_total: 2,
+      }),
+      grindListen: async () => {
+        listenCalls += 1;
+        return { completed: 2, taskIds: ["l1", "l2"] };
+      },
+      grindSpeak: async () => {
+        speakCalls += 1;
+        return { completed: 2, taskIds: ["s1", "s2"] };
+      },
+    });
+    assert.equal(listenCalls, 1);
+    assert.equal(speakCalls, 0);
   });
 });
 

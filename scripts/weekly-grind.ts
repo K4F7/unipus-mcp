@@ -3,6 +3,7 @@
  * Stateless weekly listen/speak grind CLI for harness routines.
  *
  *   npx tsx scripts/weekly-grind.ts [--account <id>]… | --all
+ *     [--listen-only | --speak-only]
  *
  * No MCP scheduler. Never prints jwt/rt/password.
  * Leaves active-account.txt unchanged (token saves use makeActive:false).
@@ -15,29 +16,43 @@ import {
 
 function printHelp(): void {
   console.log(`Usage:
-  npx tsx scripts/weekly-grind.ts [--account <id>]…
-  npx tsx scripts/weekly-grind.ts --all
+  npx tsx scripts/weekly-grind.ts [--account <id>]… [--listen-only | --speak-only]
+  npx tsx scripts/weekly-grind.ts --all [--listen-only | --speak-only]
 
 Per account (sequential, stateless):
   1. rt → refresh_jwt; else/fail → password from env; CAPTCHA → skip
-  2. listWeekProgress; skip if listen+speak already done
+  2. listWeekProgress; skip if enabled sides already done
   3. headless submit gaps (listen loadPaper+submitAnswer; speak silent TTS→upload→submit)
-  4. stdout JSON summary (account_id, alias/note, before/after, errors)
+  4. stdout JSON summary (account_id, alias/note, grind, skips, before/after, errors)
+
+Grind side filter (two layers; CLI overrides meta):
+  --listen-only   only听力 (overrides meta.grind)
+  --speak-only    only口语 (overrides meta.grind)
+  neither         use each account meta.grind (both|listen|speak; default both)
+  --listen-only and --speak-only are mutually exclusive
 
 --all = every accounts/ dir with jwt|rt
 neither --all nor --account → active only
 
-Harness routines call this CLI; MCP stays stateless (no run_weekly tool).
+Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
+Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
 Never prints jwt / rt / password.`);
 }
 
 async function main(): Promise<void> {
-  const { mode, help } = parseWeeklyGrindArgs(process.argv.slice(2));
-  if (help) {
+  const parsed = parseWeeklyGrindArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(parsed.error);
+    printHelp();
+    process.exit(2);
+  }
+  if (parsed.help) {
     printHelp();
     process.exit(0);
   }
-  const summary = sanitizeSummaryForStdout(await runWeeklyGrind(mode));
+  const summary = sanitizeSummaryForStdout(
+    await runWeeklyGrind(parsed.mode, { grindOverride: parsed.grindOverride }),
+  );
   console.log(JSON.stringify(summary, null, 2));
   const hardFail = summary.accounts.some(
     (a) => a.status === "error" && a.errors.length > 0,

@@ -51,9 +51,10 @@ import { z } from "zod";
 
 const LIST_ACCOUNTS_DESCRIPTION = [
   "List local Unipus account archives under ~/.config/unipus-mcp/accounts/.",
-  "Returns account_id, active flag, has_jwt/has_rt, alias, note, and timestamps — redacted meta only.",
+  "Returns account_id, active flag, has_jwt/has_rt, alias, note, grind (both|listen|speak), and timestamps — redacted meta only.",
   "Never returns jwt/rt/password. Switching accounts is CLI-only: npx tsx scripts/accounts.ts use <id>.",
   "Set usage note via CLI: npx tsx scripts/accounts.ts note <id> <text> | note <id> --clear.",
+  "Set grind policy via CLI: npx tsx scripts/accounts.ts grind <id> both|listen|speak.",
 ].join(" ");
 
 const AUTH_STATUS_DESCRIPTION = [
