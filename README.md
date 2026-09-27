@@ -71,4 +71,4 @@ Private use for Sein / K4F7 unless stated otherwise.
 
 ## Weekly grind (harness)
 
-`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all` — stateless multi-account listen/speak gap fill for AI harness routines. MCP stays scheduler-free.
+`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — stateless multi-account listen/speak gap fill for AI harness routines. Per-account `meta.grind` (`both`|`listen`|`speak`, default both) plus CLI override; set via `accounts.ts grind <id> …`. MCP still has no scheduler.

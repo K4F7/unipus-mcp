@@ -34,11 +34,27 @@ export type AccountFs = {
 /** Max length for account note (用途标记); reject longer with clear error. */
 export const NOTE_MAX_LENGTH = 500;
 
+/** Per-account weekly-grind side policy; missing/invalid → both. */
+export type GrindMode = "both" | "listen" | "speak";
+
+
+/** Normalize meta/CLI grind; anything else → both. Never parse note text. */
+export function normalizeGrind(raw: unknown): GrindMode {
+  if (raw === "both" || raw === "listen" || raw === "speak") return raw;
+  return "both";
+}
+
+export function isGrindMode(raw: unknown): raw is GrindMode {
+  return raw === "both" || raw === "listen" || raw === "speak";
+}
+
 export type AccountMeta = {
   account_id: string;
   alias?: string | null;
   /** Free-text usage tag; never secrets. */
   note?: string | null;
+  /** Weekly grind sides: both | listen | speak (default both). */
+  grind?: GrindMode | null;
   last_login_at?: string | null;
   last_refresh_at?: string | null;
   jwt_expire?: unknown;
@@ -51,6 +67,7 @@ export type ListedAccount = {
   has_rt: boolean;
   alias: string | null;
   note: string | null;
+  grind: GrindMode;
   last_login_at: string | null;
   last_refresh_at: string | null;
 };
@@ -152,6 +169,7 @@ export async function readAccountMeta(
       account_id: sanitizeAccountId(accountId),
       alias: typeof rec.alias === "string" ? rec.alias : null,
       note: typeof rec.note === "string" ? rec.note : null,
+      grind: normalizeGrind(rec.grind),
       last_login_at: typeof rec.last_login_at === "string" ? rec.last_login_at : null,
       last_refresh_at:
         typeof rec.last_refresh_at === "string" ? rec.last_refresh_at : null,
@@ -176,6 +194,7 @@ export async function writeAccountMeta(
     account_id: sanitizeAccountId(accountId),
     alias: meta.alias ?? null,
     note: meta.note ?? null,
+    grind: normalizeGrind(meta.grind),
     last_login_at: meta.last_login_at ?? null,
     last_refresh_at: meta.last_refresh_at ?? null,
     jwt_expire: meta.jwt_expire ?? null,
@@ -223,6 +242,7 @@ export async function listAccounts(
       has_rt: await fileExists(join(dir, "rt"), p.readFile),
       alias: meta?.alias ?? null,
       note: meta?.note ?? null,
+      grind: normalizeGrind(meta?.grind),
       last_login_at: meta?.last_login_at ?? null,
       last_refresh_at: meta?.last_refresh_at ?? null,
     });
@@ -275,6 +295,10 @@ export async function saveAccountTokens(
       account_id: id,
       alias: patch.alias !== undefined ? patch.alias : existing.alias ?? null,
       note: patch.note !== undefined ? patch.note : existing.note ?? null,
+      grind:
+        patch.grind !== undefined
+          ? normalizeGrind(patch.grind)
+          : normalizeGrind(existing.grind),
       last_login_at:
         patch.last_login_at !== undefined
           ? patch.last_login_at
@@ -375,6 +399,38 @@ export async function setAccountNote(
       ...existing,
       account_id: id,
       note: normalized,
+    },
+    options,
+  );
+}
+
+/**
+ * Set account weekly-grind policy (both|listen|speak). Requires existing jwt.
+ * Does not parse note text.
+ */
+export async function setAccountGrind(
+  accountId: string,
+  grind: GrindMode,
+  options: AccountFs = {},
+): Promise<void> {
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  if (!isGrindMode(grind)) {
+    throw new Error(`grind 非法：期望 both|listen|speak（收到 ${String(grind)}）`);
+  }
+  const mode: GrindMode = grind;
+  const dir = accountDir(id, p.env, p.home);
+  const hasJwt = await fileExists(join(dir, "jwt"), p.readFile);
+  if (!hasJwt) {
+    throw new Error(`账户 ${id} 不存在或缺少 jwt（期望目录 ${dir}）`);
+  }
+  const existing = (await readAccountMeta(id, options)) ?? { account_id: id };
+  await writeAccountMeta(
+    id,
+    {
+      ...existing,
+      account_id: id,
+      grind: mode,
     },
     options,
   );

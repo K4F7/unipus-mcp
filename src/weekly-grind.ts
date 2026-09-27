@@ -5,10 +5,12 @@
  */
 import {
   listAccounts,
+  normalizeGrind,
   readAccountMeta,
   readAccountRt,
   readActiveAccountId,
   type AccountFs,
+  type GrindMode,
   type ListedAccount,
 } from "./accounts.js";
 import { createFetchUnipusHttp, type UnipusHttp } from "./http.js";
@@ -39,6 +41,8 @@ export type AccountGrindSummary = {
   account_id: string;
   alias: string | null;
   note: string | null;
+  /** Effective grind policy after CLI override ?? meta.grind ?? both. */
+  grind: GrindMode;
   status:
     | "done"
     | "ground"
@@ -49,6 +53,10 @@ export type AccountGrindSummary = {
   after: ProgressSnap | null;
   listen_completed: number;
   speak_completed: number;
+  /** Non-null when listen side skipped by CLI/meta policy. */
+  listen_skipped: string | null;
+  /** Non-null when speak side skipped by CLI/meta policy. */
+  speak_skipped: string | null;
   errors: string[];
 };
 
@@ -77,6 +85,11 @@ export type WeeklyGrindPorts = AccountFs & {
   loginPassword?: typeof loginWithPassword;
   /** When false (default), never call makeActive/syncLegacy on token save. */
   touchActive?: boolean;
+  /**
+   * CLI grind override (--listen-only / --speak-only).
+   * null/undefined → use meta.grind (default both).
+   */
+  grindOverride?: GrindMode | null;
 };
 
 export type SelectAccountsMode =
@@ -84,18 +97,28 @@ export type SelectAccountsMode =
   | { kind: "active" }
   | { kind: "ids"; ids: string[] };
 
-/** Parse CLI argv into account selection. */
-export function parseWeeklyGrindArgs(argv: string[]): {
+export type ParsedWeeklyGrindArgs = {
   mode: SelectAccountsMode;
   help: boolean;
-} {
+  /** CLI --listen-only / --speak-only; null = no override (use meta). */
+  grindOverride: GrindMode | null;
+  /** Set when --listen-only and --speak-only both present. */
+  error?: string;
+};
+
+/** Parse CLI argv into account selection + optional grind side override. */
+export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
   let help = false;
   let all = false;
+  let listenOnly = false;
+  let speakOnly = false;
   const ids: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--help" || a === "-h") help = true;
     else if (a === "--all") all = true;
+    else if (a === "--listen-only") listenOnly = true;
+    else if (a === "--speak-only") speakOnly = true;
     else if (a === "--account" || a === "-a") {
       const id = argv[++i]?.trim();
       if (id) ids.push(id);
@@ -104,10 +127,52 @@ export function parseWeeklyGrindArgs(argv: string[]): {
       if (id) ids.push(id);
     }
   }
-  if (help) return { mode: { kind: "active" }, help: true };
-  if (all) return { mode: { kind: "all" }, help: false };
-  if (ids.length > 0) return { mode: { kind: "ids", ids }, help: false };
-  return { mode: { kind: "active" }, help: false };
+  if (listenOnly && speakOnly) {
+    return {
+      mode: { kind: "active" },
+      help,
+      grindOverride: null,
+      error: "--listen-only 与 --speak-only 互斥",
+    };
+  }
+  const grindOverride: GrindMode | null = listenOnly
+    ? "listen"
+    : speakOnly
+      ? "speak"
+      : null;
+  if (help) return { mode: { kind: "active" }, help: true, grindOverride };
+  if (all) return { mode: { kind: "all" }, help: false, grindOverride };
+  if (ids.length > 0) return { mode: { kind: "ids", ids }, help: false, grindOverride };
+  return { mode: { kind: "active" }, help: false, grindOverride };
+}
+
+/** effective = CLI override ?? meta.grind ?? both */
+export function resolveEffectiveGrind(
+  cliOverride: GrindMode | null | undefined,
+  metaGrind: unknown,
+): GrindMode {
+  if (cliOverride != null) return cliOverride;
+  return normalizeGrind(metaGrind);
+}
+
+export function grindSides(mode: GrindMode): { listen: boolean; speak: boolean } {
+  return {
+    listen: mode === "both" || mode === "listen",
+    speak: mode === "both" || mode === "speak",
+  };
+}
+
+function policySkipReason(
+  side: "listen" | "speak",
+  effective: GrindMode,
+  cliOverride: GrindMode | null | undefined,
+): string {
+  if (cliOverride != null) {
+    return side === "listen"
+      ? "CLI --speak-only"
+      : "CLI --listen-only";
+  }
+  return `meta.grind=${effective}`;
 }
 
 export async function resolveTargetAccounts(
@@ -130,6 +195,7 @@ export async function resolveTargetAccounts(
           has_rt: false,
           alias: null,
           note: null,
+          grind: "both",
           last_login_at: null,
           last_refresh_at: null,
         });
@@ -285,13 +351,21 @@ function snapFromProgress(p: {
   };
 }
 
-function isAlreadyDone(snap: ProgressSnap): boolean {
-  const ld = snap.listen_done;
-  const lt = snap.listen_total;
-  const sd = snap.speak_done;
-  const st = snap.speak_total;
-  if (ld == null || lt == null || sd == null || st == null) return false;
-  return ld >= lt && sd >= st;
+function isAlreadyDone(
+  snap: ProgressSnap,
+  sides: { listen: boolean; speak: boolean },
+): boolean {
+  if (sides.listen) {
+    const ld = snap.listen_done;
+    const lt = snap.listen_total;
+    if (ld == null || lt == null || ld < lt) return false;
+  }
+  if (sides.speak) {
+    const sd = snap.speak_done;
+    const st = snap.speak_total;
+    if (sd == null || st == null || sd < st) return false;
+  }
+  return sides.listen || sides.speak;
 }
 
 function needCount(done: number | null, total: number | null): number {
@@ -323,15 +397,26 @@ export async function grindOneAccount(
 ): Promise<AccountGrindSummary> {
   const errors: string[] = [];
   const meta = await readAccountMeta(account.account_id, ports);
+  const effective = resolveEffectiveGrind(ports.grindOverride, meta?.grind);
+  const sides = grindSides(effective);
+  const listen_skipped = sides.listen
+    ? null
+    : policySkipReason("listen", effective, ports.grindOverride);
+  const speak_skipped = sides.speak
+    ? null
+    : policySkipReason("speak", effective, ports.grindOverride);
   const base: AccountGrindSummary = {
     account_id: account.account_id,
     alias: meta?.alias ?? account.alias ?? null,
     note: meta?.note ?? account.note ?? null,
+    grind: effective,
     status: "error",
     before: null,
     after: null,
     listen_completed: 0,
     speak_completed: 0,
+    listen_skipped,
+    speak_skipped,
     errors,
   };
 
@@ -365,7 +450,7 @@ export async function grindOneAccount(
   }
   base.before = beforeRaw;
 
-  if (isAlreadyDone(beforeRaw)) {
+  if (isAlreadyDone(beforeRaw, sides)) {
     return {
       ...base,
       status: "skipped_done",
@@ -373,8 +458,12 @@ export async function grindOneAccount(
     };
   }
 
-  const listenNeed = needCount(beforeRaw.listen_done, beforeRaw.listen_total);
-  const speakNeed = needCount(beforeRaw.speak_done, beforeRaw.speak_total);
+  const listenNeed = sides.listen
+    ? needCount(beforeRaw.listen_done, beforeRaw.listen_total)
+    : 0;
+  const speakNeed = sides.speak
+    ? needCount(beforeRaw.speak_done, beforeRaw.speak_total)
+    : 0;
 
   const grindPorts: GrindListenPorts & GrindSpeakPorts = {
     credentials,
@@ -409,7 +498,7 @@ export async function grindOneAccount(
   }
   base.after = afterRaw;
 
-  if (isAlreadyDone(afterRaw)) {
+  if (isAlreadyDone(afterRaw, sides)) {
     base.status = base.listen_completed + base.speak_completed > 0 ? "done" : "skipped_done";
   } else if (base.listen_completed + base.speak_completed > 0) {
     base.status = "ground";
@@ -434,11 +523,14 @@ export async function runWeeklyGrind(
         account_id: account.account_id,
         alias: account.alias,
         note: account.note,
+        grind: normalizeGrind(account.grind),
         status: "error",
         before: null,
         after: null,
         listen_completed: 0,
         speak_completed: 0,
+        listen_skipped: null,
+        speak_skipped: null,
         errors: ["账户不存在或缺少 jwt|rt"],
       });
       continue;
