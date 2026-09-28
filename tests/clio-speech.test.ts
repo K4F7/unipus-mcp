@@ -198,6 +198,37 @@ describe("scoreEnSent (mocked WSS)", () => {
     );
   });
 
+  test("rejects missing transcript without TypeError (bad arg order)", async () => {
+    const missingTranscript = { audioBytes: Buffer.from([1]) } as unknown as {
+      transcript: string;
+      audioBytes: Buffer;
+    };
+    await assert.rejects(
+      () => scoreEnSent(missingTranscript),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.name, "Error");
+        assert.match(err.message, /transcript/);
+        assert.equal(err instanceof TypeError, false);
+        return true;
+      },
+    );
+    // Swapped ports-as-input: transcript undefined → clear Error, not TypeError
+    const portsAsInput = { env: {} } as unknown as {
+      transcript: string;
+      audioBytes: Buffer;
+    };
+    await assert.rejects(
+      () => scoreEnSent(portsAsInput),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err instanceof TypeError, false);
+        assert.match(String((err as Error).message), /transcript/);
+        return true;
+      },
+    );
+  });
+
   test("scoreSpeechTool maps EN_SENT_SCORE content", async () => {
     MockWebSocket.instances = [];
     const toolPromise = scoreSpeechTool(
@@ -232,6 +263,28 @@ describe("scoreEnSent (mocked WSS)", () => {
     assert.deepEqual(parsed.children[0].record.list, []);
     assert.equal(parsed.children[0].record.recordDetail.score, 55);
     assert.deepEqual(parsed.children[0].record.specific_scores, { total: 0.55 });
+  });
+
+  test("scoreSpeechTool fails when Clio returns empty audio URL", async () => {
+    MockWebSocket.instances = [];
+    const toolPromise = scoreSpeechTool(
+      {
+        readFile: async () => Buffer.from("wav-bytes"),
+        createWebSocket: (url) => new MockWebSocket(url),
+      },
+      { transcript: "hello world", wavPath: "/tmp/x.wav" },
+    );
+    await new Promise((r) => setImmediate(r));
+    MockWebSocket.instances[0]!.respondFinal({
+      code: 0,
+      finalResult: {
+        result: { total: 55, overall: 55 },
+        url: "",
+      },
+    });
+    const result = await toolPromise;
+    assert.equal(result.isError, true);
+    assert.match(result.message, /audio URL|audioUrl|评分失败/i);
   });
 });
 
@@ -312,5 +365,33 @@ describe("clioToEnSentScoreFields", () => {
     });
     // overall absent → no invented score; total alone is not mapped as overall
     assert.equal(mapped.reviewScores, undefined);
+  });
+
+  test("rejects empty/null Clio audioUrl without qiniuUrl", () => {
+    assert.throws(
+      () =>
+        clioToEnSentScoreFields("hello", {
+          audioUrl: null,
+          result: { overall: 50 },
+        }),
+      /audioUrl|audio URL|url/i,
+    );
+    assert.throws(
+      () =>
+        clioToEnSentScoreFields("hello", {
+          audioUrl: "   ",
+          result: { overall: 50 },
+        }),
+      /audioUrl|audio URL|url/i,
+    );
+  });
+
+  test("allows empty Clio audioUrl when qiniuUrl is set", () => {
+    const mapped = clioToEnSentScoreFields(
+      "hello",
+      { audioUrl: null, result: { overall: 50 } },
+      { qiniuUrl: "https://birdflock.unipus.cn/ans-prod/u/a.mp3" },
+    );
+    assert.equal(mapped.record.url, "https://birdflock.unipus.cn/ans-prod/u/a.mp3");
   });
 });

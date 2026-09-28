@@ -94,7 +94,7 @@ export async function scoreEnSent(
   input: ScoreEnSentInput,
   ports: ScoreEnSentPorts = {},
 ): Promise<ClioScorePayload> {
-  const transcript = input.transcript.trim();
+  const transcript = input.transcript?.trim() ?? "";
   if (transcript.length === 0) {
     throw new Error("transcript 不能为空");
   }
@@ -313,6 +313,9 @@ export function clioToEnSentScoreFields(
   const clioUrl = scored.audioUrl?.trim() || "";
   const qiniu = options.qiniuUrl?.trim() || "";
   const url = qiniu || clioUrl;
+  if (url.length === 0) {
+    throw new Error("audio URL 不能为空（Clio audioUrl / qiniuUrl）");
+  }
   const replayUrl = options.replayUrl?.trim() || url || undefined;
   const path = options.path?.trim() || clioUrl || undefined;
 
