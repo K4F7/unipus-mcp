@@ -424,7 +424,8 @@ Normalized value: `{ type, taskId, ansVersion, status }` where `status` prefers 
 |--------|----------------|
 | `grade` | 定级中；`status` 映射阶段 |
 | `grade_profile` / `train_plan` | 定级后报告/计划 |
-| `train` | 周训已解锁（听力入口遇此 type →「当前不在定级阶段」） |
+| `train` | 周训已解锁（有 `taskId`；`loadPaper` + `submitAnswer` 可直接刷） |
+| `train_profile` | **周训篇间过渡**（不是定级）。听力 `submitAnswer` 成功后立刻出现：`taskId`/`ansVersion` 为 null，带新的 `flowId`/`tsId`。服务端异步派发下一篇后，`getUserStatus` 自行翻回 `type=train` + 新 `taskId`（真机/无头观测约 1s）。**没有**单独的 enter-train / continueTrain path（勿臆造 `/oral/train`、`/listen/start` 等）。`completeOneListen` / `grindListenGaps` 对 `train_profile` **轮询** `getUserStatus`；超时则 summary 带可恢复原因 `train_profile_pending`。 |
 | `diagnosis` | 诊断阶段 |
 
 `type=grade` 时 `status`：

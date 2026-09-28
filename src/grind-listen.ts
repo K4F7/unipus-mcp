@@ -1,6 +1,11 @@
 /**
  * Headless listen weekly grind: getUserStatus → loadPaper → full submitAnswer.
  * No part/submit; no speakers.
+ *
+ * After each submitAnswer the server briefly returns type=train_profile (taskId
+ * null, flowId/tsId set) while assigning the next paper; getUserStatus flips
+ * back to type=train with a new taskId within ~1s. There is no separate
+ * enter-train API in captured SPA/docs — we poll, we do not invent paths.
  */
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
@@ -16,11 +21,20 @@ import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
 
+const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
+const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
+
 export type GrindListenPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
   /** Optional vocab oral builder; default marks learn-done (no TTS). */
   buildVocabAnswer?: (leaf: GrindLeaf) => Promise<string>;
+  /** Test seam between getUserStatus polls while waiting out train_profile. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Max getUserStatus polls waiting for type=train (default 15). */
+  trainProfileMaxPolls?: number;
+  /** Delay ms between polls (default 500). */
+  trainProfilePollMs?: number;
 };
 
 export type GrindListenRoundResult =
@@ -92,6 +106,89 @@ async function requireJwt(ports: GrindListenPorts): Promise<string | null> {
   return ports.credentials.getJwt();
 }
 
+function statusValue(body: unknown): Record<string, unknown> | null {
+  if (body == null || typeof body !== "object") return null;
+  const value = (body as Record<string, unknown>).value;
+  if (value != null && typeof value === "object") {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function isTrainReady(status: Record<string, unknown> | null): boolean {
+  return status != null && status.type === "train" && status.taskId != null;
+}
+
+/** Compact status for skip reasons — never includes jwt. */
+export function formatListenStatusDetail(
+  status: Record<string, unknown> | null,
+): string {
+  if (status == null) return "null";
+  const keys = ["type", "taskId", "ansVersion", "status", "flowId", "tsId"] as const;
+  const slim: Record<string, unknown> = {};
+  for (const k of keys) {
+    if (status[k] !== undefined) slim[k] = status[k];
+  }
+  return JSON.stringify(slim);
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll getUserStatus until type=train + taskId, or give a recoverable skip.
+ * train_profile is the normal post-submit interstitial; no enter-train API known.
+ */
+export async function waitForListenTrain(
+  ports: GrindListenPorts,
+  jwt: string,
+  initial?: Record<string, unknown> | null,
+): Promise<
+  | { ok: true; status: Record<string, unknown> }
+  | { ok: false; status: Record<string, unknown> | null; detail: string }
+> {
+  const maxPolls = ports.trainProfileMaxPolls ?? DEFAULT_TRAIN_PROFILE_MAX_POLLS;
+  const pollMs = ports.trainProfilePollMs ?? DEFAULT_TRAIN_PROFILE_POLL_MS;
+  const sleep = ports.sleep ?? defaultSleep;
+
+  let status = initial ?? null;
+  if (isTrainReady(status)) {
+    return { ok: true, status: status! };
+  }
+
+  for (let i = 0; i < maxPolls; i++) {
+    // Sleep before re-fetch when we already observed a non-train status.
+    if (status != null) await sleep(pollMs);
+    const body = await adaptiveGet(
+      ports,
+      "/api/uls/user/getUserStatus?flowType=listen",
+      jwt,
+    );
+    status = statusValue(body);
+    if (isTrainReady(status)) {
+      return { ok: true, status: status! };
+    }
+  }
+
+  const type = status?.type;
+  if (type === "train_profile") {
+    return {
+      ok: false,
+      status,
+      detail:
+        `train_profile_pending: next listen task not assigned yet after ${maxPolls} polls ` +
+        `(${formatListenStatusDetail(status)}); server flips train_profile→train asynchronously — ` +
+        `no separate enter-train API in captured docs/SPA`,
+    };
+  }
+  return {
+    ok: false,
+    status,
+    detail: `not in train: ${formatListenStatusDetail(status)}`,
+  };
+}
+
 /** Complete one listen train paper (loadPaper + full submitAnswer). */
 export async function completeOneListen(
   ports: GrindListenPorts,
@@ -101,22 +198,17 @@ export async function completeOneListen(
     return { ok: false, taskId: null, detail: "no jwt" };
   }
 
-  const statusBody = (await adaptiveGet(
+  const firstBody = (await adaptiveGet(
     ports,
     "/api/uls/user/getUserStatus?flowType=listen",
     jwt,
-  )) as Record<string, unknown> | null;
-  const status =
-    statusBody != null && typeof statusBody === "object"
-      ? ((statusBody.value as Record<string, unknown> | undefined) ?? null)
-      : null;
-  if (status == null || status.type !== "train" || status.taskId == null) {
-    return {
-      ok: false,
-      taskId: null,
-      detail: `not in train: ${JSON.stringify(status)}`,
-    };
+  )) as unknown;
+  const first = statusValue(firstBody);
+  const waited = await waitForListenTrain(ports, jwt, first);
+  if (!waited.ok) {
+    return { ok: false, taskId: null, detail: waited.detail };
   }
+  const status = waited.status;
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
 
@@ -184,6 +276,7 @@ export type GrindListenGapsResult = {
 /**
  * Submit listen papers until `need` completions or blocked.
  * Caller decides need from week progress (listen_total - listen_done).
+ * Between papers, completeOneListen polls through train_profile.
  */
 export async function grindListenGaps(
   ports: GrindListenPorts,
@@ -193,16 +286,17 @@ export async function grindListenGaps(
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
-    const before = (await (async () => {
-      const jwt = await requireJwt(ports);
-      if (!jwt) return null;
-      const body = (await adaptiveGet(
-        ports,
-        "/api/uls/user/getUserStatus?flowType=listen",
-        jwt,
-      )) as Record<string, unknown>;
-      return (body?.value as Record<string, unknown> | undefined) ?? null;
-    })());
+    const before = statusValue(
+      await (async () => {
+        const jwt = await requireJwt(ports);
+        if (!jwt) return null;
+        return adaptiveGet(
+          ports,
+          "/api/uls/user/getUserStatus?flowType=listen",
+          jwt,
+        );
+      })(),
+    );
     const beforeTask = before?.taskId != null ? String(before.taskId) : null;
     const beforeStatus = before?.status;
 
@@ -218,12 +312,9 @@ export async function grindListenGaps(
 
     const jwt = await requireJwt(ports);
     if (!jwt) break;
-    const afterBody = (await adaptiveGet(
-      ports,
-      "/api/uls/user/getUserStatus?flowType=listen",
-      jwt,
-    )) as Record<string, unknown>;
-    const after = (afterBody?.value as Record<string, unknown> | undefined) ?? null;
+    // Brief wait so post-submit train_profile can flip before same-task check.
+    const afterWait = await waitForListenTrain(ports, jwt);
+    const after = afterWait.ok ? afterWait.status : afterWait.status;
     const afterTask = after?.taskId != null ? String(after.taskId) : null;
     if (
       afterTask &&
