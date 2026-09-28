@@ -12,6 +12,7 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 
 1. `auth_status` — 是否已有可用 JWT / SSO session
 2. `list_week_progress` — 本周听力进度（如 x/5）与级别
+2b. `list_accounts_progress` — 多账户周进度只读汇总（无调度）
 3. `start_listening_training` — 开始训练 / loadPaper（返回 `instance_ids` 精确字符串）
 4. `upload_answer_audio` / `submit_answer` / `save_snapshot`（听力口语位 S5） / `speak_and_submit` — 静默口语上传与提交
 5. `grade_question` — `gradeQuestion` 评分（BigInt-safe instance id；CDN-only 常 0 分）
