@@ -438,6 +438,9 @@ Normalized value: `{ type, taskId, ansVersion, status }` where `status` prefers 
 
 **Flip `grade` → `train` is server-side** after a successful **full-paper** `submitAnswer` (and backend settling). Client re-fetches `getUserStatus`; there is no client-only flip API.
 
+**weekly-grind / list_week_progress gate:** while `getUserStatusForApp` returns `type=grade` (or `grade_profile` / `train_plan`), `weekDoneTaskCount` / `weekFrequency` are absent → tool/summary code **`NEEDS_PLACEMENT`** (not vague `PARSE_ERROR`). `weekly-grind` by default auto-runs headless placement (`loadPaper` + full `submitAnswer`, helpers in `placement-paper` / `grind-placement`) then re-reads week progress; `--skip-placement` or `meta.skip_placement=true` leaves status `needs_placement` without auto. MCP still has **no** scheduler / no `run_weekly`.
+
+
 Post-placement reports (after status=2):
 
 - Speak: `GET /api/uls/report/oralLevelReport`

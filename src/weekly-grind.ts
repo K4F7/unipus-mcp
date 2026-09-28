@@ -19,6 +19,7 @@ import {
   type JwtCredentialStore,
 } from "./credentials.js";
 import { grindListenGaps, type GrindListenPorts } from "./grind-listen.js";
+import { runAutoPlacement, type GrindPlacementPorts } from "./grind-placement.js";
 import { grindSpeakGaps, type GrindSpeakPorts } from "./grind-speak.js";
 import {
   loginWithPassword,
@@ -48,6 +49,7 @@ export type AccountGrindSummary = {
     | "ground"
     | "skipped_done"
     | "skipped_captcha"
+    | "needs_placement"
     | "error";
   before: ProgressSnap | null;
   after: ProgressSnap | null;
@@ -68,11 +70,16 @@ export type WeeklyGrindSummary = {
 
 export type WeeklyGrindPorts = AccountFs & {
   http?: UnipusHttp;
+  /**
+   * When true, do not auto-run placement on NEEDS_PLACEMENT.
+   * CLI --skip-placement or meta.skip_placement.
+   */
+  skipPlacement?: boolean;
   env?: NodeJS.ProcessEnv;
   /** Override progress listing (tests). */
   listProgress?: (
     credentials: JwtCredentialStore,
-  ) => Promise<ProgressSnap | { error: string }>;
+  ) => Promise<ProgressSnap | { error: string; code?: string }>;
   grindListen?: (
     ports: GrindListenPorts,
     need: number,
@@ -102,6 +109,8 @@ export type ParsedWeeklyGrindArgs = {
   help: boolean;
   /** CLI --listen-only / --speak-only; null = no override (use meta). */
   grindOverride: GrindMode | null;
+  /** CLI --skip-placement: never auto-run 定级. */
+  skipPlacement: boolean;
   /** Set when --listen-only and --speak-only both present. */
   error?: string;
 };
@@ -112,6 +121,7 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
   let all = false;
   let listenOnly = false;
   let speakOnly = false;
+  let skipPlacement = false;
   const ids: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -119,6 +129,7 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
     else if (a === "--all") all = true;
     else if (a === "--listen-only") listenOnly = true;
     else if (a === "--speak-only") speakOnly = true;
+    else if (a === "--skip-placement") skipPlacement = true;
     else if (a === "--account" || a === "-a") {
       const id = argv[++i]?.trim();
       if (id) ids.push(id);
@@ -132,6 +143,7 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
       mode: { kind: "active" },
       help,
       grindOverride: null,
+      skipPlacement,
       error: "--listen-only 与 --speak-only 互斥",
     };
   }
@@ -140,10 +152,10 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
     : speakOnly
       ? "speak"
       : null;
-  if (help) return { mode: { kind: "active" }, help: true, grindOverride };
-  if (all) return { mode: { kind: "all" }, help: false, grindOverride };
-  if (ids.length > 0) return { mode: { kind: "ids", ids }, help: false, grindOverride };
-  return { mode: { kind: "active" }, help: false, grindOverride };
+  if (help) return { mode: { kind: "active" }, help: true, grindOverride, skipPlacement };
+  if (all) return { mode: { kind: "all" }, help: false, grindOverride, skipPlacement };
+  if (ids.length > 0) return { mode: { kind: "ids", ids }, help: false, grindOverride, skipPlacement };
+  return { mode: { kind: "active" }, help: false, grindOverride, skipPlacement };
 }
 
 /** effective = CLI override ?? meta.grind ?? both */
@@ -376,7 +388,7 @@ function needCount(done: number | null, total: number | null): number {
 async function defaultListProgress(
   credentials: JwtCredentialStore,
   ports: WeeklyGrindPorts,
-): Promise<ProgressSnap | { error: string }> {
+): Promise<ProgressSnap | { error: string; code?: string }> {
   const http = ports.http ?? createFetchUnipusHttp();
   const wp: WeekProgressPorts = {
     credentials,
@@ -385,7 +397,7 @@ async function defaultListProgress(
   };
   const result = await listWeekProgress(wp);
   if (result.isError) {
-    return { error: `${result.code}: ${result.message}` };
+    return { error: `${result.code}: ${result.message}`, code: result.code };
   }
   return snapFromProgress(result);
 }
@@ -442,27 +454,84 @@ export async function grindOneAccount(
 
   const beforeRaw = await listProgress(credentials);
   if ("error" in beforeRaw) {
+    const isPlacement =
+      beforeRaw.code === "NEEDS_PLACEMENT" ||
+      /NEEDS_PLACEMENT/.test(beforeRaw.error);
+    if (!isPlacement) {
+      return {
+        ...base,
+        status: "error",
+        errors: [`progress: ${beforeRaw.error}`],
+      };
+    }
+
+    const skip =
+      ports.skipPlacement === true || meta?.skip_placement === true;
+    if (skip) {
+      return {
+        ...base,
+        status: "needs_placement",
+        errors: [`needs_placement: ${beforeRaw.error}`],
+      };
+    }
+
+    const placePorts: GrindPlacementPorts = {
+      credentials,
+      http,
+      env: ports.env,
+    };
+    const placed = await runAutoPlacement(placePorts);
+    if (!placed.attempted) {
+      return {
+        ...base,
+        status: "needs_placement",
+        errors: [`needs_placement: ${beforeRaw.error}`],
+      };
+    }
+    for (const side of [placed.listen, placed.speak]) {
+      if (side && !side.ok) {
+        errors.push(`placement_${side.flow}: ${side.detail}`);
+      }
+    }
+
+    const afterPlace = await listProgress(credentials);
+    if ("error" in afterPlace) {
+      return {
+        ...base,
+        status: "needs_placement",
+        errors: [
+          ...errors,
+          `progress_after_placement: ${afterPlace.error}`,
+        ],
+      };
+    }
+    // fall through with fresh progress
+    base.before = afterPlace;
+  } else {
+    base.before = beforeRaw;
+  }
+
+  if (base.before == null) {
     return {
       ...base,
       status: "error",
-      errors: [`progress: ${beforeRaw.error}`],
+      errors: [...errors, "progress missing after placement handling"],
     };
   }
-  base.before = beforeRaw;
 
-  if (isAlreadyDone(beforeRaw, sides)) {
+  if (isAlreadyDone(base.before, sides)) {
     return {
       ...base,
       status: "skipped_done",
-      after: beforeRaw,
+      after: base.before,
     };
   }
 
   const listenNeed = sides.listen
-    ? needCount(beforeRaw.listen_done, beforeRaw.listen_total)
+    ? needCount(base.before.listen_done, base.before.listen_total)
     : 0;
   const speakNeed = sides.speak
-    ? needCount(beforeRaw.speak_done, beforeRaw.speak_total)
+    ? needCount(base.before.speak_done, base.before.speak_total)
     : 0;
 
   const grindPorts: GrindListenPorts & GrindSpeakPorts = {

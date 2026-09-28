@@ -3,7 +3,7 @@
  * Stateless weekly listen/speak grind CLI for harness routines.
  *
  *   npx tsx scripts/weekly-grind.ts [--account <id>]… | --all
- *     [--listen-only | --speak-only]
+ *     [--listen-only | --speak-only] [--skip-placement]
  *
  * No MCP scheduler. Never prints jwt/rt/password.
  * Leaves active-account.txt unchanged (token saves use makeActive:false).
@@ -16,8 +16,8 @@ import {
 
 function printHelp(): void {
   console.log(`Usage:
-  npx tsx scripts/weekly-grind.ts [--account <id>]… [--listen-only | --speak-only]
-  npx tsx scripts/weekly-grind.ts --all [--listen-only | --speak-only]
+  npx tsx scripts/weekly-grind.ts [--account <id>]… [--listen-only | --speak-only] [--skip-placement]
+  npx tsx scripts/weekly-grind.ts --all [--listen-only | --speak-only] [--skip-placement]
 
 Per account (sequential, stateless):
   1. rt → refresh_jwt; else/fail → password from env; CAPTCHA → skip
@@ -30,6 +30,11 @@ Grind side filter (two layers; CLI overrides meta):
   --speak-only    only口语 (overrides meta.grind)
   neither         use each account meta.grind (both|listen|speak; default both)
   --listen-only and --speak-only are mutually exclusive
+
+Placement / 定级:
+  type=grade accounts lack weekDoneTaskCount → NEEDS_PLACEMENT
+  default: auto-run headless placement (loadPaper+submitAnswer) then weekly
+  --skip-placement or meta.skip_placement=true → summary status needs_placement (no auto)
 
 --all = every accounts/ dir with jwt|rt
 neither --all nor --account → active only
@@ -51,7 +56,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   const summary = sanitizeSummaryForStdout(
-    await runWeeklyGrind(parsed.mode, { grindOverride: parsed.grindOverride }),
+    await runWeeklyGrind(parsed.mode, {
+      grindOverride: parsed.grindOverride,
+      skipPlacement: parsed.skipPlacement,
+    }),
   );
   console.log(JSON.stringify(summary, null, 2));
   const hardFail = summary.accounts.some(
@@ -59,7 +67,9 @@ async function main(): Promise<void> {
   );
   // captcha skips are soft; exit 0 if anything ground/done/skipped
   const anyOk = summary.accounts.some((a) =>
-    ["done", "ground", "skipped_done", "skipped_captcha"].includes(a.status),
+    ["done", "ground", "skipped_done", "skipped_captcha", "needs_placement"].includes(
+      a.status,
+    ),
   );
   if (summary.accounts.length === 0) {
     console.error("无目标账户（检查 --account / --all / active-account.txt）");
