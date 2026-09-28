@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { AuthPorts } from "./auth.js";
+import { createAccountJwtStore } from "./credentials.js";
 import {
   conversationChatInfo,
   conversationCreate,
@@ -24,17 +25,29 @@ export function registerConversationTools(
   authPorts: AuthPorts,
   ports?: Partial<ConversationToolPorts>,
 ): void {
-  const conversationPorts: ConversationPorts & EbcpPorts = {
-    ...authPorts,
-    env: ports?.env,
-    conversationCreateUrl: ports?.conversationCreateUrl,
-    conversationSaveUrl: ports?.conversationSaveUrl,
-    conversationStopUrl: ports?.conversationStopUrl,
-    conversationChatInfoUrl: ports?.conversationChatInfoUrl,
-    conversationMaxCountUrl: ports?.conversationMaxCountUrl,
-    ebcpAuthUrl: ports?.ebcpAuthUrl,
-    ebcpSpeakersUrl: ports?.ebcpSpeakersUrl,
-  };
+  function conversationPortsFor(
+    accountId?: string,
+  ): ConversationPorts & EbcpPorts {
+    const base =
+      accountId != null && accountId.trim().length > 0
+        ? {
+            credentials: createAccountJwtStore(accountId, { env: ports?.env }),
+            http: authPorts.http,
+            now: authPorts.now,
+          }
+        : authPorts;
+    return {
+      ...base,
+      env: ports?.env,
+      conversationCreateUrl: ports?.conversationCreateUrl,
+      conversationSaveUrl: ports?.conversationSaveUrl,
+      conversationStopUrl: ports?.conversationStopUrl,
+      conversationChatInfoUrl: ports?.conversationChatInfoUrl,
+      conversationMaxCountUrl: ports?.conversationMaxCountUrl,
+      ebcpAuthUrl: ports?.ebcpAuthUrl,
+      ebcpSpeakersUrl: ports?.ebcpSpeakersUrl,
+    };
+  }
 
   const CONVERSATION_CREATE_DESCRIPTION = [
     "Start AI口语对话 via POST /api/uls/conversation/create on ucloud.",
@@ -66,11 +79,16 @@ export function registerConversationTools(
           .optional()
           .describe("Body sourceId; default UNIPUS_U_APP_ID / 116"),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await conversationCreate(conversationPorts, {
+        await conversationCreate(conversationPortsFor(args.account_id), {
           taskId: args.taskId,
           questionId: args.questionId,
           title: args.title,
@@ -110,11 +128,16 @@ export function registerConversationTools(
           .record(z.unknown())
           .describe("Turn payload: aiType, bot*/user* fields, sort, speakType, …"),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await conversationSave(conversationPorts, {
+        await conversationSave(conversationPortsFor(args.account_id), {
           speakTaskId: args.speakTaskId,
           conversationId: args.conversationId,
           duration: args.duration,
@@ -155,11 +178,16 @@ export function registerConversationTools(
         evaluationContent: z.string().optional(),
         voiceToneId: z.string().optional(),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await conversationStop(conversationPorts, {
+        await conversationStop(conversationPortsFor(args.account_id), {
           speakTaskId: args.speakTaskId,
           conversationId: args.conversationId,
           evaluation: args.evaluation,
@@ -179,11 +207,16 @@ export function registerConversationTools(
       inputSchema: {
         conversationId: z.string().min(1),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await conversationChatInfo(conversationPorts, {
+        await conversationChatInfo(conversationPortsFor(args.account_id), {
           conversationId: args.conversationId,
           openId: args.openId,
         }),
@@ -198,11 +231,16 @@ export function registerConversationTools(
         "GET /api/uls/conversation/max-count (ucloud, code=200). UI turn cap (e.g. /10).",
       inputSchema: {
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await conversationMaxCount(conversationPorts, { openId: args.openId }),
+        await conversationMaxCount(conversationPortsFor(args.account_id), { openId: args.openId }),
       ),
   );
 
@@ -216,11 +254,16 @@ export function registerConversationTools(
         scene: z.string().min(1),
         bizExt: z.record(z.unknown()),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await ebcpAuth(conversationPorts, {
+        await ebcpAuth(conversationPortsFor(args.account_id), {
           scene: args.scene,
           bizExt: args.bizExt as Record<string, unknown>,
           openId: args.openId,
@@ -238,11 +281,16 @@ export function registerConversationTools(
         scene: z.string().min(1),
         bizExt: z.record(z.unknown()),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await ebcpSpeakers(conversationPorts, {
+        await ebcpSpeakers(conversationPortsFor(args.account_id), {
           scene: args.scene,
           bizExt: args.bizExt as Record<string, unknown>,
           openId: args.openId,
