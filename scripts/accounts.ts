@@ -147,9 +147,7 @@ async function readPasswordFromStdin(): Promise<string> {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return Buffer.concat(chunks).toString("utf8").replace(/
-?
-$/, "");
+  return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
 }
 
 /**
