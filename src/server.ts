@@ -2,7 +2,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { probeAuthStatus, type AuthPorts } from "./auth.js";
 import { listAccounts } from "./accounts.js";
-import { createEnvCredentialStore } from "./credentials.js";
+import {
+  createAccountJwtStore,
+  createEnvCredentialStore,
+} from "./credentials.js";
 import { createFetchUnipusHttp } from "./http.js";
 import { toMcpToolResponse } from "./result.js";
 import {
@@ -120,6 +123,15 @@ export type UnipusServerPorts = Partial<WeekProgressPorts> &
     partSubmitUrl?: string;
   };
 
+
+const optionalAccountId = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Optional account archive id: use that jwt without changing active-account.txt. Default active/legacy. Never username/password.",
+  );
+
 export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   const server = new McpServer({
     name: "unipus-mcp",
@@ -138,13 +150,29 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     weekProgressUrl: ports?.weekProgressUrl,
   };
 
+
+  function authPortsFor(accountId?: string): AuthPorts {
+    if (accountId == null || accountId.trim().length === 0) {
+      return authPorts;
+    }
+    return {
+      credentials: createAccountJwtStore(accountId, {
+        env: ports?.env,
+      }),
+      http: authPorts.http,
+      now: authPorts.now,
+    };
+  }
+
   server.registerTool(
     "auth_status",
     {
       title: "Auth status",
       description: AUTH_STATUS_DESCRIPTION,
+      inputSchema: { account_id: optionalAccountId },
     },
-    async () => toMcpToolResponse(await probeAuthStatus(authPorts)),
+    async (args) =>
+      toMcpToolResponse(await probeAuthStatus(authPortsFor(args.account_id))),
   );
 
   server.registerTool(
@@ -176,8 +204,17 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
     {
       title: "List week progress",
       description: LIST_WEEK_PROGRESS_DESCRIPTION,
+      inputSchema: { account_id: optionalAccountId },
     },
-    async () => toMcpToolResponse(await listWeekProgress(weekPorts)),
+    async (args) => {
+      const base = authPortsFor(args.account_id);
+      const wp: WeekProgressPorts = {
+        ...base,
+        env: ports?.env,
+        weekProgressUrl: ports?.weekProgressUrl,
+      };
+      return toMcpToolResponse(await listWeekProgress(wp));
+    },
   );
 
   const startPorts: StartListeningPorts = {
@@ -199,15 +236,23 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .optional()
           .describe("H5 ansVersion; default 1"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await startListeningTraining(startPorts, {
-          taskId: args.taskId,
-          ansVersion: args.ansVersion,
-          openId: args.openId,
-        }),
+        await startListeningTraining(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            loadPaperUrl: ports?.loadPaperUrl,
+          },
+          {
+            taskId: args.taskId,
+            ansVersion: args.ansVersion,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 
@@ -234,15 +279,23 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .optional()
           .describe("Optional; default from speak status (else 1 after resolve)"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await startSpeakingTraining(speakStartPorts, {
-          taskId: args.taskId,
-          ansVersion: args.ansVersion,
-          openId: args.openId,
-        }),
+        await startSpeakingTraining(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            loadPaperUrl: ports?.loadPaperUrl,
+          },
+          {
+            taskId: args.taskId,
+            ansVersion: args.ansVersion,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 
@@ -265,15 +318,23 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .optional()
           .describe("Default 1"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await loadGradedQuestions(gradedPorts, {
-          taskId: args.taskId,
-          ansVersion: args.ansVersion,
-          openId: args.openId,
-        }),
+        await loadGradedQuestions(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            loadGradedQuestionsUrl: ports?.loadGradedQuestionsUrl,
+          },
+          {
+            taskId: args.taskId,
+            ansVersion: args.ansVersion,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 
@@ -307,15 +368,26 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .optional()
           .describe("Remote file name; default basename(filePath)"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await uploadAnswerAudio(uploadPorts, {
-          filePath: args.filePath,
-          fileName: args.fileName,
-          openId: args.openId,
-        }),
+        await uploadAnswerAudio(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            queryUploadUrl: ports?.queryUploadUrl,
+            qiniuUploadUrl: ports?.qiniuUploadUrl,
+            uploadFetch: ports?.uploadFetch,
+            readFile: ports?.readFile,
+          },
+          {
+            filePath: args.filePath,
+            fileName: args.fileName,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 
@@ -351,18 +423,26 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .min(1)
           .describe("Answer JSON or oral audio CDN URL (auto-wrapped as record.url)"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await submitAnswer(submitPorts, {
-          taskId: args.taskId,
-          paperToken: args.paperToken,
-          ansVersion: args.ansVersion,
-          durationSec: args.durationSec,
-          openId: args.openId,
-          userData: [{ instanceId: args.instanceId, answer: args.answer }],
-        }),
+        await submitAnswer(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            submitAnswerUrl: ports?.submitAnswerUrl,
+          },
+          {
+            taskId: args.taskId,
+            paperToken: args.paperToken,
+            ansVersion: args.ansVersion,
+            durationSec: args.durationSec,
+            openId: args.openId,
+            userData: [{ instanceId: args.instanceId, answer: args.answer }],
+          },
+        ),
       ),
   );
 
@@ -405,18 +485,26 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .min(1)
           .describe("Answer JSON (often EN_SENT_SCORE / EN_SENT_REC under children)"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await saveSnapshot(saveSnapshotPorts, {
-          taskId: args.taskId,
-          paperToken: args.paperToken,
-          ansVersion: args.ansVersion,
-          durationSec: args.durationSec,
-          openId: args.openId,
-          userData: [{ instanceId: args.instanceId, answer: args.answer }],
-        }),
+        await saveSnapshot(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            saveSnapshotUrl: ports?.saveSnapshotUrl,
+          },
+          {
+            taskId: args.taskId,
+            paperToken: args.paperToken,
+            ansVersion: args.ansVersion,
+            durationSec: args.durationSec,
+            openId: args.openId,
+            userData: [{ instanceId: args.instanceId, answer: args.answer }],
+          },
+        ),
       ),
   );
 
@@ -448,20 +536,34 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         ansVersion: z.number().positive().optional(),
         durationSec: z.number().nonnegative().optional(),
         openId: z.string().optional(),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await speakAndSubmit(speakPorts, {
-          text: args.text,
-          taskId: args.taskId,
-          paperToken: args.paperToken,
-          instanceId: args.instanceId,
-          voice: args.voice,
-          ansVersion: args.ansVersion,
-          durationSec: args.durationSec,
-          openId: args.openId,
-        }),
+        await speakAndSubmit(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            queryUploadUrl: ports?.queryUploadUrl,
+            qiniuUploadUrl: ports?.qiniuUploadUrl,
+            uploadFetch: ports?.uploadFetch,
+            readFile: ports?.readFile,
+            submitAnswerUrl: ports?.submitAnswerUrl,
+            synthesizeMp3: ports?.synthesizeMp3,
+            ffmpegPath: ports?.ffmpegPath,
+          },
+          {
+            text: args.text,
+            taskId: args.taskId,
+            paperToken: args.paperToken,
+            instanceId: args.instanceId,
+            voice: args.voice,
+            ansVersion: args.ansVersion,
+            durationSec: args.durationSec,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 
@@ -504,18 +606,26 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
           .optional()
           .describe("SPA optional; false for subjective/oral when known"),
         openId: z.string().optional().describe("Optional openId header"),
+        account_id: optionalAccountId,
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await gradeQuestion(gradePorts, {
-          taskId: args.taskId,
-          questionInstanceId: args.questionInstanceId,
-          questionContent: args.questionContent,
-          ansVersion: args.ansVersion,
-          isObjective: args.isObjective,
-          openId: args.openId,
-        }),
+        await gradeQuestion(
+          {
+            ...authPortsFor(args.account_id),
+            env: ports?.env,
+            gradeQuestionUrl: ports?.gradeQuestionUrl,
+          },
+          {
+            taskId: args.taskId,
+            questionInstanceId: args.questionInstanceId,
+            questionContent: args.questionContent,
+            ansVersion: args.ansVersion,
+            isObjective: args.isObjective,
+            openId: args.openId,
+          },
+        ),
       ),
   );
 

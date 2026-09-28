@@ -6,6 +6,7 @@ import {
   accountDir,
   defaultConfigDir,
   readActiveAccountId,
+  sanitizeAccountId,
 } from "./accounts.js";
 
 export type JwtCredentialStore = {
@@ -100,6 +101,31 @@ function normalizeJwtCandidate(value: string): string | null {
 }
 
 /** Fixed JWT store for multi-account grind without touching active-account.txt. */
+
+/**
+ * Read JWT from accounts/<id>/jwt only — does not read or write active-account.txt.
+ * For MCP optional account_id overrides.
+ */
+export function createAccountJwtStore(
+  accountId: string,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    homedir?: string;
+    readFile?: (path: string) => Promise<string>;
+  } = {},
+): JwtCredentialStore {
+  const env = options.env ?? process.env;
+  const home = options.homedir ?? homedir();
+  const read = options.readFile ?? ((path: string) => readFile(path, "utf8"));
+  const id = accountId.trim();
+  return {
+    async getJwt() {
+      if (id.length === 0) return null;
+      return readJwtFile(join(accountDir(id, env, home), "jwt"), read);
+    },
+  };
+}
+
 export function createStaticJwtStore(jwt: string): JwtCredentialStore {
   const token = jwt.trim();
   return {

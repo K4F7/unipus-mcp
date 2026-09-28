@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { AuthPorts } from "./auth.js";
+import { createAccountJwtStore } from "./credentials.js";
 import {
   partSubmit,
   type PartSubmitPorts,
@@ -13,11 +14,21 @@ export function registerPartSubmitTool(
   authPorts: AuthPorts,
   ports?: Partial<PartSubmitPorts> & { partSubmitUrl?: string },
 ): void {
-  const partPorts: PartSubmitPorts = {
-    ...authPorts,
-    env: ports?.env,
-    partSubmitUrl: ports?.partSubmitUrl,
-  };
+  function partPortsFor(accountId?: string): PartSubmitPorts {
+    const base =
+      accountId != null && accountId.trim().length > 0
+        ? {
+            credentials: createAccountJwtStore(accountId, { env: ports?.env }),
+            http: authPorts.http,
+            now: authPorts.now,
+          }
+        : authPorts;
+    return {
+      ...base,
+      env: ports?.env,
+      partSubmitUrl: ports?.partSubmitUrl,
+    };
+  }
 
   const PART_SUBMIT_DESCRIPTION = [
     "POST /api/uls/part/submit for 范例学习 / AI对话退出 / 自由表达.",
@@ -56,11 +67,16 @@ export function registerPartSubmitTool(
           )
           .min(1),
         openId: z.string().optional(),
+        account_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Optional account archive id; jwt only, no active switch"),
       },
     },
     async (args) =>
       toMcpToolResponse(
-        await partSubmit(partPorts, {
+        await partSubmit(partPortsFor(args.account_id), {
           action: args.action,
           taskId: args.taskId,
           partId: args.partId,

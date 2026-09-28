@@ -305,6 +305,11 @@ Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接
 - snapshot 常见 `context={"state":"doing"}`。出关 / 范例学习同样用本工具。
 - 覆盖：`UNIPUS_ULS_PART_SUBMIT_PATH`（默认 `/api/uls/part/submit` on `UNIPUS_ULS_ORIGIN`）。
 
+
+## Optional `account_id`（业务工具）
+
+业务工具（`list_week_progress`、`start_*`、`submit_answer`、`grade_question`、`conversation_*`、`part_submit` 等）可传可选 `account_id`：临时使用 `accounts/<id>/jwt`，**不**改写 `active-account.txt`。缺省仍走 active / legacy。禁止 username/password 工具参数；无 `use_account` MCP。
+
 ## Placement / 定级（无新 MCP 工具）
 
 定级交卷路径见 `docs/api-notes.md`「Placement / 定级 completion path」。纯函数 helper：`src/placement-paper.ts`（`listPlacementQuestions` / `buildPlacementUserData` / `diagnosePlacementSubmitCoverage`）。
