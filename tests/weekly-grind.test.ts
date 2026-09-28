@@ -328,6 +328,175 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     if (result.ok) assert.equal(result.taskId, "555");
     assert.ok(http.calls.some((c) => c.url.includes("submitAnswer")));
   });
+
+  test("completeOneListen polls train_profile until type=train", async () => {
+    const { completeOneListen } = await import("../src/grind-listen.js");
+    const paper = {
+      token: "paper-tok",
+      paperJson: JSON.stringify({
+        chr: [
+          {
+            q_qinstid: "999",
+            q_template_name: "content-learn",
+            nm: "learn",
+            data: { children: [] },
+          },
+        ],
+      }),
+    };
+    let statusCalls = 0;
+    const sleeps: number[] = [];
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) {
+        statusCalls += 1;
+        if (statusCalls <= 2) {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              code: 1,
+              value: {
+                type: "train_profile",
+                taskId: null,
+                ansVersion: null,
+                status: 0,
+                flowId: "flow-1",
+                tsId: "ts-1",
+              },
+            }),
+          };
+        }
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: { type: "train", taskId: "777", ansVersion: 1, status: 0 },
+          }),
+        };
+      }
+      if (call.url.includes("loadPaper")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ code: 1, value: paper }),
+        };
+      }
+      if (call.url.includes("submitAnswer")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ code: 1, value: { ok: true } }),
+        };
+      }
+      return { statusCode: 404, body: "{}" };
+    });
+    const result = await completeOneListen({
+      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      http,
+      env: {},
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      trainProfilePollMs: 10,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.taskId, "777");
+    assert.ok(statusCalls >= 3);
+    assert.ok(sleeps.length >= 1);
+    assert.ok(http.calls.some((c) => c.url.includes("submitAnswer")));
+  });
+
+  test("completeOneListen train_profile timeout → train_profile_pending", async () => {
+    const { completeOneListen } = await import("../src/grind-listen.js");
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: {
+              type: "train_profile",
+              taskId: null,
+              status: 0,
+              flowId: "flow-x",
+              tsId: "ts-x",
+            },
+          }),
+        };
+      }
+      return { statusCode: 404, body: "{}" };
+    });
+    const result = await completeOneListen({
+      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      http,
+      env: {},
+      sleep: async () => {},
+      trainProfileMaxPolls: 3,
+      trainProfilePollMs: 1,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.match(result.detail, /train_profile_pending/);
+      assert.match(result.detail, /flow-x/);
+      assert.match(result.detail, /ts-x/);
+      assert.equal(result.detail.includes("eyJ"), false);
+    }
+  });
+
+  test("grindListenGaps continues across post-submit train_profile", async () => {
+    const { grindListenGaps } = await import("../src/grind-listen.js");
+    const paper = {
+      token: "paper-tok",
+      paperJson: JSON.stringify({
+        chr: [
+          {
+            q_qinstid: "1",
+            q_template_name: "content-learn",
+            nm: "learn",
+            data: { children: [] },
+          },
+        ],
+      }),
+    };
+    // Sequence of getUserStatus responses (shared counter).
+    // Round1 before (grind) + completeOne first + after-wait polls + round2...
+    const statuses: unknown[] = [
+      { type: "train", taskId: "t1", ansVersion: 1, status: 0 }, // grind before r1
+      { type: "train", taskId: "t1", ansVersion: 1, status: 0 }, // completeOne first
+      { type: "train_profile", taskId: null, status: 0, flowId: "f", tsId: "s" }, // after submit wait
+      { type: "train", taskId: "t2", ansVersion: 1, status: 0 }, // flipped
+      { type: "train", taskId: "t2", ansVersion: 1, status: 0 }, // grind before r2
+      { type: "train", taskId: "t2", ansVersion: 1, status: 0 }, // completeOne r2
+      { type: "train", taskId: "t3", ansVersion: 1, status: 0 }, // after r2
+    ];
+    let si = 0;
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) {
+        const value = statuses[Math.min(si, statuses.length - 1)];
+        si += 1;
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value }) };
+      }
+      if (call.url.includes("loadPaper")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: paper }) };
+      }
+      if (call.url.includes("submitAnswer")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { ok: true } }) };
+      }
+      return { statusCode: 404, body: "{}" };
+    });
+    const result = await grindListenGaps(
+      {
+        credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+        http,
+        env: {},
+        sleep: async () => {},
+        trainProfilePollMs: 1,
+      },
+      2,
+    );
+    assert.equal(result.completed, 2);
+    assert.deepEqual(result.taskIds, ["t1", "t2"]);
+    assert.equal(result.stoppedReason, undefined);
+  });
+
+
 });
 
 
