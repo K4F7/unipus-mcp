@@ -41,7 +41,7 @@ neither --all nor --account → active only
 
 Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
 Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
-Never prints jwt / rt / password.`);
+CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);
 }
 
 async function main(): Promise<void> {

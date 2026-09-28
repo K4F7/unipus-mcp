@@ -310,6 +310,24 @@ Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接
 
 业务工具（`list_week_progress`、`start_*`、`submit_answer`、`grade_question`、`conversation_*`、`part_submit` 等）可传可选 `account_id`：临时使用 `accounts/<id>/jwt`，**不**改写 `active-account.txt`。缺省仍走 active / legacy。禁止 username/password 工具参数；无 `use_account` MCP。
 
+
+## 极验 CAPTCHA / 半自动导入 jwt·rt
+
+无头环境**不能**过极验（SSO `CAPTCHA_REQUIRED` / code=1506）。`weekly-grind` 对该账户 `skipped_captcha` 并继续其他号；汇总保持清晰。
+
+有头浏览器补票：
+1. 打开 `https://sso.unipus.cn/sso/login`，完成极验登录。
+2. 从 DevTools / Cookie / portal JSON 取出 `jwt` 与 `rt`（勿发到聊天或 MCP 工具参数）。
+3. 导入（0600，永不打印秘密）：
+
+```bash
+npx tsx scripts/import-tokens.ts --account <id> --jwt-file ./jwt.txt --rt-file ./rt.txt
+# 或 stdin JSON：
+echo '{"jwt":"…","rt":"…"}' | npx tsx scripts/import-tokens.ts --account <id> --no-active
+```
+
+校验 JWT shape；写入 `accounts/<id>/{jwt,rt}`。默认更新 active/legacy；`--no-active` 仅写档案。之后可用 `refresh-jwt` / `weekly-grind`。无 MCP login 工具。
+
 ## Placement / 定级（无新 MCP 工具）
 
 定级交卷路径见 `docs/api-notes.md`「Placement / 定级 completion path」。纯函数 helper：`src/placement-paper.ts`（`listPlacementQuestions` / `buildPlacementUserData` / `diagnosePlacementSubmitCoverage`）。
