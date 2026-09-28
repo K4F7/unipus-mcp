@@ -18,6 +18,8 @@ import {
   readAccountRt,
   readActiveAccountId,
   readLegacyRt,
+  resolveAccountPassword,
+  resolveAccountUsername,
 } from "../src/accounts.js";
 
 function parseArgs(argv: string[]): {
@@ -45,8 +47,13 @@ function parseArgs(argv: string[]): {
 
 function printHelp(): void {
   console.log(`Usage:
-  UNIPUS_USERNAME=… UNIPUS_PASSWORD=… npx tsx scripts/sso-login.ts [--account <id>]
+  npx tsx scripts/sso-login.ts [--account <id>]
   npx tsx scripts/sso-login.ts --refresh [--account <id>]
+
+Password resolution (never printed):
+  UNIPUS_PASSWORD_<id> → accounts/<id>/password → UNIPUS_PASSWORD
+Username: UNIPUS_USERNAME_<id> → UNIPUS_USERNAME/PHONE → account id
+Write password: npx tsx scripts/accounts.ts set-password <id>  (stdin/env)
 
 Options:
   --account <id>   Account archive id (default: username/phone, or active)
@@ -54,7 +61,7 @@ Options:
   --help           Show this help
 
 Exit codes: 0 ok, 1 fail, 2 missing args, 3 CAPTCHA_REQUIRED
-Never prints jwt / rt / password.`);
+Never prints jwt / rt / password. 本仓自管密码文件，不强制 SecretSpec.`);
 }
 
 function exitCaptcha(message: string): never {
@@ -72,15 +79,23 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const username =
+  const accountIdHint =
+    args.account ||
     process.env.UNIPUS_USERNAME?.trim() ||
     process.env.UNIPUS_PHONE?.trim() ||
-    "";
-  const password = process.env.UNIPUS_PASSWORD ?? "";
-  const accountId =
-    args.account ||
-    username ||
     (await readActiveAccountId()) ||
+    "";
+  const accountId = accountIdHint;
+  const username = accountId
+    ? resolveAccountUsername(accountId, process.env)
+    : process.env.UNIPUS_USERNAME?.trim() ||
+      process.env.UNIPUS_PHONE?.trim() ||
+      "";
+  const password =
+    (accountId
+      ? await resolveAccountPassword(accountId)
+      : null) ??
+    process.env.UNIPUS_PASSWORD ??
     "";
 
   if (args.refresh) {
@@ -90,7 +105,7 @@ async function main(): Promise<void> {
 
   if (!username || !password) {
     console.error(
-      "需要环境变量 UNIPUS_USERNAME（或 UNIPUS_PHONE）与 UNIPUS_PASSWORD",
+      "需要账密：accounts/<id>/password 或 UNIPUS_PASSWORD_<id> / UNIPUS_PASSWORD，以及用户名（默认账户 id / UNIPUS_USERNAME）",
     );
     process.exit(2);
   }
@@ -167,7 +182,7 @@ async function runRefresh(opts: {
 
   if (!opts.username || !opts.password) {
     console.error(
-      "续期失败且无账密可回退：请设置 UNIPUS_USERNAME / UNIPUS_PASSWORD，或有头浏览器登录后导入 jwt/rt",
+      "续期失败且无账密可回退：请写入 accounts/<id>/password 或 UNIPUS_PASSWORD[_<id>]，或有头浏览器导入 jwt/rt",
     );
     process.exit(1);
   }

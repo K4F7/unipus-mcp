@@ -6,7 +6,7 @@ U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 
 - 目标产品：手机 App「U听力」（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
 - 网关线索：`https://ucloud.unipus.cn/api/uls/*`（需 JWT）；SSO：`sso.unipus.cn`。
-- 登录与密钥：环境变量 / CLI / SecretSpec，**不作为 MCP 工具参数**。
+- 登录与密钥：本仓 `accounts/<id>/password`（0600）或 env `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD` + CLI；**不强制 SecretSpec**；**不作为 MCP 工具参数**。
 
 ## MVP 工具
 

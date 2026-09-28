@@ -9,6 +9,8 @@ import {
   readAccountMeta,
   readAccountRt,
   readActiveAccountId,
+  resolveAccountPassword,
+  resolveAccountUsername,
   type AccountFs,
   type GrindMode,
   type ListedAccount,
@@ -205,6 +207,7 @@ export async function resolveTargetAccounts(
           active: false,
           has_jwt: false,
           has_rt: false,
+          has_password: false,
           alias: null,
           note: null,
           grind: "both",
@@ -296,9 +299,8 @@ export async function ensureAccountAuth(
     }
   }
 
-  const username =
-    env.UNIPUS_USERNAME?.trim() || env.UNIPUS_PHONE?.trim() || "";
-  const password = env.UNIPUS_PASSWORD ?? "";
+  const username = resolveAccountUsername(accountId, env);
+  const password = (await resolveAccountPassword(accountId, fsOpts)) ?? "";
   if (username && password) {
     const result = await login({ username, password });
     if (!result.ok) {
