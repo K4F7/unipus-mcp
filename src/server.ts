@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { probeAuthStatus, type AuthPorts } from "./auth.js";
 import { listAccounts } from "./accounts.js";
+import { listAccountsProgress } from "./accounts-progress.js";
 import {
   createAccountJwtStore,
   createEnvCredentialStore,
@@ -64,6 +65,12 @@ const AUTH_STATUS_DESCRIPTION = [
   "Report whether a usable U听说 / U听力 (cn.unipus.cloud) JWT or SSO session is configured.",
   "Probes https://ucloud.unipus.cn/api/uls/ with Authorization Bearer.",
   "Does not accept username or password; login is env/CLI only (UNIPUS_JWT / UNIPUS_JWT_FILE).",
+].join(" ");
+
+const LIST_ACCOUNTS_PROGRESS_DESCRIPTION = [
+  "Read-only multi-account week progress table (listen/speak done/total, level, grind, placement).",
+  "Optional account_id filters to one archive. Per-account errors stay on that row — table still ok.",
+  "No scheduling/grind. Never returns jwt/rt/password.",
 ].join(" ");
 
 const LIST_WEEK_PROGRESS_DESCRIPTION = [
@@ -197,6 +204,28 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         active_account: active,
       });
     },
+  );
+
+
+  server.registerTool(
+    "list_accounts_progress",
+    {
+      title: "List accounts progress",
+      description: LIST_ACCOUNTS_PROGRESS_DESCRIPTION,
+      inputSchema: { account_id: optionalAccountId },
+    },
+    async (args) =>
+      toMcpToolResponse(
+        await listAccountsProgress(
+          {
+            env: ports?.env,
+            http: authPorts.http,
+            now: authPorts.now,
+            weekProgressUrl: ports?.weekProgressUrl,
+          },
+          { account_id: args.account_id },
+        ),
+      ),
   );
 
   server.registerTool(

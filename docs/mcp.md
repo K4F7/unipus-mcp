@@ -12,6 +12,7 @@
 |------|------|
 | `auth_status` | 探活 JWT：是否有效、粗判过期、安全 user id（密码/JWT 永不作为参数） |
 | `list_accounts` | 只读列出本机账户档案（account_id / active / has_jwt|rt / alias / note / grind / 脱敏 meta）；**永不**返回秘密；切换用 CLI `accounts use`；备注用 `accounts note`；听/口策略用 `accounts grind` |
+| `list_accounts_progress` | 只读多账户周进度表：listen/speak done/total、level、grind、`skip_placement`、定级摘要；可选 `account_id` 过滤；单账户失败只标该行 `error`，不拖垮整表；**无调度/不跑 grind**；永不返回 jwt/rt/password |
 | `list_week_progress` | 听力和口语都返回本周计数 / 达标数：`*_done`=`weekDoneTaskCount`，`*_total`=`weekFrequency`；`progress_*`/`level` 为听力别名；401→`auth_required`，网络失败→`NETWORK_ERROR` |
 | `start_listening_training` | 开始听力训练；必填 `taskId`，可选 `ansVersion`（默认 `1`）和 `openId`；返回 `task_id` / `paper_token` / `instance_ids`（精确字符串，防 BigInt 精度丢失） |
 | `start_speaking_training` | 开始口语训练；可选 `taskId`/`ansVersion`/`openId`；缺省时 `getUserStatusForApp?flowType=speak` + `u-app-id` 再 `loadPaper`；勿与打开的 WebView 抢 token（4021） |
@@ -201,6 +202,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` / `grind <id> both|listen|speak` — 只动指针与脱敏展示（含 alias/note/grind）；**切换账户仅 CLI**（MCP 无 `use_account`）
 - 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。
 - MCP `list_accounts`：只读、无秘密字段（含 `alias`/`note`/`grind`）；切换、写备注与 grind 策略请 CLI。
+- MCP `list_accounts_progress`：多账户周进度只读表（listen/speak/level/grind/placement）；单行失败不拖垮整表；无调度；无 jwt/rt/password。
 - **周任务 harness**：`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — 无状态按账户续票+查进度+交卷缺口；`effective = CLI 覆盖 ?? meta.grind ?? both`；stdout JSON 汇总（含 alias/note/grind/skips）；**永不**打印 jwt/rt/password；**不**改 active-account（除非显式）。MCP **仍无调度** / 无 `run_weekly`，由 harness routine 调此 CLI。合入后口语-only 号（如 `15346096028`）设 `grind=speak`。
 - 进度路径（可选）：默认 host `https://ucloud.unipus.cn`（`UNIPUS_ULS_ORIGIN` 可覆盖），path `UNIPUS_ULS_USER_STATUS_FOR_APP_PATH`（默认 `/api/uls/user/getUserStatusForApp`）。请求头 `u-app-id` 默认 `116`（`UNIPUS_U_APP_ID` 可覆盖），这是服务端的 `sourceId`。`UNIPUS_ULS_WEEK_PROGRESS_PATH` 若设置则**强制** legacy 单 GET。Authorization 为**原始 JWT**（不加 `Bearer `）。
 - 听力训练路径（可选）：`UNIPUS_ULS_ADAPTIVE_ORIGIN`（默认 `https://uadaptive.unipus.cn`）、`UNIPUS_ULS_LOAD_PAPER_PATH`（默认 `/api/uls/user/loadPaper`）。
@@ -308,7 +310,7 @@ Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接
 
 ## Optional `account_id`（业务工具）
 
-业务工具（`list_week_progress`、`start_*`、`submit_answer`、`grade_question`、`conversation_*`、`part_submit` 等）可传可选 `account_id`：临时使用 `accounts/<id>/jwt`，**不**改写 `active-account.txt`。缺省仍走 active / legacy。禁止 username/password 工具参数；无 `use_account` MCP。
+业务工具（`list_week_progress`、`list_accounts_progress`、`start_*`、`submit_answer`、`grade_question`、`conversation_*`、`part_submit` 等）可传可选 `account_id`：临时使用 `accounts/<id>/jwt`，**不**改写 `active-account.txt`。缺省仍走 active / legacy。禁止 username/password 工具参数；无 `use_account` MCP。
 
 
 ## 极验 CAPTCHA / 半自动导入 jwt·rt
