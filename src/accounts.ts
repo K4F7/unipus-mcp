@@ -55,6 +55,8 @@ export type AccountMeta = {
   note?: string | null;
   /** Weekly grind sides: both | listen | speak (default both). */
   grind?: GrindMode | null;
+  /** When true, weekly-grind will not auto-run placement; summary → needs_placement. */
+  skip_placement?: boolean | null;
   last_login_at?: string | null;
   last_refresh_at?: string | null;
   jwt_expire?: unknown;
@@ -170,6 +172,7 @@ export async function readAccountMeta(
       alias: typeof rec.alias === "string" ? rec.alias : null,
       note: typeof rec.note === "string" ? rec.note : null,
       grind: normalizeGrind(rec.grind),
+      skip_placement: rec.skip_placement === true ? true : rec.skip_placement === false ? false : null,
       last_login_at: typeof rec.last_login_at === "string" ? rec.last_login_at : null,
       last_refresh_at:
         typeof rec.last_refresh_at === "string" ? rec.last_refresh_at : null,
@@ -195,6 +198,7 @@ export async function writeAccountMeta(
     alias: meta.alias ?? null,
     note: meta.note ?? null,
     grind: normalizeGrind(meta.grind),
+    skip_placement: meta.skip_placement ?? null,
     last_login_at: meta.last_login_at ?? null,
     last_refresh_at: meta.last_refresh_at ?? null,
     jwt_expire: meta.jwt_expire ?? null,

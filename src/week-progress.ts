@@ -127,6 +127,10 @@ async function listWeekProgressPaid(
   }
   const listenWeek = weekCountsFromStatusForApp(listenFetch.body);
   if (listenWeek == null) {
+    const listenType = statusTypeFromStatusForApp(listenFetch.body);
+    if (listenType != null && PLACEMENT_STATUS_TYPES.has(listenType)) {
+      return needsPlacementError("listen", listenType);
+    }
     return toolError(
       "PARSE_ERROR",
       "听力 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
@@ -139,6 +143,10 @@ async function listWeekProgressPaid(
   }
   const speakWeek = weekCountsFromStatusForApp(speakFetch.body);
   if (speakWeek == null) {
+    const speakType = statusTypeFromStatusForApp(speakFetch.body);
+    if (speakType != null && PLACEMENT_STATUS_TYPES.has(speakType)) {
+      return needsPlacementError("speak", speakType);
+    }
     return toolError(
       "PARSE_ERROR",
       "口语 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
@@ -209,6 +217,38 @@ function detectProgressSource(
     return "paid";
   }
   return "generic";
+}
+
+
+/** Placement / plan stages that lack weekDoneTaskCount on getUserStatusForApp. */
+const PLACEMENT_STATUS_TYPES = new Set([
+  "grade",
+  "grade_profile",
+  "train_plan",
+]);
+
+/** Read value.type (or nested) from getUserStatusForApp JSON body. */
+export function statusTypeFromStatusForApp(body: string): string | null {
+  const record = parseJsonRecord(body);
+  if (record == null) return null;
+  const candidates: Record<string, unknown>[] = [record];
+  for (const nestKey of NEST_KEYS) {
+    const nested = asRecord(record[nestKey]);
+    if (nested != null) candidates.push(nested);
+  }
+  for (const candidate of candidates) {
+    const t = candidate.type;
+    if (typeof t === "string" && t.length > 0) return t;
+  }
+  return null;
+}
+
+function needsPlacementError(flow: "listen" | "speak", type: string): WeekProgressResult {
+  return toolError(
+    "NEEDS_PLACEMENT",
+    `${flow === "listen" ? "听力" : "口语"}仍在定级/计划阶段（type=${type}）；` +
+      "getUserStatusForApp 无 weekDoneTaskCount/weekFrequency。需先完成定级（submitAnswer 全卷）等服务端翻到 type=train，再跑周任务。",
+  );
 }
 
 /** Homepage week pair. Ignores weekTotalTaskCount so it cannot be mistaken for 达标数. */

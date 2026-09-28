@@ -311,3 +311,4 @@ Headless path on **ucloud**（业务成功 **`code=200`**，不是 uls 用户接
 - 单题 `grade_question` 在定级卷上常返回空壳（`userId=""` / `questionInstanceId=0` / `score=null`）——**预期**，不能代替交卷。
 - 单条 `submit_answer` 对多小题定级卷 → 业务码 **4295**「作答小题数存在问题」；需全卷 `userData` 且 `children` 对齐。`submit_answer` 现会以 `BUSINESS_ERROR` 打出 code/msg。
 - `type=grade` → `train` 由服务端在全卷 `submitAnswer` 成功后翻转；无 skip API。
+- 定级中 `getUserStatusForApp` 无周计数字段 → `NEEDS_PLACEMENT`（不是含糊的 `PARSE_ERROR`）。`weekly-grind` 默认可自动定级后再刷周任务；`--skip-placement` / `meta.skip_placement` 则汇总为 `needs_placement`。MCP **无**调度。

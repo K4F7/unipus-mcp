@@ -708,3 +708,136 @@ describe("ensureAccountAuth captcha policy", () => {
     if (!result.ok) assert.equal(result.code, "CAPTCHA_REQUIRED");
   });
 });
+
+describe("needs_placement", () => {
+  test("--skip-placement marks needs_placement without auto", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-skip-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "place1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.p1" },
+      { home, env },
+    );
+    const row = (
+      await resolveTargetAccounts({ kind: "ids", ids: ["place1"] }, { home, env })
+    )[0]!;
+    let autoCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      skipPlacement: true,
+      listProgress: async () => ({
+        error: "NEEDS_PLACEMENT: 听力仍在定级",
+        code: "NEEDS_PLACEMENT",
+      }),
+      grindListen: async () => {
+        autoCalls += 1;
+        return { completed: 0, taskIds: [] };
+      },
+      grindSpeak: async () => {
+        autoCalls += 1;
+        return { completed: 0, taskIds: [] };
+      },
+    });
+    assert.equal(result.status, "needs_placement");
+    assert.equal(autoCalls, 0);
+    assert.match(result.errors.join(" "), /needs_placement|NEEDS_PLACEMENT/);
+  });
+
+  test("auto placement then continues when progress recovers", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-auto-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "place2", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.p2" },
+      { home, env },
+    );
+    const row = (
+      await resolveTargetAccounts({ kind: "ids", ids: ["place2"] }, { home, env })
+    )[0]!;
+    let progressCalls = 0;
+    let listenCalls = 0;
+    let submitted = false;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      skipPlacement: false,
+      listProgress: async () => {
+        progressCalls += 1;
+        if (progressCalls === 1) {
+          return {
+            error: "NEEDS_PLACEMENT: 听力仍在定级",
+            code: "NEEDS_PLACEMENT",
+          };
+        }
+        return {
+          listen_done: 0,
+          listen_total: 5,
+          speak_done: 3,
+          speak_total: 3,
+        };
+      },
+      // Inject placement via grind ports by stubbing http at runAutoPlacement level:
+      // runAutoPlacement will hit real http unless we short-circuit: use skip is false
+      // and provide http that answers grade→train for getUserStatus + loadPaper + submit.
+      http: mockHttp(async (call) => {
+        if (call.url.includes("getUserStatus")) {
+          // first few grade, then train so runAutoPlacement completes
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              code: 1,
+              value: {
+                type: submitted ? "train" : "grade",
+                taskId: "g1",
+                ansVersion: 1,
+                status: 1,
+              },
+            }),
+          };
+        }
+        if (call.url.includes("loadPaper")) {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              code: 1,
+              value: {
+                token: "tok",
+                paperJson: JSON.stringify({
+                  chr: [
+                    {
+                      q_qinstid: "1",
+                      q_template_name: "content-learn",
+                      nm: "learn",
+                      data: { children: [] },
+                    },
+                  ],
+                }),
+              },
+            }),
+          };
+        }
+        if (call.url.includes("submitAnswer")) {
+          submitted = true;
+          return { statusCode: 200, body: JSON.stringify({ code: 1, value: {} }) };
+        }
+        return { statusCode: 404, body: "{}" };
+      }),
+      grindListen: async (_p, need) => {
+        listenCalls += 1;
+        assert.equal(need, 5);
+        return { completed: 5, taskIds: ["a", "b", "c", "d", "e"] };
+      },
+      grindSpeak: async () => ({ completed: 0, taskIds: [] }),
+    });
+    assert.ok(progressCalls >= 2);
+    assert.equal(listenCalls, 1);
+    assert.ok(submitted);
+    assert.ok(["done", "ground"].includes(result.status));
+    assert.equal(result.listen_completed, 5);
+  });
+
+  test("parseWeeklyGrindArgs accepts --skip-placement", () => {
+    const parsed = parseWeeklyGrindArgs(["--all", "--skip-placement"]);
+    assert.equal(parsed.skipPlacement, true);
+    assert.equal(parsed.mode.kind, "all");
+  });
+});

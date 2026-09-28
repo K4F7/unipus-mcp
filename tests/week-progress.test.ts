@@ -574,3 +574,36 @@ describe("listWeekProgress paid getUserStatusForApp path", () => {
     assert.match(result.message, /本周试用/);
   });
 });
+
+describe("listWeekProgress NEEDS_PLACEMENT", () => {
+  test("type=grade without week counts → NEEDS_PLACEMENT not PARSE_ERROR", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    const http = mockHttp(async (call) => {
+      const flow = call.url.includes("flowType=speak") ? "speak" : "listen";
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          code: 1,
+          value: {
+            type: "grade",
+            taskId: "940",
+            ansVersion: 1,
+            status: 0,
+            weekDoneTaskCount: null,
+            weekFrequency: null,
+          },
+          flow,
+        }),
+      };
+    });
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      env: {},
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.code, "NEEDS_PLACEMENT");
+    assert.match(result.message, /定级/);
+    assert.notEqual(result.code, "PARSE_ERROR");
+  });
+});
