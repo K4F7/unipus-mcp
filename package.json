@@ -16,7 +16,8 @@
     "clio-score-smoke": "tsx scripts/clio-score-smoke.ts",
     "refresh-jwt": "tsx scripts/refresh-jwt.ts",
     "accounts": "tsx scripts/accounts.ts",
-    "weekly-grind": "tsx scripts/weekly-grind.ts"
+    "weekly-grind": "tsx scripts/weekly-grind.ts",
+    "import-tokens": "tsx scripts/import-tokens.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
