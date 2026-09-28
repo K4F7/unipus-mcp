@@ -9,6 +9,7 @@
  *   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
  *   npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
  *   npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
+ *   npx tsx scripts/accounts.ts set-password <account_id>
  */
 import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ import {
   setAccountGrind,
   setAccountNote,
   setActiveAccountId,
+  writeAccountPassword,
 } from "../src/accounts.js";
 
 function printHelp(): void {
@@ -34,10 +36,13 @@ function printHelp(): void {
   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
   npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
   npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
+  npx tsx scripts/accounts.ts set-password <account_id>
 
-Only prints redacted meta (account_id, active, has_jwt/has_rt, alias, note, grind, timestamps).
+Only prints redacted meta (account_id, active, has_jwt/has_rt/has_password, alias, note, grind, timestamps).
 Never prints jwt / rt / password. Switching is CLI-only (no MCP use_account).
-grind 写入 meta.json（听/口策略）；勿从 note 文本解析。`);
+grind 写入 meta.json（听/口策略）；勿从 note 文本解析。
+set-password：从 stdin 或 env UNIPUS_PASSWORD / UNIPUS_PASSWORD_<id> 写入 accounts/<id>/password（0600）；永不回显。
+本仓自管密码，不强制 SecretSpec；禁止把密码作 MCP 工具参数。`);
 }
 
 /** Single-line escape for list display; truncate long notes. */
@@ -69,7 +74,7 @@ async function cmdList(): Promise<void> {
     const login = a.last_login_at ? ` login=${a.last_login_at}` : "";
     const refresh = a.last_refresh_at ? ` refresh=${a.last_refresh_at}` : "";
     console.log(
-      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"}${alias}${note}${grind}${login}${refresh}`,
+      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"} pw=${a.has_password ? "yes" : "no"}${alias}${note}${grind}${login}${refresh}`,
     );
   }
 }
@@ -133,6 +138,48 @@ async function cmdNote(accountIdRaw: string, rest: string[]): Promise<void> {
   console.log(`已设置 ${accountId} 的 note（长度 ${text.trim().length}，秘密未打印）`);
 }
 
+async function readPasswordFromStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    // Prompt without echo is hard portably; prefer env when TTY.
+    return "";
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8").replace(/
+?
+$/, "");
+}
+
+/**
+ * Write accounts/<id>/password from env or stdin. Never prints the secret.
+ * Preference: UNIPUS_PASSWORD_<id> → UNIPUS_PASSWORD → stdin.
+ */
+async function cmdSetPassword(accountIdRaw: string): Promise<void> {
+  const accountId = sanitizeAccountId(accountIdRaw);
+  const env = process.env;
+  const fromEnv =
+    env[`UNIPUS_PASSWORD_${accountId}`] ||
+    env.UNIPUS_PASSWORD ||
+    "";
+  let password = fromEnv;
+  if (!password) {
+    password = await readPasswordFromStdin();
+  }
+  if (!password) {
+    console.error(
+      "缺少密码：请设置 UNIPUS_PASSWORD 或 UNIPUS_PASSWORD_<id>，或通过 stdin 传入（勿 echo 到日志）",
+    );
+    process.exit(2);
+  }
+  const path = await writeAccountPassword(accountId, password);
+  console.log(`已写入 accounts/${accountId}/password（0600）；路径已保存，不打印密文。`);
+  // mention path without secret — path is fine
+  void path;
+}
+
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "--help" || cmd === "-h") {
@@ -174,6 +221,15 @@ async function main(): Promise<void> {
     }
     await setAccountGrind(id, mode);
     console.log(`已设置 ${id} 的 grind=${mode}（秘密未打印）`);
+    return;
+  }
+  if (cmd === "set-password") {
+    const id = rest[0]?.trim();
+    if (!id) {
+      console.error("usage: accounts.ts set-password <account_id>");
+      process.exit(2);
+    }
+    await cmdSetPassword(id);
     return;
   }
   console.error(`未知子命令: ${cmd}`);

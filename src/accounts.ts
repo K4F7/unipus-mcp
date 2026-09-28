@@ -67,6 +67,8 @@ export type ListedAccount = {
   active: boolean;
   has_jwt: boolean;
   has_rt: boolean;
+  /** True when accounts/<id>/password exists or env UNIPUS_PASSWORD_<id> / UNIPUS_PASSWORD set — never the value. */
+  has_password: boolean;
   alias: string | null;
   note: string | null;
   grind: GrindMode;
@@ -244,6 +246,7 @@ export async function listAccounts(
       active: active === name,
       has_jwt: await fileExists(join(dir, "jwt"), p.readFile),
       has_rt: await fileExists(join(dir, "rt"), p.readFile),
+      has_password: await accountHasPassword(name, options),
       alias: meta?.alias ?? null,
       note: meta?.note ?? null,
       grind: normalizeGrind(meta?.grind),
@@ -303,6 +306,10 @@ export async function saveAccountTokens(
         patch.grind !== undefined
           ? normalizeGrind(patch.grind)
           : normalizeGrind(existing.grind),
+      skip_placement:
+        patch.skip_placement !== undefined
+          ? patch.skip_placement
+          : existing.skip_placement ?? null,
       last_login_at:
         patch.last_login_at !== undefined
           ? patch.last_login_at
@@ -454,6 +461,91 @@ async function atomicWriteText(
   // Ensure parent stays private when on real fs.
   await p.chmod(dirname(path), 0o700).catch(() => undefined);
 }
+
+/** Path to per-account password file (mode 0600). Never log contents. */
+export function accountPasswordPath(
+  accountId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  return join(accountDir(accountId, env, home), "password");
+}
+
+/**
+ * Resolve password for an account (never log/return via MCP):
+ * 1. env UNIPUS_PASSWORD_<accountId>
+ * 2. file accounts/<id>/password
+ * 3. env UNIPUS_PASSWORD (legacy global)
+ */
+export async function resolveAccountPassword(
+  accountId: string,
+  options: AccountFs = {},
+): Promise<string | null> {
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  const envKey = `UNIPUS_PASSWORD_${id}`;
+  const fromEnvId = p.env[envKey];
+  if (typeof fromEnvId === "string" && fromEnvId.length > 0) {
+    return fromEnvId;
+  }
+  const path = accountPasswordPath(id, p.env, p.home);
+  try {
+    const raw = (await p.readFile(path, "utf8")).trim();
+    if (raw.length > 0) return raw;
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  const global = p.env.UNIPUS_PASSWORD;
+  if (typeof global === "string" && global.length > 0) return global;
+  return null;
+}
+
+/** Whether a password is available (file or env) — never the value. */
+export async function accountHasPassword(
+  accountId: string,
+  options: AccountFs = {},
+): Promise<boolean> {
+  const pw = await resolveAccountPassword(accountId, options);
+  return pw != null && pw.length > 0;
+}
+
+/**
+ * Write accounts/<id>/password with mode 0600. Never prints the value.
+ * Empty password rejected.
+ */
+export async function writeAccountPassword(
+  accountId: string,
+  password: string,
+  options: AccountFs = {},
+): Promise<string> {
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  if (password.length === 0) {
+    throw new Error("password 不能为空");
+  }
+  const dir = accountDir(id, p.env, p.home);
+  await p.mkdir(dir, { recursive: true, mode: 0o700 });
+  await p.chmod(dir, 0o700).catch(() => undefined);
+  const path = accountPasswordPath(id, p.env, p.home);
+  await atomicWriteText(path, `${password}
+`, p);
+  return path;
+}
+
+/** Username for password login: UNIPUS_USERNAME_<id> || UNIPUS_USERNAME || UNIPUS_PHONE || accountId. */
+export function resolveAccountUsername(
+  accountId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const id = sanitizeAccountId(accountId);
+  const specific = env[`UNIPUS_USERNAME_${id}`]?.trim();
+  if (specific) return specific;
+  const global =
+    env.UNIPUS_USERNAME?.trim() || env.UNIPUS_PHONE?.trim() || "";
+  if (global) return global;
+  return id;
+}
+
 
 function isNotFound(error: unknown): boolean {
   return (

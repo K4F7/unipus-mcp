@@ -7,6 +7,10 @@ import { describe, test } from "node:test";
 import {
   NOTE_MAX_LENGTH,
   listAccounts,
+  resolveAccountPassword,
+  writeAccountPassword,
+  accountHasPassword,
+  resolveAccountUsername,
   normalizeGrind,
   readAccountMeta,
   readActiveAccountId,
@@ -239,5 +243,38 @@ describe("account grind policy", () => {
       { home, env },
     );
     assert.equal((await readAccountMeta("gp", { home, env }))?.grind, "speak");
+  });
+});
+
+describe("per-account password", () => {
+  test("writeAccountPassword 0600; resolve prefers UNIPUS_PASSWORD_<id> then file then global", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-pw-"));
+    const env: NodeJS.ProcessEnv = {};
+    await writeAccountPassword("13800000001", "file-secret", { home, env });
+    const listed = await listAccounts({ home, env });
+    assert.equal(listed[0]!.has_password, true);
+    assert.equal(await resolveAccountPassword("13800000001", { home, env }), "file-secret");
+
+    env.UNIPUS_PASSWORD = "global-secret";
+    assert.equal(await resolveAccountPassword("13800000001", { home, env }), "file-secret");
+
+    env.UNIPUS_PASSWORD_13800000001 = "env-id-secret";
+    assert.equal(await resolveAccountPassword("13800000001", { home, env }), "env-id-secret");
+
+    assert.equal(resolveAccountUsername("13800000001", {}), "13800000001");
+    assert.equal(
+      resolveAccountUsername("13800000001", { UNIPUS_USERNAME: "u1" }),
+      "u1",
+    );
+  });
+
+  test("listAccounts never exposes password contents", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-pw-list-"));
+    const env = {};
+    await writeAccountPassword("13800000002", "super-secret-value", { home, env });
+    const listed = await listAccounts({ home, env });
+    const blob = JSON.stringify(listed);
+    assert.equal(listed[0]!.has_password, true);
+    assert.equal(blob.includes("super-secret-value"), false);
   });
 });

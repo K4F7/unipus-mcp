@@ -174,7 +174,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
 
 ## 登录约定
 
-- 登录与密钥：环境变量 / CLI / SecretSpec，**永不**作为 MCP 工具参数（禁止 login/password 类工具）。
+- 登录与密钥：本仓 `accounts/<id>/password`（0600）或 env `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD` + CLI `accounts set-password`；**不强制 SecretSpec**；**永不**作为 MCP 工具参数（禁止 login/password 类工具）。
 - JWT **约 48 小时**有效（SSO `effectiveTime=172800`）；登录响应含 **`rt`（refreshToken）**，续期优先于反复账密。
 - 续期：`POST https://sso.unipus.cn/sso/4.0/sso/refresh_jwt`，body `{"rt":"…"}` → 新 jwt + **新 rt**（轮换，必须原子写回）。
 - 本机存储（目录 `0700`，秘密文件 `0600`）：
@@ -195,7 +195,8 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   3. 否则 legacy `~/.config/unipus-mcp/jwt`
 - 未配置多账户时行为与以前一致：一个 jwt 文件即可用。
 - CLI：
-  - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active（密码仅 env：`UNIPUS_USERNAME`/`UNIPUS_PHONE` + `UNIPUS_PASSWORD`）
+  - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active。密码：`accounts/<id>/password` 或 `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD`（`accounts set-password <id>` 从 stdin/env 写入，0600，永不打印）。用户名：`UNIPUS_USERNAME_<id>` / `UNIPUS_USERNAME` / 默认账户 id。
+  - 可选从现有 env 迁移：`UNIPUS_PASSWORD_<id>=… npx tsx scripts/accounts.ts set-password <id>`（勿把密文提交进 git）。
   - `npx tsx scripts/sso-login.ts --refresh [--account <id>]` 或 `npm run refresh-jwt` — 优先 `rt` 续期；失败回退账密；极验 → 退出码 **3**（`CAPTCHA_REQUIRED`）
   - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` / `grind <id> both|listen|speak` — 只动指针与脱敏展示（含 alias/note/grind）；**切换账户仅 CLI**（MCP 无 `use_account`）
 - 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。

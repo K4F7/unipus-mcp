@@ -258,7 +258,7 @@ Confirmed against `uadaptive` with JWT (raw `Authorization`, no Bearer):
 
 MCP tool: `upload_answer_audio` (filePath → storage_key + cdn_url). Does **not** submit yet.
 
-SSO login CLI: `UNIPUS_USERNAME` + `UNIPUS_PASSWORD` → `npx tsx scripts/sso-login.ts` writes `~/.config/unipus-mcp/jwt`.
+SSO login CLI: password from `accounts/<id>/password` or `UNIPUS_PASSWORD[_<id>]` → `npx tsx scripts/sso-login.ts [--account <id>]` writes `accounts/<id>/{jwt,rt}` (+ legacy). 本仓自管，不强制 SecretSpec.
 
 Progress probe (default): `GET /api/uls/user/getUserStatusForApp?flowType=listen` and `flowType=speak` on ucloud with **raw JWT** → `weekDoneTaskCount` / `weekFrequency`. Trial activation remains the legacy single-GET.
 
