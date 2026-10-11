@@ -196,8 +196,8 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   3. 否则 legacy `~/.config/unipus-mcp/jwt`
 - 未配置多账户时行为与以前一致：一个 jwt 文件即可用。
 - CLI：
-  - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active。密码：`accounts/<id>/password` 或 `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD`（`accounts set-password <id>` 从 stdin/env 写入，0600，永不打印）。用户名：`UNIPUS_USERNAME_<id>` / `UNIPUS_USERNAME` / 默认账户 id。
-  - 可选从现有 env 迁移：`UNIPUS_PASSWORD_<id>=… npx tsx scripts/accounts.ts set-password <id>`（勿把密文提交进 git）。
+  - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active。密码：`accounts/<id>/password` 或 `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD`（登录解析仍回退全局）。`accounts set-password <id>`：`UNIPUS_PASSWORD_<id>` → stdin 写入文件（0600）；**不读**全局 `UNIPUS_PASSWORD`；永不打印。`list` 的 `pw=` / `has_password` 只认文件或 per-id env。用户名：`UNIPUS_USERNAME_<id>` / `UNIPUS_USERNAME` / 默认账户 id。
+  - 可选从现有 env 迁移：`UNIPUS_PASSWORD_<id>=… npx tsx scripts/accounts.ts set-password <id>`，或 `printf '%s' '…' | npx tsx scripts/accounts.ts set-password <id>`（勿把密文提交进 git；有全局 `UNIPUS_PASSWORD` 时请用 stdin / per-id，勿指望全局被写入文件）。
   - `npx tsx scripts/sso-login.ts --refresh [--account <id>]` 或 `npm run refresh-jwt` — 优先 `rt` 续期；失败回退账密；极验 → 退出码 **3**（`CAPTCHA_REQUIRED`）
   - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` / `grind <id> both|listen|speak` — 只动指针与脱敏展示（含 alias/note/grind）；**切换账户仅 CLI**（MCP 无 `use_account`）
 - 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。

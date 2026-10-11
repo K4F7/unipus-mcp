@@ -20,6 +20,7 @@ import {
   isGrindMode,
   listAccounts,
   readActiveAccountId,
+  resolvePasswordForSet,
   sanitizeAccountId,
   setAccountGrind,
   setAccountNote,
@@ -41,7 +42,7 @@ function printHelp(): void {
 Only prints redacted meta (account_id, active, has_jwt/has_rt/has_password, alias, note, grind, timestamps).
 Never prints jwt / rt / password. Switching is CLI-only (no MCP use_account).
 grind 写入 meta.json（听/口策略）；勿从 note 文本解析。
-set-password：从 stdin 或 env UNIPUS_PASSWORD / UNIPUS_PASSWORD_<id> 写入 accounts/<id>/password（0600）；永不回显。
+set-password：UNIPUS_PASSWORD_<id> → stdin 写入 accounts/<id>/password（0600）；不读全局 UNIPUS_PASSWORD；永不回显。
 本仓自管密码，不强制 SecretSpec；禁止把密码作 MCP 工具参数。`);
 }
 
@@ -151,23 +152,20 @@ async function readPasswordFromStdin(): Promise<string> {
 }
 
 /**
- * Write accounts/<id>/password from env or stdin. Never prints the secret.
- * Preference: UNIPUS_PASSWORD_<id> → UNIPUS_PASSWORD → stdin.
+ * Write accounts/<id>/password from per-id env or stdin. Never prints the secret.
+ * Preference: UNIPUS_PASSWORD_<id> → stdin. Does not read global UNIPUS_PASSWORD
+ * (login fallback only — must not overwrite a piped per-account password).
  */
 async function cmdSetPassword(accountIdRaw: string): Promise<void> {
   const accountId = sanitizeAccountId(accountIdRaw);
-  const env = process.env;
-  const fromEnv =
-    env[`UNIPUS_PASSWORD_${accountId}`] ||
-    env.UNIPUS_PASSWORD ||
-    "";
-  let password = fromEnv;
-  if (!password) {
-    password = await readPasswordFromStdin();
-  }
+  const stdinPassword = await readPasswordFromStdin();
+  const password = resolvePasswordForSet(accountId, {
+    env: process.env,
+    stdinPassword,
+  });
   if (!password) {
     console.error(
-      "缺少密码：请设置 UNIPUS_PASSWORD 或 UNIPUS_PASSWORD_<id>，或通过 stdin 传入（勿 echo 到日志）",
+      "缺少密码：请设置 UNIPUS_PASSWORD_<id>，或通过 stdin 传入（勿 echo 到日志）。set-password 不读全局 UNIPUS_PASSWORD。",
     );
     process.exit(2);
   }

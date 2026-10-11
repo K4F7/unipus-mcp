@@ -8,6 +8,7 @@ import {
   NOTE_MAX_LENGTH,
   listAccounts,
   resolveAccountPassword,
+  resolvePasswordForSet,
   writeAccountPassword,
   accountHasPassword,
   resolveAccountUsername,
@@ -276,5 +277,73 @@ describe("per-account password", () => {
     const blob = JSON.stringify(listed);
     assert.equal(listed[0]!.has_password, true);
     assert.equal(blob.includes("super-secret-value"), false);
+  });
+
+  test("resolvePasswordForSet: per-id env then stdin; ignores global UNIPUS_PASSWORD", () => {
+    const id = "13800000003";
+    assert.equal(
+      resolvePasswordForSet(id, {
+        env: { UNIPUS_PASSWORD: "global-secret" },
+        stdinPassword: "from-stdin",
+      }),
+      "from-stdin",
+    );
+    assert.equal(
+      resolvePasswordForSet(id, {
+        env: {
+          UNIPUS_PASSWORD: "global-secret",
+          UNIPUS_PASSWORD_13800000003: "env-id-secret",
+        },
+        stdinPassword: "from-stdin",
+      }),
+      "env-id-secret",
+    );
+    assert.equal(
+      resolvePasswordForSet(id, {
+        env: { UNIPUS_PASSWORD: "global-secret" },
+        stdinPassword: "",
+      }),
+      null,
+    );
+  });
+
+  test("has_password ignores global UNIPUS_PASSWORD; per-id env and file still count", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-pw-has-"));
+    const env: NodeJS.ProcessEnv = { UNIPUS_PASSWORD: "global-secret" };
+    // create two account dirs via save tokens so list sees them
+    await saveAccountTokens(
+      { accountId: "13800000011", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.a", makeActive: true },
+      { home, env },
+    );
+    await saveAccountTokens(
+      {
+        accountId: "13800000012",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoyfQ.b",
+        makeActive: false,
+        syncLegacy: false,
+      },
+      { home, env },
+    );
+
+    let listed = await listAccounts({ home, env });
+    assert.equal(listed.every((a) => a.has_password === false), true);
+    assert.equal(await accountHasPassword("13800000011", { home, env }), false);
+
+    // login resolve still falls back to global
+    assert.equal(
+      await resolveAccountPassword("13800000011", { home, env }),
+      "global-secret",
+    );
+
+    env.UNIPUS_PASSWORD_13800000011 = "env-id-secret";
+    assert.equal(await accountHasPassword("13800000011", { home, env }), true);
+    assert.equal(await accountHasPassword("13800000012", { home, env }), false);
+
+    delete env.UNIPUS_PASSWORD_13800000011;
+    await writeAccountPassword("13800000012", "file-secret", { home, env });
+    listed = await listAccounts({ home, env });
+    const byId = Object.fromEntries(listed.map((a) => [a.account_id, a.has_password]));
+    assert.equal(byId["13800000011"], false);
+    assert.equal(byId["13800000012"], true);
   });
 });
