@@ -158,11 +158,17 @@ async function readPasswordFromStdin(): Promise<string> {
  */
 async function cmdSetPassword(accountIdRaw: string): Promise<void> {
   const accountId = sanitizeAccountId(accountIdRaw);
-  const stdinPassword = await readPasswordFromStdin();
-  const password = resolvePasswordForSet(accountId, {
+  // Prefer UNIPUS_PASSWORD_<id> without waiting on stdin EOF (open pipes can hang).
+  const fromEnvId = resolvePasswordForSet(accountId, {
     env: process.env,
-    stdinPassword,
+    stdinPassword: "",
   });
+  const password =
+    fromEnvId ??
+    resolvePasswordForSet(accountId, {
+      env: process.env,
+      stdinPassword: await readPasswordFromStdin(),
+    });
   if (!password) {
     console.error(
       "缺少密码：请设置 UNIPUS_PASSWORD_<id>，或通过 stdin 传入（勿 echo 到日志）。set-password 不读全局 UNIPUS_PASSWORD。",

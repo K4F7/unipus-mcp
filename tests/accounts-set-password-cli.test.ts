@@ -77,4 +77,23 @@ describe("accounts set-password CLI", () => {
     assert.equal(r.code, 2);
     assert.match(r.err, /不读全局 UNIPUS_PASSWORD|缺少密码/);
   });
+
+  test("per-id env is used even when global is set; does not need stdin body", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-setpw-id-"));
+    const env: NodeJS.ProcessEnv = {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+      UNIPUS_PASSWORD: "global-should-not-be-written",
+      UNIPUS_PASSWORD_19900005555: "env-id-secret",
+    };
+    const r = await runAccounts(["set-password", "19900005555"], env, "");
+    assert.equal(r.code, 0, r.err || r.out);
+    assert.equal(r.out.includes("env-id-secret"), false);
+    assert.equal(r.out.includes("global-should-not-be-written"), false);
+    const saved = await readFile(
+      join(home, ".config/unipus-mcp/accounts/19900005555/password"),
+      "utf8",
+    );
+    assert.equal(saved.trim(), "env-id-secret");
+  });
 });
