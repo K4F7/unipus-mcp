@@ -67,7 +67,7 @@ export type ListedAccount = {
   active: boolean;
   has_jwt: boolean;
   has_rt: boolean;
-  /** True when accounts/<id>/password exists or env UNIPUS_PASSWORD_<id> / UNIPUS_PASSWORD set — never the value. */
+  /** True when accounts/<id>/password exists or env UNIPUS_PASSWORD_<id> is set — never the value. Ignores global UNIPUS_PASSWORD. */
   has_password: boolean;
   alias: string | null;
   note: string | null;
@@ -500,13 +500,51 @@ export async function resolveAccountPassword(
   return null;
 }
 
-/** Whether a password is available (file or env) — never the value. */
+/**
+ * Whether this account has a *dedicated* password source (file or UNIPUS_PASSWORD_<id>).
+ * Does not treat global UNIPUS_PASSWORD as per-account — that remains a login fallback only.
+ * Never returns the value.
+ */
 export async function accountHasPassword(
   accountId: string,
   options: AccountFs = {},
 ): Promise<boolean> {
-  const pw = await resolveAccountPassword(accountId, options);
-  return pw != null && pw.length > 0;
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  const fromEnvId = p.env[`UNIPUS_PASSWORD_${id}`];
+  if (typeof fromEnvId === "string" && fromEnvId.length > 0) {
+    return true;
+  }
+  const path = accountPasswordPath(id, p.env, p.home);
+  try {
+    const raw = (await p.readFile(path, "utf8")).trim();
+    return raw.length > 0;
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    return false;
+  }
+}
+
+/**
+ * Password to write via `accounts set-password`. Never uses global UNIPUS_PASSWORD
+ * (that is a login fallback only and must not overwrite a piped per-account secret).
+ * Preference: UNIPUS_PASSWORD_<id> → stdinPassword (caller supplies after reading stdin).
+ */
+export function resolvePasswordForSet(
+  accountId: string,
+  options: { env?: NodeJS.ProcessEnv; stdinPassword?: string } = {},
+): string | null {
+  const env = options.env ?? process.env;
+  const id = sanitizeAccountId(accountId);
+  const fromEnvId = env[`UNIPUS_PASSWORD_${id}`];
+  if (typeof fromEnvId === "string" && fromEnvId.length > 0) {
+    return fromEnvId;
+  }
+  const stdin = (options.stdinPassword ?? "").replace(/\r?\n$/, "");
+  if (stdin.length > 0) {
+    return stdin;
+  }
+  return null;
 }
 
 /**

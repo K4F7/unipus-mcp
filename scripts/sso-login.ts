@@ -53,7 +53,7 @@ function printHelp(): void {
 Password resolution (never printed):
   UNIPUS_PASSWORD_<id> → accounts/<id>/password → UNIPUS_PASSWORD
 Username: UNIPUS_USERNAME_<id> → UNIPUS_USERNAME/PHONE → account id
-Write password: npx tsx scripts/accounts.ts set-password <id>  (stdin/env)
+Write password: npx tsx scripts/accounts.ts set-password <id>  (UNIPUS_PASSWORD_<id> or stdin; not global UNIPUS_PASSWORD)
 
 Options:
   --account <id>   Account archive id (default: username/phone, or active)
