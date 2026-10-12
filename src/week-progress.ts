@@ -10,6 +10,7 @@ import {
   resolveWeekProgressUrl,
 } from "./config.js";
 import { summarizeHttpErrorBody, type UnipusHttpResponse } from "./http.js";
+import { withRetry } from "./retry.js";
 import {
   authRequired,
   okWeekProgress,
@@ -22,6 +23,8 @@ export type WeekProgressPorts = AuthPorts & {
   weekProgressUrl?: string;
   /** Override; when unset, uses resolveSpeakWeekProgressUrl(env) (null if env unset). */
   speakWeekProgressUrl?: string | null;
+  /** Injected backoff sleep for tests. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export async function listWeekProgress(
@@ -290,12 +293,17 @@ async function fetchProgress(
 ): Promise<{ ok: true; body: string } | { ok: false; error: WeekProgressResult }> {
   let response: UnipusHttpResponse;
   try {
-    response = await ports.http.request({
-      url,
-      method: init?.method ?? "GET",
-      headers,
-      body: init?.body,
-    });
+    // Read-only query: retry transient network failures (e.g. "fetch failed").
+    response = await withRetry(
+      () =>
+        ports.http.request({
+          url,
+          method: init?.method ?? "GET",
+          headers,
+          body: init?.body,
+        }),
+      { attempts: 3, sleep: ports.sleep },
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {

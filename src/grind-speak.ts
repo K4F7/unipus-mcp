@@ -17,6 +17,7 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import { classifyError, toError } from "./retry.js";
 import { synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio } from "./upload-answer-audio.js";
 
@@ -209,8 +210,17 @@ export async function completeOneSpeak(
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
-  for (const leaf of leaves) {
-    answers.push(await buildLeafAnswer(leaf, ttsUpload));
+  try {
+    for (const leaf of leaves) {
+      answers.push(await buildLeafAnswer(leaf, ttsUpload));
+    }
+  } catch (error) {
+    const err = toError(error);
+    return {
+      ok: false,
+      taskId,
+      detail: `tts/upload ${classifyError(err)}: ${err.message}`,
+    };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {

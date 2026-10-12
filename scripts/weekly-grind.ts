@@ -41,6 +41,12 @@ neither --all nor --account → active only
 
 Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
 Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
+Exit codes (stdout always carries the JSON summary when accounts were resolved):
+  0  at least one account done/ground/skipped_* / needs_placement
+  1  every targeted account ended in status=error (see errors / error_class)
+  2  usage error or no target accounts
+TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
+
 CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);
 }
 
@@ -79,6 +85,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  // Keep stdout machine-readable even on a crash outside per-account handling.
+  console.log(JSON.stringify({ accounts: [], fatal: { message } }, null, 2));
   process.exit(1);
 });

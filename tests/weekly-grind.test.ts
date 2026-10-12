@@ -841,3 +841,36 @@ describe("needs_placement", () => {
     assert.equal(parsed.mode.kind, "all");
   });
 });
+
+describe("runWeeklyGrind resilience", () => {
+  test("a throwing account still yields JSON summary; --all continues", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-throw-"));
+    const env = {};
+    for (const id of ["boom", "fine"]) {
+      await saveAccountTokens(
+        { accountId: id, jwt: `eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.${id}`, makeActive: false, syncLegacy: false },
+        { home, env },
+      );
+      await setAccountGrind(id, "speak", { home, env });
+    }
+    let calls = 0;
+    const summary = await runWeeklyGrind(
+      { kind: "all" },
+      {
+        home,
+        env,
+        listProgress: async () => ({ listen_done: 5, listen_total: 5, speak_done: calls ? 3 : 0, speak_total: 3 }),
+        grindSpeak: async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("Unexpected server response: 403");
+          return { completed: 3, taskIds: ["t"] };
+        },
+      },
+    );
+    const boom = summary.accounts.find((a) => a.account_id === "boom");
+    assert.equal(boom?.status, "error");
+    assert.equal(boom?.error_class, "FORBIDDEN");
+    assert.equal(summary.accounts.length, 2);
+    assert.equal(summary.totals?.error, 1);
+  });
+});
