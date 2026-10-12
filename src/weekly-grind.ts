@@ -550,16 +550,24 @@ export async function grindOneAccount(
   const grindListen = ports.grindListen ?? grindListenGaps;
   const grindSpeak = ports.grindSpeak ?? grindSpeakGaps;
 
-  if (listenNeed > 0) {
-    const r = await grindListen(grindPorts, listenNeed);
-    base.listen_completed = r.completed;
-    if (r.stoppedReason) errors.push(`listen: ${r.stoppedReason}`);
-  }
-  if (speakNeed > 0) {
-    const r = await grindSpeak(grindPorts, speakNeed);
-    base.speak_completed = r.completed;
-    if (r.stoppedReason) errors.push(`speak: ${r.stoppedReason}`);
-  }
+  // Each side isolated: a throw on one side keeps the other side's completions.
+  const runSide = async (
+    side: "listen" | "speak",
+    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass }>,
+  ) => {
+    try {
+      const r = await run();
+      base[`${side}_completed`] = r.completed;
+      if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
+      if (r.errorClass) base.error_class ??= r.errorClass;
+    } catch (error) {
+      const err = toError(error);
+      errors.push(`${side}: ${err.message}`);
+      base.error_class ??= classifyError(err);
+    }
+  };
+  if (listenNeed > 0) await runSide("listen", () => grindListen(grindPorts, listenNeed));
+  if (speakNeed > 0) await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
 
   const afterRaw = await listProgress(credentials);
   if ("error" in afterRaw) {

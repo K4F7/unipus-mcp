@@ -284,6 +284,9 @@ function weekCountsFromStatusForApp(body: string): {
   return null;
 }
 
+/** Read-only progress query: 1 try + up to 3 retries on network/5xx. */
+const PROGRESS_ATTEMPTS = 4;
+
 async function fetchProgress(
   ports: WeekProgressPorts,
   url: string,
@@ -294,15 +297,21 @@ async function fetchProgress(
   let response: UnipusHttpResponse;
   try {
     // Read-only query: retry transient network failures (e.g. "fetch failed").
+    // 5xx responses are retried too; the last response is still mapped below.
     response = await withRetry(
-      () =>
-        ports.http.request({
+      async (attempt) => {
+        const res = await ports.http.request({
           url,
           method: init?.method ?? "GET",
           headers,
           body: init?.body,
-        }),
-      { attempts: 3, sleep: ports.sleep },
+        });
+        if (res.statusCode >= 500 && attempt < PROGRESS_ATTEMPTS) {
+          throw new Error(`Unexpected server response: ${res.statusCode}`);
+        }
+        return res;
+      },
+      { attempts: PROGRESS_ATTEMPTS, sleep: ports.sleep },
     );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

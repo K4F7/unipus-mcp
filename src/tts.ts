@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import WebSocket from "ws";
+
 import { classifyError, isRetryableClass, toError, withRetry, withTimeout } from "./retry.js";
 
 export type SynthesizeSpeechInput = {
@@ -55,7 +57,6 @@ export async function synthesizeSpeechWav(
   }
   const voice = input.voice?.trim() || "en-US-JennyNeural";
   const dir = await mkdtemp(join(tmpdir(), "unipus-tts-"));
-  const mp3Path = join(dir, "speech.mp3");
   const wavPath = input.outPath?.trim() || join(dir, "speech-16k.wav");
 
   const synthesize =
@@ -72,8 +73,16 @@ export async function synthesizeSpeechWav(
       await fallback(text, wavPath);
     } else {
       try {
-        await synthesizeViaEdge(() => synthesize(text, voice, mp3Path), ports.sleep);
-        await runFfmpeg(ffmpeg, mp3Path, wavPath);
+        // Fresh mp3 per attempt so an abandoned attempt can't write into the next one's file.
+        const mp3 = await synthesizeViaEdge(
+          async (n) => {
+            const path = join(dir, `speech-${n}.mp3`);
+            await synthesize(text, voice, path);
+            return path;
+          },
+          ports.sleep,
+        );
+        await runFfmpeg(ffmpeg, mp3, wavPath);
       } catch (edgeError) {
         if (engine === "edge") throw edgeError;
         const cls = classifyError(edgeError);
@@ -122,24 +131,56 @@ function spawnFfmpeg(ffmpegPath: string, args: string[], label: string): Promise
   });
 }
 
-type ClosableSocket = { terminate?: () => void; close?: () => void };
-
 /**
- * One Edge attempt. node-edge-tts never closes its socket on timeout/error, so
- * capture it and terminate on failure — otherwise retries leak live sockets
- * that keep the CLI process alive after it prints its summary.
+ * One Edge attempt. node-edge-tts neither times out the handshake nor closes its
+ * socket on timeout/error, so we open the socket ourselves (same URL/headers as
+ * node-edge-tts, plus handshakeTimeout) and terminate it on any failure —
+ * otherwise retries leak live sockets that keep the CLI alive.
  */
 async function edgeSynthesizeMp3(text: string, voice: string, out: string): Promise<void> {
   const { EdgeTTS } = await import("node-edge-tts");
+  const drm = (await import("node-edge-tts/dist/drm.js")) as unknown as {
+    TRUSTED_CLIENT_TOKEN: string;
+    CHROMIUM_FULL_VERSION: string;
+    generateSecMsGecToken: () => string;
+  };
   const tts = new EdgeTTS({
     voice,
     lang: voice.startsWith("zh") ? "zh-CN" : "en-US",
     timeout: EDGE_TTS_ATTEMPT_TIMEOUT_MS,
   });
-  const internal = tts as unknown as { _connectWebSocket: () => Promise<ClosableSocket> };
-  const connect = internal._connectWebSocket.bind(tts);
-  let socket: ClosableSocket | undefined;
-  internal._connectWebSocket = async () => (socket = await connect());
+  let socket: WebSocket | undefined;
+  const internal = tts as unknown as {
+    _connectWebSocket: () => Promise<WebSocket>;
+    outputFormat: string;
+  };
+  internal._connectWebSocket = () =>
+    new Promise<WebSocket>((resolve, reject) => {
+      const major = drm.CHROMIUM_FULL_VERSION.split(".")[0];
+      const ws = new WebSocket(
+        `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${drm.TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${drm.generateSecMsGecToken()}&Sec-MS-GEC-Version=1-${drm.CHROMIUM_FULL_VERSION}`,
+        {
+          host: "speech.platform.bing.com",
+          origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
+          handshakeTimeout: EDGE_TTS_ATTEMPT_TIMEOUT_MS,
+          headers: {
+            Pragma: "no-cache",
+            "Cache-Control": "no-cache",
+            "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        },
+      );
+      socket = ws;
+      ws.on("open", () => {
+        ws.send(
+          `Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"${internal.outputFormat}"}}}}`,
+        );
+        resolve(ws);
+      });
+      ws.on("error", reject);
+    });
   try {
     await withTimeout(
       tts.ttsPromise(text, out).catch((e: unknown) => Promise.reject(toError(e))),
@@ -147,11 +188,7 @@ async function edgeSynthesizeMp3(text: string, voice: string, out: string): Prom
       "Edge TTS",
     );
   } catch (error) {
-    try {
-      socket?.terminate ? socket.terminate() : socket?.close?.();
-    } catch {
-      /* ignore */
-    }
+    socket?.terminate();
     throw error;
   }
 }
@@ -161,11 +198,11 @@ async function edgeSynthesizeMp3(text: string, voice: string, out: string): Prom
  * backoff; 403 retried once only (each attempt mints a fresh Sec-MS-GEC token).
  */
 function synthesizeViaEdge(
-  attempt: () => Promise<void>,
+  attempt: (n: number) => Promise<string>,
   sleep?: (ms: number) => Promise<void>,
-): Promise<void> {
+): Promise<string> {
   return withRetry(
-    () => withTimeout(attempt().catch((e) => Promise.reject(toError(e))), EDGE_TTS_ATTEMPT_TIMEOUT_MS, "Edge TTS"),
+    (n) => withTimeout(attempt(n).catch((e) => Promise.reject(toError(e))), EDGE_TTS_ATTEMPT_TIMEOUT_MS + 2_000, "Edge TTS"),
     {
       attempts: EDGE_TTS_ATTEMPTS,
       sleep,
