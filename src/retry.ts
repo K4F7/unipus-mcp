@@ -61,18 +61,16 @@ export async function withRetry<T>(
   const sleep = opts.sleep ?? realSleep;
   const should =
     opts.shouldRetry ?? ((_e: Error, c: ErrorClass) => isRetryableClass(c));
-  let last: Error = new Error("withRetry: no attempts");
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await fn(attempt);
     } catch (raw) {
-      last = toError(raw);
-      if (attempt >= attempts || !should(last, classifyError(last), attempt)) throw last;
+      const err = toError(raw);
+      if (attempt >= attempts || !should(err, classifyError(err), attempt)) throw err;
       const delay = Math.min(max, base * 2 ** (attempt - 1));
       await sleep(Math.round(delay * (0.8 + Math.random() * 0.4)));
     }
   }
-  throw last;
 }
 
 /** Reject after ms; underlying work is abandoned (caller should clean up). */

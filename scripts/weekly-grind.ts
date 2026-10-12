@@ -85,7 +85,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = (error instanceof Error ? error.message : String(error)).replace(
+    /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g,
+    "[redacted-jwt]",
+  );
   console.error(message);
   // Keep stdout machine-readable even on a crash outside per-account handling.
   console.log(JSON.stringify({ accounts: [], fatal: { message } }, null, 2));

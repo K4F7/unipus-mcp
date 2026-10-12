@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { classifyError, toError, withRetry, withTimeout } from "./retry.js";
+import { classifyError, isRetryableClass, toError, withRetry, withTimeout } from "./retry.js";
 
 export type SynthesizeSpeechInput = {
   text: string;
@@ -80,25 +80,7 @@ export async function synthesizeSpeechWav(
       await fallback(text, wavPath);
     } else {
       try {
-        // Edge: retry timeouts/network/5xx with backoff; one retry on 403
-        // (each attempt mints a fresh Sec-MS-GEC token), then give up.
-        await withRetry(
-          () =>
-            withTimeout(
-              synthesize(text, voice, mp3Path).catch((e) => {
-                throw toError(e);
-              }),
-              EDGE_TTS_ATTEMPT_TIMEOUT_MS,
-              "Edge TTS",
-            ),
-          {
-            attempts: EDGE_TTS_ATTEMPTS,
-            sleep: ports.sleep,
-            shouldRetry: (_e, cls, attempt) =>
-              cls === "TIMEOUT" || cls === "NETWORK" || cls === "HTTP_5XX" ||
-              (cls === "FORBIDDEN" && attempt === 1),
-          },
-        );
+        await synthesizeViaEdge(() => synthesize(text, voice, mp3Path), ports.sleep);
         await runFfmpeg(ffmpeg, mp3Path, wavPath);
       } catch (edgeError) {
         if (engine === "edge") throw edgeError;
@@ -146,6 +128,24 @@ function spawnFfmpeg(ffmpegPath: string, args: string[], label: string): Promise
       else reject(new Error(`${label} (code=${code}): ${err.slice(-400)}`));
     });
   });
+}
+
+/**
+ * Edge with retries: transient (timeout/network/5xx) up to EDGE_TTS_ATTEMPTS with
+ * backoff; 403 retried once only (each attempt mints a fresh Sec-MS-GEC token).
+ */
+function synthesizeViaEdge(
+  attempt: () => Promise<void>,
+  sleep?: (ms: number) => Promise<void>,
+): Promise<void> {
+  return withRetry(
+    () => withTimeout(attempt().catch((e) => Promise.reject(toError(e))), EDGE_TTS_ATTEMPT_TIMEOUT_MS, "Edge TTS"),
+    {
+      attempts: EDGE_TTS_ATTEMPTS,
+      sleep,
+      shouldRetry: (_e, cls, n) => isRetryableClass(cls) || (cls === "FORBIDDEN" && n === 1),
+    },
+  );
 }
 
 /** Offline TTS via ffmpeg's lavfi flite source → 16 kHz mono PCM WAV. */
