@@ -55,11 +55,12 @@ async function main(): Promise<void> {
   if (parsed.error) {
     console.error(parsed.error);
     printHelp();
-    process.exit(2);
+    process.exitCode = 2;
+    return;
   }
   if (parsed.help) {
     printHelp();
-    process.exit(0);
+    return;
   }
   const summary = sanitizeSummaryForStdout(
     await runWeeklyGrind(parsed.mode, {
@@ -79,9 +80,11 @@ async function main(): Promise<void> {
   );
   if (summary.accounts.length === 0) {
     console.error("无目标账户（检查 --account / --all / active-account.txt）");
-    process.exit(2);
+    process.exitCode = 2;
+    return;
   }
-  if (hardFail && !anyOk) process.exit(1);
+  // exitCode (not process.exit) so piped stdout JSON fully flushes.
+  if (hardFail && !anyOk) process.exitCode = 1;
 }
 
 main().catch((error) => {
@@ -92,5 +95,5 @@ main().catch((error) => {
   console.error(message);
   // Keep stdout machine-readable even on a crash outside per-account handling.
   console.log(JSON.stringify({ accounts: [], fatal: { message } }, null, 2));
-  process.exit(1);
+  process.exitCode = 1;
 });

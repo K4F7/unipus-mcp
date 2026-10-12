@@ -60,15 +60,7 @@ export async function synthesizeSpeechWav(
 
   const synthesize =
     ports.synthesizeMp3 ??
-    (async (t: string, v: string, out: string) => {
-      const { EdgeTTS } = await import("node-edge-tts");
-      const tts = new EdgeTTS({
-        voice: v,
-        lang: v.startsWith("zh") ? "zh-CN" : "en-US",
-        timeout: EDGE_TTS_ATTEMPT_TIMEOUT_MS,
-      });
-      await tts.ttsPromise(t, out);
-    });
+    ((t: string, v: string, out: string) => edgeSynthesizeMp3(t, v, out));
 
   const ffmpeg = ports.ffmpegPath ?? "ffmpeg";
   const fallback =
@@ -128,6 +120,40 @@ function spawnFfmpeg(ffmpegPath: string, args: string[], label: string): Promise
       else reject(new Error(`${label} (code=${code}): ${err.slice(-400)}`));
     });
   });
+}
+
+type ClosableSocket = { terminate?: () => void; close?: () => void };
+
+/**
+ * One Edge attempt. node-edge-tts never closes its socket on timeout/error, so
+ * capture it and terminate on failure — otherwise retries leak live sockets
+ * that keep the CLI process alive after it prints its summary.
+ */
+async function edgeSynthesizeMp3(text: string, voice: string, out: string): Promise<void> {
+  const { EdgeTTS } = await import("node-edge-tts");
+  const tts = new EdgeTTS({
+    voice,
+    lang: voice.startsWith("zh") ? "zh-CN" : "en-US",
+    timeout: EDGE_TTS_ATTEMPT_TIMEOUT_MS,
+  });
+  const internal = tts as unknown as { _connectWebSocket: () => Promise<ClosableSocket> };
+  const connect = internal._connectWebSocket.bind(tts);
+  let socket: ClosableSocket | undefined;
+  internal._connectWebSocket = async () => (socket = await connect());
+  try {
+    await withTimeout(
+      tts.ttsPromise(text, out).catch((e: unknown) => Promise.reject(toError(e))),
+      EDGE_TTS_ATTEMPT_TIMEOUT_MS + 1_000,
+      "Edge TTS",
+    );
+  } catch (error) {
+    try {
+      socket?.terminate ? socket.terminate() : socket?.close?.();
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  }
 }
 
 /**
