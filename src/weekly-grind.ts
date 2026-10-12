@@ -29,6 +29,7 @@ import {
   saveLoginTokens,
 } from "./sso-login.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
+import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { accountDir } from "./accounts.js";
@@ -62,10 +63,14 @@ export type AccountGrindSummary = {
   /** Non-null when speak side skipped by CLI/meta policy. */
   speak_skipped: string | null;
   errors: string[];
+  /** Set when the account run threw unexpectedly (TIMEOUT/NETWORK/FORBIDDEN/…). */
+  error_class?: ErrorClass;
 };
 
 export type WeeklyGrindSummary = {
   accounts: AccountGrindSummary[];
+  /** Counts by status, for quick routine triage. */
+  totals?: Record<string, number>;
   started_at: string;
   finished_at: string;
 };
@@ -545,16 +550,24 @@ export async function grindOneAccount(
   const grindListen = ports.grindListen ?? grindListenGaps;
   const grindSpeak = ports.grindSpeak ?? grindSpeakGaps;
 
-  if (listenNeed > 0) {
-    const r = await grindListen(grindPorts, listenNeed);
-    base.listen_completed = r.completed;
-    if (r.stoppedReason) errors.push(`listen: ${r.stoppedReason}`);
-  }
-  if (speakNeed > 0) {
-    const r = await grindSpeak(grindPorts, speakNeed);
-    base.speak_completed = r.completed;
-    if (r.stoppedReason) errors.push(`speak: ${r.stoppedReason}`);
-  }
+  // Each side isolated: a throw on one side keeps the other side's completions.
+  const runSide = async (
+    side: "listen" | "speak",
+    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass }>,
+  ) => {
+    try {
+      const r = await run();
+      base[`${side}_completed`] = r.completed;
+      if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
+      if (r.errorClass) base.error_class ??= r.errorClass;
+    } catch (error) {
+      const err = toError(error);
+      errors.push(`${side}: ${err.message}`);
+      base.error_class ??= classifyError(err);
+    }
+  };
+  if (listenNeed > 0) await runSide("listen", () => grindListen(grindPorts, listenNeed));
+  if (speakNeed > 0) await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
 
   const afterRaw = await listProgress(credentials);
   if ("error" in afterRaw) {
@@ -606,10 +619,33 @@ export async function runWeeklyGrind(
       });
       continue;
     }
-    accounts.push(await grindOneAccount(account, ports));
+    try {
+      accounts.push(await grindOneAccount(account, ports));
+    } catch (error) {
+      // One account blowing up must not lose the JSON summary for the rest.
+      const err = toError(error);
+      accounts.push({
+        account_id: account.account_id,
+        alias: account.alias,
+        note: account.note,
+        grind: normalizeGrind(account.grind),
+        status: "error",
+        before: null,
+        after: null,
+        listen_completed: 0,
+        speak_completed: 0,
+        listen_skipped: null,
+        speak_skipped: null,
+        errors: [err.message],
+        error_class: classifyError(err),
+      });
+    }
   }
+  const totals: Record<string, number> = {};
+  for (const a of accounts) totals[a.status] = (totals[a.status] ?? 0) + 1;
   return {
     accounts,
+    totals,
     started_at,
     finished_at: new Date().toISOString(),
   };

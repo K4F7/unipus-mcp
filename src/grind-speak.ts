@@ -17,6 +17,7 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio } from "./upload-answer-audio.js";
 
@@ -32,7 +33,7 @@ export type GrindSpeakPorts = AuthPorts & {
 
 export type GrindSpeakRoundResult =
   | { ok: true; taskId: string }
-  | { ok: false; taskId: string | null; detail: string };
+  | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
 
 async function adaptiveGet(
   ports: GrindSpeakPorts,
@@ -209,8 +210,14 @@ export async function completeOneSpeak(
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
-  for (const leaf of leaves) {
-    answers.push(await buildLeafAnswer(leaf, ttsUpload));
+  try {
+    for (const leaf of leaves) {
+      answers.push(await buildLeafAnswer(leaf, ttsUpload));
+    }
+  } catch (error) {
+    const err = toError(error);
+    const errorClass = classifyError(err);
+    return { ok: false, taskId, detail: `tts/upload ${errorClass}: ${err.message}`, errorClass };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {
@@ -239,6 +246,7 @@ export type GrindSpeakGapsResult = {
   completed: number;
   taskIds: string[];
   stoppedReason?: string;
+  errorClass?: ErrorClass;
 };
 
 export async function grindSpeakGaps(
@@ -248,6 +256,27 @@ export async function grindSpeakGaps(
 ): Promise<GrindSpeakGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
+  try {
+    return await grindSpeakLoop(ports, need, maxRounds, taskIds);
+  } catch (error) {
+    // Keep already-submitted tasks in the count even if a later call throws.
+    const err = toError(error);
+    const errorClass = classifyError(err);
+    return {
+      completed: taskIds.length,
+      taskIds,
+      stoppedReason: `${errorClass}: ${err.message}`,
+      errorClass,
+    };
+  }
+}
+
+async function grindSpeakLoop(
+  ports: GrindSpeakPorts,
+  need: number,
+  maxRounds: number,
+  taskIds: string[],
+): Promise<GrindSpeakGapsResult> {
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
     const jwt = await ports.credentials.getJwt();
     if (!jwt) {
@@ -269,6 +298,7 @@ export async function grindSpeakGaps(
         completed: taskIds.length,
         taskIds,
         stoppedReason: result.detail,
+        errorClass: result.errorClass,
       };
     }
     taskIds.push(result.taskId);

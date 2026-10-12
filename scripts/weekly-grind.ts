@@ -41,6 +41,12 @@ neither --all nor --account → active only
 
 Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
 Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
+Exit codes (stdout always carries the JSON summary when accounts were resolved):
+  0  at least one account done/ground/skipped_* / needs_placement
+  1  every targeted account ended in status=error (see errors / error_class)
+  2  usage error or no target accounts
+TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
+
 CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);
 }
 
@@ -49,11 +55,12 @@ async function main(): Promise<void> {
   if (parsed.error) {
     console.error(parsed.error);
     printHelp();
-    process.exit(2);
+    process.exitCode = 2;
+    return;
   }
   if (parsed.help) {
     printHelp();
-    process.exit(0);
+    return;
   }
   const summary = sanitizeSummaryForStdout(
     await runWeeklyGrind(parsed.mode, {
@@ -73,12 +80,20 @@ async function main(): Promise<void> {
   );
   if (summary.accounts.length === 0) {
     console.error("无目标账户（检查 --account / --all / active-account.txt）");
-    process.exit(2);
+    process.exitCode = 2;
+    return;
   }
-  if (hardFail && !anyOk) process.exit(1);
+  // exitCode (not process.exit) so piped stdout JSON fully flushes.
+  if (hardFail && !anyOk) process.exitCode = 1;
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
+  const message = (error instanceof Error ? error.message : String(error)).replace(
+    /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g,
+    "[redacted-jwt]",
+  );
+  console.error(message);
+  // Keep stdout machine-readable even on a crash outside per-account handling.
+  console.log(JSON.stringify({ accounts: [], fatal: { message } }, null, 2));
+  process.exitCode = 1;
 });

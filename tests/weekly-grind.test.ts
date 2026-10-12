@@ -841,3 +841,60 @@ describe("needs_placement", () => {
     assert.equal(parsed.mode.kind, "all");
   });
 });
+
+describe("runWeeklyGrind resilience", () => {
+  test("a throwing account still yields JSON summary; --all continues", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-throw-"));
+    const env = {};
+    for (const id of ["boom", "fine"]) {
+      await saveAccountTokens(
+        { accountId: id, jwt: `eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.${id}`, makeActive: false, syncLegacy: false },
+        { home, env },
+      );
+      await setAccountGrind(id, "speak", { home, env });
+    }
+    let calls = 0;
+    const summary = await runWeeklyGrind(
+      { kind: "all" },
+      {
+        home,
+        env,
+        listProgress: async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("Unexpected server response: 403");
+          return { listen_done: 5, listen_total: 5, speak_done: 3, speak_total: 3 };
+        },
+      },
+    );
+    const boom = summary.accounts.find((a) => a.account_id === "boom");
+    assert.equal(boom?.status, "error");
+    assert.equal(boom?.error_class, "FORBIDDEN");
+    assert.equal(summary.accounts.length, 2);
+    assert.equal(summary.totals?.error, 1);
+  });
+});
+
+describe("grindOneAccount side isolation", () => {
+  test("speak throw keeps listen completions; caught class propagates", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-side-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "both", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.b", makeActive: false, syncLegacy: false },
+      { home, env },
+    );
+    const summary = await runWeeklyGrind(
+      { kind: "ids", ids: ["both"] },
+      {
+        home,
+        env,
+        listProgress: async () => ({ listen_done: 0, listen_total: 2, speak_done: 0, speak_total: 1 }),
+        grindListen: async () => ({ completed: 2, taskIds: ["a", "b"] }),
+        grindSpeak: async () => ({ completed: 0, taskIds: [], stoppedReason: "tts/upload TIMEOUT: Timed out", errorClass: "TIMEOUT" as const }),
+      },
+    );
+    const a = summary.accounts[0];
+    assert.equal(a.listen_completed, 2);
+    assert.equal(a.error_class, "TIMEOUT");
+    assert.equal(a.status, "ground");
+  });
+});

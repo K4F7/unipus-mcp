@@ -10,6 +10,7 @@ import {
   resolveWeekProgressUrl,
 } from "./config.js";
 import { summarizeHttpErrorBody, type UnipusHttpResponse } from "./http.js";
+import { withRetry } from "./retry.js";
 import {
   authRequired,
   okWeekProgress,
@@ -22,6 +23,8 @@ export type WeekProgressPorts = AuthPorts & {
   weekProgressUrl?: string;
   /** Override; when unset, uses resolveSpeakWeekProgressUrl(env) (null if env unset). */
   speakWeekProgressUrl?: string | null;
+  /** Injected backoff sleep for tests. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export async function listWeekProgress(
@@ -281,6 +284,9 @@ function weekCountsFromStatusForApp(body: string): {
   return null;
 }
 
+/** Read-only progress query: 1 try + up to 3 retries on network/5xx. */
+const PROGRESS_ATTEMPTS = 4;
+
 async function fetchProgress(
   ports: WeekProgressPorts,
   url: string,
@@ -290,12 +296,23 @@ async function fetchProgress(
 ): Promise<{ ok: true; body: string } | { ok: false; error: WeekProgressResult }> {
   let response: UnipusHttpResponse;
   try {
-    response = await ports.http.request({
-      url,
-      method: init?.method ?? "GET",
-      headers,
-      body: init?.body,
-    });
+    // Read-only query: retry transient network failures (e.g. "fetch failed").
+    // 5xx responses are retried too; the last response is still mapped below.
+    response = await withRetry(
+      async (attempt) => {
+        const res = await ports.http.request({
+          url,
+          method: init?.method ?? "GET",
+          headers,
+          body: init?.body,
+        });
+        if (res.statusCode >= 500 && attempt < PROGRESS_ATTEMPTS) {
+          throw new Error(`Unexpected server response: ${res.statusCode}`);
+        }
+        return res;
+      },
+      { attempts: PROGRESS_ATTEMPTS, sleep: ports.sleep },
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {

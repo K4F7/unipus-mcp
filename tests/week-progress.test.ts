@@ -607,3 +607,25 @@ describe("listWeekProgress NEEDS_PLACEMENT", () => {
     assert.notEqual(result.code, "PARSE_ERROR");
   });
 });
+
+describe("listWeekProgress retries", () => {
+  test("retries fetch failed and 5xx, then succeeds", async () => {
+    const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
+    let n = 0;
+    const http = mockHttp(async () => {
+      n += 1;
+      if (n === 1) throw new TypeError("fetch failed");
+      if (n === 2) return { statusCode: 502, body: "bad gateway" };
+      return { statusCode: 200, body: JSON.stringify({ progress_done: 1, progress_total: 5 }) };
+    });
+    const result = await listWeekProgress({
+      credentials: { getJwt: async () => jwt },
+      http,
+      weekProgressUrl: resolveWeekProgressUrl({}),
+      speakWeekProgressUrl: null,
+      sleep: async () => {},
+    });
+    assert.equal(result.isError, false);
+    assert.equal(n, 3);
+  });
+});

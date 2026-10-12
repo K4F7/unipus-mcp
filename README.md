@@ -73,3 +73,5 @@ Private use for Sein / K4F7 unless stated otherwise.
 ## Weekly grind (harness)
 
 `npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — stateless multi-account listen/speak gap fill for AI harness routines. Per-account `meta.grind` (`both`|`listen`|`speak`, default both) plus CLI override; set via `accounts.ts grind <id> …`. MCP still has no scheduler.
+
+Speak grind synthesises answer audio with Edge TTS (`speech.platform.bing.com`). Each attempt has a 20s budget and is retried with exponential backoff on timeout/network/5xx; a 403 is retried once (fresh `Sec-MS-GEC`) and then the process falls back to local ffmpeg `flite` for the rest of the run. Override with `UNIPUS_TTS_ENGINE=auto|edge|flite`. Once accounts are resolved, stdout always carries a JSON summary (usage errors / `--help` print help text instead), with per-account `status`, `errors`, `error_class`, plus `totals`; exit 0 = any account succeeded/skipped, 1 = all targeted accounts errored, 2 = usage / no targets.
