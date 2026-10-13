@@ -1,0 +1,53 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  buildAiDialogAnswer,
+  isAiDialogPartName,
+} from "../src/ai-dialog-flow.js";
+
+test("isAiDialogPartName", () => {
+  assert.equal(isAiDialogPartName("AI口语对话"), true);
+  assert.equal(isAiDialogPartName("自由表达"), false);
+  assert.equal(isAiDialogPartName("范例学习"), false);
+});
+
+test("buildAiDialogAnswer shape", () => {
+  const ans = JSON.parse(
+    buildAiDialogAnswer([
+      {
+        type: "bot",
+        text: "Hi?",
+        url: "https://x/a.wav",
+        audioDuration: 2,
+        id: "1",
+        curTime: "2026-10-14 02:00",
+      },
+      {
+        type: "cos",
+        text: "Hello",
+        url: "https://x/b.wav",
+        audioDuration: 3,
+        id: "2",
+        curTime: "2026-10-14 02:00",
+      },
+    ]),
+  );
+  assert.equal(ans.children[0].record.list.length, 2);
+  assert.equal(ans.children[0].record.list[0].recordDetail.type, "bot");
+  assert.equal(ans.children[0].record.list[1].recordDetail.type, "cos");
+  assert.ok(ans.children[0].record.list[0].recordDetail.avator);
+  assert.equal(ans.children[0].record.list[1].recordDetail.avator, undefined);
+});
+
+test("createReplyParser: ASR + chunked bot reply until [end]", async () => {
+  const { createReplyParser } = await import("../src/ai-dialog-flow.js");
+  const p = createReplyParser();
+  assert.equal(p.push("[+]ASR: I like it."), null);
+  assert.equal(p.push("That makes sense."), null);
+  assert.equal(p.push(" What part is relaxing?"), null);
+  assert.deepEqual(p.push("[end]\n"), {
+    asr: "I like it.",
+    text: "That makes sense. What part is relaxing?",
+  });
+  assert.deepEqual(p.push("[end]"), { asr: "", text: "" });
+});

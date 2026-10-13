@@ -1,5 +1,6 @@
 import { requireConfiguredJwt, type AuthPorts } from "./auth.js";
 import { resolveUAppId } from "./config.js";
+import { decodeJwtPayload } from "./jwt.js";
 import { summarizeHttpErrorBody } from "./http.js";
 import {
   authRequired,
@@ -80,7 +81,19 @@ export function parseBusinessBody(
   return { ok: true, data, raw_code: code };
 }
 
-/** App WebView headers for conversation / ebcp on ucloud. */
+/** openId claim from the (unverified) JWT payload; tolerates a `Bearer ` prefix. */
+export function openIdFromJwt(jwt: string): string | undefined {
+  const payload = decodeJwtPayload(jwt.replace(/^Bearer\s+/i, ""));
+  const v = payload?.openId ?? payload?.openid;
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+/**
+ * App WebView headers for conversation / ebcp on ucloud.
+ * The `openid` header is mandatory: without it ebcp/speakers, ebcp/auth and
+ * conversation/create answer business code 500「服务内部异常」. Defaults to
+ * the JWT's openId claim (what the App 2.8.7 WebView sends).
+ */
 export function ulsCloudHeaders(
   jwt: string,
   env?: NodeJS.ProcessEnv,
@@ -88,13 +101,16 @@ export function ulsCloudHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = {
     authorization: jwt,
-    "content-type": "application/json",
+    "content-type": "application/json; charset=UTF-8",
+    accept: "application/json, text/plain, */*",
     sourceid: resolveUAppId(env),
+    origin: "https://uadaptive.unipus.cn",
+    referer: "https://uadaptive.unipus.cn/",
     "x-requested-with": "cn.unipus.cloud",
   };
-  const oid = openId?.trim();
+  const oid = openId?.trim() || openIdFromJwt(jwt);
   if (oid != null && oid.length > 0) {
-    headers.openId = oid;
+    headers.openid = oid;
   }
   return headers;
 }

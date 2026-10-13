@@ -77,7 +77,7 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 
 ### AI口语对话（进关到出关；模拟器 2026-09-22）
 
-**没有**请求 `/api/uls/oral/train`。真实 path 如下（多数在 **ucloud**；业务成功码是 **`code=200`**，不是 uls 用户接口那种 `1`）。业务头：`sourceid: 116`（小写）、`x-requested-with: cn.unipus.cloud`、裸 JWT。`create` body 里 `sourceId` 也是 116。
+**没有**请求 `/api/uls/oral/train`。真实 path 如下（多数在 **ucloud**；业务成功码是 **`code=200`**，不是 uls 用户接口那种 `1`）。业务头：`sourceid: 116`（小写）、**`openid:<JWT.openId>`（必填，缺则业务码 500「服务内部异常」；HTTP 仍 200）**、`x-requested-with: cn.unipus.cloud`、`origin`/`referer: https://uadaptive.unipus.cn/`、裸 JWT。`create` body 里 `sourceId` 也是 116。进关：`ebcp/auth(scene=ai-cosplay)` → `conversation/create` → `chat/info` → `ebcp/speakers` → WS → `save`；出关需至少 1 用户话轮后 `stop` 再 `part/submit`（0 话轮结束不打 stop/submit）。
 
 | 请求 | 位置 | body / query 键 | 成功时 |
 | --- | --- | --- | --- |
@@ -492,7 +492,10 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 - `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；LLM 调用失败（HTTP 错误 / 超时 / JSON 解析失败）会重试，共 3 次，仍失败就抛错，**该卷不交**。单题字母无效时用启发式补上，计入 summary 的 `warnings`。
 - 关闭模式（无 key 或 `UNIPUS_LLM_SOLVER=off`）是明确的旧行为：单选走加粗/字面启发式，填空留空，开跑时打印警告并写入 summary 的 `warnings`。
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
-- 口语评「评分中」根因：直交的 `EN_SENT_SCORE` 不带 `recordDetail` / `specific_scores`。现在每条录音先 Clio `en.sent.score` 打分再上传，写入有限分数；自由表达用 `EN_PRED_SCORE`。
+- 口语 App「历史训练」一直「评分中」有两层根因（#61）：
+  1. 答体缺 `recordDetail` / `specific_scores`（#59/#60 已修：Clio 先打分再写 EN_SENT/EN_PRED）。
+  2. **交卷走 `submitAnswer` 而不是 `part/submit`**：`trainingScoreReport` 可以有分，但 `part/get` 各 part 的 `reportStatus`/`submitted` 仍为 null → App 历史页显示「评分中」。grind-speak 必须按 partList 逐 part `snapshot`→`submit`。
+- App 历史出分判定（2026-10-14 抓包，#62）：`POST ucloud /api/uls/user/getHistoryTrainingTasks` body `{"pageSize":20,"page":1,"flowType":"speak"}`；**只有该项 `scoreIsOut===true` 才算出分**（false →「评分中」）。`answerStatus` 无关；`trainingScoreReport` 有分也不算。`scoreIsOut=true` ↔ `POST adaptive /api/uls/report/checkStatus` `value===3` ↔ 三关（含 AI口语对话）均 `submitted=true` + `reportStatus=completed`。grind-speak 交卷后轮询历史列表（可翻页找 taskId），`scoreIsOut≠true` 时显式报「已交但 App 评分中」，不当成功。
 - Clio 实际 `finalResult` 字段是 `total` / `fluency.overall` / `completeness` / `accuracy`（没有 `overall` / `integrity` / `pronunciation`），`mapClioResultToReviewScores` 以此为回退，否则分数全丢。
 - 听力 `单词跟读`（视频卷每个单词一个子项）、`视频配音` 同样写有声打分记录。`音频学习` / `视频学习` / `定位精听` / `口语_音频学习` 目前仍为 0 分（答体未知）。
 - Edge TTS 在 box 网络 403，周刷实际一直走 flite；flite 音频 Clio 单条 88–99 分，不是低分原因。

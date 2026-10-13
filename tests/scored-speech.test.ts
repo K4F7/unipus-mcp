@@ -11,6 +11,7 @@ const CLIO = "https://clio-audios.unipus.cn/a.mp3";
 function deps(over: Partial<ScoredSpeechDeps> & { cleaned?: string[] } = {}): ScoredSpeechDeps {
   const cleaned = over.cleaned ?? [];
   return {
+    convertToMp3: async (w: string) => w,
     synthesize: async () => ({ wavPath: "/tmp/x.wav", cleanup: async () => void cleaned.push("x") }),
     score: async () => ({
       overall: 94, total: 94, audioUrl: CLIO, raw: {},
@@ -28,7 +29,8 @@ describe("scored-speech", () => {
     assert.equal(rec.url, CDN);
     assert.equal(rec.path, CLIO);
     assert.deepEqual((rec.recordDetail as { details: unknown }).details, [{ char: "hi", score: 99 }]);
-    assert.deepEqual(rec.specific_scores, { total: 0.94, fluency: 0.95, integrity: 1, accuracy: 0.9 });
+    assert.deepEqual(rec.specific_scores, { total: 0.94, fluency: 0.95, integrity: 1, accuracy: 0.9, relevance: 0 });
+    assert.deepEqual(rec.specificScores, rec.specific_scores);
   });
 
   test("EN_PRED_SCORE keeps the same score blocks", async () => {
