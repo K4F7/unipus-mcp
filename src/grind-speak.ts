@@ -1,5 +1,5 @@
 /**
- * Headless speak weekly grind: silent TTS → upload → EN_SENT_SCORE children → submitAnswer.
+ * Headless speak weekly grind: silent TTS → Clio score → upload → scored EN_SENT/EN_PRED children → submitAnswer.
  * No speakers/afplay; no /oral/train; no part/submit.
  */
 import type { AuthPorts } from "./auth.js";
@@ -7,10 +7,8 @@ import { resolveLoadPaperUrl } from "./config.js";
 import {
   DEFAULT_AI_SPEAK_SCRIPT,
   buildLearnDoneAnswer,
-  enSentChildRecord,
   finalizeUserData,
   isOkApiCode,
-  segmentSpeakText,
   walkPaperLeaves,
   type GrindLeaf,
 } from "./grind-paper.js";
@@ -18,17 +16,18 @@ import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
-import { synthesizeSpeechWav } from "./tts.js";
-import { uploadAnswerAudio } from "./upload-answer-audio.js";
+import {
+  buildVoicedAnswer,
+  createScoredSpeechRecordBuilder,
+  voicedChild,
+  type SpeechRecordBuilder,
+} from "./scored-speech.js";
 
 export type GrindSpeakPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
-  /** Inject silent TTS+upload; default uses Edge TTS + Qiniu. */
-  ttsUpload?: (
-    text: string,
-    tag: string,
-  ) => Promise<{ url: string; text: string }>;
+  /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
+  speechRecord?: SpeechRecordBuilder;
 };
 
 export type GrindSpeakRoundResult =
@@ -77,59 +76,16 @@ async function adaptivePost(
   }
 }
 
-async function defaultTtsUpload(
-  ports: GrindSpeakPorts,
-  text: string,
-  tag: string,
-): Promise<{ url: string; text: string }> {
-  const spoken = await synthesizeSpeechWav({ text });
-  try {
-    const up = await uploadAnswerAudio(ports, {
-      filePath: spoken.wavPath,
-      fileName: `${tag}.wav`,
-    });
-    if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
-      throw new Error(`upload fail: ${up.message || up.code}`);
-    }
-    return { url: String(up.cdn_url), text };
-  } finally {
-    await spoken.cleanup?.();
-  }
+/** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE (docs/api-notes.md). */
+async function buildAiOrFree(leaf: GrindLeaf, speech: SpeechRecordBuilder): Promise<string> {
+  const type = `${leaf.template} ${leaf.type}`.includes("oral-personal-state")
+    ? "EN_PRED_SCORE"
+    : "EN_SENT_SCORE";
+  const record = await speech(DEFAULT_AI_SPEAK_SCRIPT, `speak-${leaf.instanceId}-main`, type);
+  return JSON.stringify({ value: [], children: [voicedChild(record)] });
 }
 
-async function buildOralMulti(
-  leaf: GrindLeaf,
-  ttsUpload: (text: string, tag: string) => Promise<{ url: string; text: string }>,
-): Promise<string> {
-  const children = Array.isArray(leaf.data.children) ? leaf.data.children : [];
-  const built = [];
-  for (let i = 0; i < Math.max(children.length, 1); i++) {
-    const ch = children[i] || {};
-    const text = segmentSpeakText(ch, `Speaking practice sentence ${i + 1}.`);
-    const { url } = await ttsUpload(text, `speak-${leaf.instanceId}-${i}`);
-    built.push(enSentChildRecord(text, url));
-  }
-  return JSON.stringify({ value: [], children: built });
-}
-
-async function buildAiOrFree(
-  leaf: GrindLeaf,
-  ttsUpload: (text: string, tag: string) => Promise<{ url: string; text: string }>,
-): Promise<string> {
-  const { url } = await ttsUpload(
-    DEFAULT_AI_SPEAK_SCRIPT,
-    `speak-${leaf.instanceId}-main`,
-  );
-  return JSON.stringify({
-    value: [],
-    children: [enSentChildRecord(DEFAULT_AI_SPEAK_SCRIPT, url)],
-  });
-}
-
-async function buildLeafAnswer(
-  leaf: GrindLeaf,
-  ttsUpload: (text: string, tag: string) => Promise<{ url: string; text: string }>,
-): Promise<string> {
+async function buildLeafAnswer(leaf: GrindLeaf, speech: SpeechRecordBuilder): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   if (
     t.includes("audio-learn") ||
@@ -146,9 +102,9 @@ async function buildLeafAnswer(
     leaf.replyType === "record" ||
     leaf.replyType === "sentence-scoop-record"
   ) {
-    return buildOralMulti(leaf, ttsUpload);
+    return buildVoicedAnswer(leaf, speech);
   }
-  return buildAiOrFree(leaf, ttsUpload);
+  return buildAiOrFree(leaf, speech);
 }
 
 /** Complete one speak train paper. */
@@ -204,15 +160,13 @@ export async function completeOneSpeak(
     return { ok: false, taskId, detail: "missing token/paper" };
   }
 
-  const ttsUpload =
-    ports.ttsUpload ??
-    ((text: string, tag: string) => defaultTtsUpload(ports, text, tag));
+  const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
   try {
     for (const leaf of leaves) {
-      answers.push(await buildLeafAnswer(leaf, ttsUpload));
+      answers.push(await buildLeafAnswer(leaf, speech));
     }
   } catch (error) {
     const err = toError(error);

@@ -337,21 +337,29 @@ export function clioToEnSentScoreFields(
  * SOE/Clio formatData mapping (no invented zeros):
  * score←overall, smooth←fluency, completed←integrity,
  * correctness←pronunciation, relevance←relevance.
+ * Live `en.sent.score` finalResult instead carries total / fluency.overall /
+ * completeness / accuracy (no overall/integrity/pronunciation), so those are the
+ * fallbacks — otherwise every real score maps to nothing and the record stays 评分中.
  */
 export function mapClioResultToReviewScores(
   result: Record<string, unknown> | null | undefined,
 ): ClioReviewScores | undefined {
   if (result == null || typeof result !== "object") return undefined;
-  const pairs: Array<[keyof ClioReviewScores, unknown]> = [
-    ["score", result.overall],
-    ["smooth", result.fluency],
-    ["completed", result.integrity],
-    ["correctness", result.pronunciation],
-    ["relevance", result.relevance],
+  const fluency = result.fluency;
+  const fluencyOverall =
+    fluency != null && typeof fluency === "object"
+      ? (fluency as Record<string, unknown>).overall
+      : fluency;
+  const pairs: Array<[keyof ClioReviewScores, unknown, unknown]> = [
+    ["score", result.overall, result.total],
+    ["smooth", fluencyOverall, undefined],
+    ["completed", result.integrity, result.completeness],
+    ["correctness", result.pronunciation, result.accuracy],
+    ["relevance", result.relevance, undefined],
   ];
   const out: ClioReviewScores = {};
-  for (const [key, raw] of pairs) {
-    const n = pickFiniteNumber(raw);
+  for (const [key, primary, fallback] of pairs) {
+    const n = pickFiniteNumber(primary) ?? pickFiniteNumber(fallback);
     if (n != null) out[key] = n;
   }
   return Object.keys(out).length > 0 ? out : undefined;

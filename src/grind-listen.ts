@@ -1,6 +1,8 @@
 /**
  * Headless listen weekly grind: getUserStatus → loadPaper → full submitAnswer.
- * No part/submit; no speakers.
+ * No part/submit; no speakers. Objective / gap-fill items are answered from the
+ * paper transcript (or video subtitles) via an optional LLM (choice-solver.ts);
+ * 单词跟读 / 视频配音 get Clio-scored voiced records (scored-speech.ts).
  *
  * After each submitAnswer the server briefly returns type=train_profile (taskId
  * null, flowId/tsId set) while assigning the next paper; getUserStatus flips
@@ -20,6 +22,20 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import {
+  buildVocabAnswer,
+  buildVoicedAnswer,
+  createScoredSpeechRecordBuilder,
+  type SpeechRecordBuilder,
+} from "./scored-speech.js";
+import {
+  buildSolvedFillblankAnswer,
+  buildSolvedObjectiveAnswer,
+  createLlmAsk,
+  resolveChoiceSolverConfig,
+  type FetchText,
+  type LlmAsk,
+} from "./choice-solver.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -27,8 +43,12 @@ const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
 export type GrindListenPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
-  /** Optional vocab oral builder; default marks learn-done (no TTS). */
-  buildVocabAnswer?: (leaf: GrindLeaf) => Promise<string>;
+  /** Voiced record builder (单词跟读 / 视频配音); default TTS → Clio score → upload. */
+  speechRecord?: SpeechRecordBuilder;
+  /** LLM for objective items; default when UNIPUS_LLM_API_KEY/SILICONFLOW_API_KEY set. null = heuristic only. */
+  llmAsk?: LlmAsk | null;
+  /** Subtitle (WebVTT) fetch for video items; default public fetch. */
+  fetchText?: FetchText;
   /** Test seam between getUserStatus polls while waiting out train_profile. */
   sleep?: (ms: number) => Promise<void>;
   /** Max getUserStatus polls waiting for type=train (default 15). */
@@ -83,23 +103,30 @@ async function adaptivePost(
   }
 }
 
-async function buildLeafAnswer(
-  leaf: GrindLeaf,
-  ports: GrindListenPorts,
-): Promise<string> {
-  const t = leaf.template || leaf.type || leaf.replyType;
-  if (
-    leaf.isObjective ||
-    leaf.replyType === "singlechoice" ||
-    t.includes("single-choice") ||
-    t.includes("objective")
-  ) {
-    return buildObjectiveAnswer(leaf);
+function resolveAsk(ports: GrindListenPorts): LlmAsk | null {
+  if (ports.llmAsk !== undefined) return ports.llmAsk;
+  const config = resolveChoiceSolverConfig(ports.env ?? process.env);
+  return config ? createLlmAsk(config) : null;
+}
+
+async function buildLeafAnswer(leaf: GrindLeaf, ports: GrindListenPorts): Promise<string> {
+  const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
+  const speech = () => ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+  // Spoken items first: oral-fillblank must be read aloud, not gap-filled.
+  if (t.includes("video-dub") || t.includes("follow") || t.includes("oral")) {
+    return buildVoicedAnswer(leaf, speech());
   }
-  if ((t.includes("vocabulary") || leaf.type === "vocabulary") && ports.buildVocabAnswer) {
-    return ports.buildVocabAnswer(leaf);
+  if (t.includes("fillblank")) {
+    return buildSolvedFillblankAnswer(leaf.data, resolveAsk(ports), ports.fetchText);
   }
-  return buildLearnDoneAnswer();
+  if (leaf.isObjective || t.includes("single-choice") || t.includes("singlechoice") || t.includes("objective")) {
+    const ask = resolveAsk(ports);
+    return ask ? buildSolvedObjectiveAnswer(leaf.data, ask, ports.fetchText) : buildObjectiveAnswer(leaf);
+  }
+  if (t.includes("vocabulary")) {
+    return buildVocabAnswer(leaf, speech());
+  }
+  return buildLearnDoneAnswer(leaf.expectedChildren);
 }
 
 async function requireJwt(ports: GrindListenPorts): Promise<string | null> {

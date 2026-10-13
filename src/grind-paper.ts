@@ -108,7 +108,7 @@ export function walkPaperLeaves(paper: unknown): GrindLeaf[] {
   return out;
 }
 
-function pickSingleChoice(
+export function pickSingleChoice(
   childOrQ: Record<string, unknown>,
   parentContents: unknown[],
 ): string {
@@ -164,22 +164,13 @@ export function buildObjectiveAnswer(leaf: GrindLeaf): string {
   return JSON.stringify({ value: [], children: built });
 }
 
-export function buildLearnDoneAnswer(): string {
-  return JSON.stringify({ value: [], children: [], isDone: true });
-}
-
-export function enSentChildRecord(text: string, url: string) {
-  return {
-    record: {
-      type: "EN_SENT_SCORE",
-      text,
-      url,
-      replayUrl: url,
-      list: [],
-    },
+/** Learn-only item (导读 / 音频学习): every child marked done. */
+export function buildLearnDoneAnswer(children = 1): string {
+  return JSON.stringify({
     value: [],
+    children: Array.from({ length: Math.max(1, children) }, () => ({ value: [], isDone: true })),
     isDone: true,
-  };
+  });
 }
 
 export function segmentSpeakText(ch: unknown, fallback: string): string {
