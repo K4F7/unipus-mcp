@@ -6,6 +6,7 @@ import {
   partsAppHistoryReady,
 } from "../src/grind-speak.js";
 import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
+import type { SpeechRecordType } from "../src/scored-speech.js";
 
 function mockHttp(
   handler: (call: UnipusHttpRequest) => Promise<{ statusCode: number; body: string }>,
@@ -165,7 +166,7 @@ describe("completeOneSpeak", () => {
     const speechRecord = async (
       _text: string,
       _tag: string,
-      type: "EN_SENT_SCORE" | "EN_PRED_SCORE",
+      type: SpeechRecordType,
     ) => ({
       type,
       url: "https://cdn.example/a.wav",
@@ -270,7 +271,7 @@ describe("completeOneSpeak", () => {
 });
 
 const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t";
-const okSpeech = async (_t: string, _g: string, type: "EN_SENT_SCORE" | "EN_PRED_SCORE") => ({
+const okSpeech = async (_t: string, _g: string, type: SpeechRecordType) => ({
   type, url: "u", recordDetail: { score: 90 },
 });
 type PartRow = { partId: string; partName: string; questionInstanceIds: string[]; reportStatus?: string | null; submitted?: boolean | null };

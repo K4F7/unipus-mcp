@@ -42,6 +42,17 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 
+/** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
+function resolveAdaptivePartSubmitUrl(env?: NodeJS.ProcessEnv): string {
+  const o = env?.UNIPUS_ULS_ADAPTIVE_ORIGIN?.trim() || "https://uadaptive.unipus.cn";
+  return `${o}/api/uls/part/submit`;
+}
+
+function resolveUcloudPartSubmitUrl(env?: NodeJS.ProcessEnv): string {
+  const o = env?.UNIPUS_ULS_CLOUD_ORIGIN?.trim() || "https://ucloud.unipus.cn";
+  return `${o}/api/uls/part/submit`;
+}
+
 export type GrindSpeakPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
@@ -193,6 +204,10 @@ async function buildLeafAnswer(
   speech: SpeechRecordBuilder,
 ): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
+  // App 2.8.7: 视频学习 (video-point-read, no children) submits an empty answer.
+  if (t.includes("video-point-read")) {
+    return JSON.stringify({ value: [], children: [] });
+  }
   if (
     t.includes("audio-learn") ||
     t.includes("outline") ||
@@ -208,7 +223,8 @@ async function buildLeafAnswer(
     leaf.replyType === "record" ||
     leaf.replyType === "sentence-scoop-record"
   ) {
-    return buildVoicedAnswer(leaf, speech);
+    const scoop = t.includes("scoop") || t.includes("basic-oral");
+    return buildVoicedAnswer(leaf, speech, scoop ? "EN_SENT_REC" : "EN_SENT_SCORE");
   }
   return buildAiOrFree(leaf, speech);
 }
@@ -331,6 +347,8 @@ export async function completeOneSpeak(
       return { ok: false, taskId, detail: `part ${part.partName || part.partId} 无题目实例${doneSuffix()}` };
     }
 
+    let isAi = false;
+    let aiDuration = 0;
     // AI口语对话: real conversation path before part/submit (placeholder EN_SENT → 4113).
     if (isAiDialogPartName(part.partName)) {
       const qi = part.questionInstanceIds[0];
@@ -352,6 +370,8 @@ export async function completeOneSpeak(
         };
       }
       answers.set(qi, flow.answer);
+      aiDuration = flow.duration_sec ?? 60;
+      isAi = true;
     }
 
     const finalized = finalizeUserData(
@@ -374,7 +394,8 @@ export async function completeOneSpeak(
       partId: part.partId,
       token: paperToken,
       ansVersion,
-      duration: 30,
+      duration: isAi ? aiDuration : 0,
+      url: isAi ? resolveUcloudPartSubmitUrl(ports.env) : resolveAdaptivePartSubmitUrl(ports.env),
       userData: userDataSnap,
       cloudHeaders: true,
       openId,
@@ -392,10 +413,14 @@ export async function completeOneSpeak(
       partId: part.partId,
       token: paperToken,
       ansVersion,
-      duration: 600,
+      // App 2.8.7: 范例/自由 submit duration=0, AI = conversation seconds (ucloud).
+      duration: isAi ? aiDuration : 0,
+      url: isAi ? resolveUcloudPartSubmitUrl(ports.env) : resolveAdaptivePartSubmitUrl(ports.env),
+      // instStatus=1 marks each instance finished; without it 范例学习 stays processing.
       userData: userDataSnap.map((u) => ({
         ...u,
         context: { state: "done" as const },
+        instStatus: 1,
       })),
       cloudHeaders: true,
       openId,

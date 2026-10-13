@@ -9,7 +9,7 @@ import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
 import { synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 
-export type SpeechRecordType = "EN_SENT_SCORE" | "EN_PRED_SCORE";
+export type SpeechRecordType = "EN_SENT_SCORE" | "EN_SENT_REC" | "EN_PRED_SCORE";
 
 export type SpeechRecordBuilder = (
   text: string,
@@ -31,6 +31,7 @@ export type ScoredSpeechDeps = {
   synthesize?: typeof synthesizeSpeechWav;
   score?: typeof scoreEnSent;
   upload?: typeof uploadAnswerAudio;
+  retryDelayMs?: number;
 };
 
 /** Clio failure is fatal: an unscored record would land as 「评分中」 again. */
@@ -41,7 +42,7 @@ export function createScoredSpeechRecordBuilder(
   const synthesize = deps.synthesize ?? synthesizeSpeechWav;
   const score = deps.score ?? scoreEnSent;
   const upload = deps.upload ?? uploadAnswerAudio;
-  return async (text, tag, type) => {
+  const once: SpeechRecordBuilder = async (text, tag, type) => {
     const spoken = await synthesize({ text }, { env: ports.env });
     try {
       const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: 45_000 }, { env: ports.env });
@@ -61,10 +62,31 @@ export function createScoredSpeechRecordBuilder(
         details: wordDetails(scored.result),
       });
       record.type = type;
+      // App 范例学习 records carry relevance 0 in both score blocks.
+      const rd = record.recordDetail as Record<string, unknown> | undefined;
+      if (rd && rd.relevance == null && type !== "EN_PRED_SCORE") rd.relevance = 0;
+      for (const k of ["specific_scores", "specificScores"]) {
+        const ss = record[k] as Record<string, unknown> | undefined;
+        if (ss && ss.relevance == null && type !== "EN_PRED_SCORE") ss.relevance = 0;
+      }
       return record;
     } finally {
       await spoken.cleanup?.();
     }
+  };
+  // Box egress to Clio/七牛 drops TLS intermittently; retry the whole record.
+  return async (text, tag, type) => {
+    let last: unknown;
+    for (let i = 0; i < 4; i++) {
+      try {
+        return await once(text, tag, type);
+      } catch (e) {
+        last = e;
+        if (/Clio 未返回有效分数/.test(String((e as Error)?.message))) throw e;
+        await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 3000));
+      }
+    }
+    throw last;
   };
 }
 
@@ -73,12 +95,17 @@ export function voicedChild(record: Record<string, unknown>) {
 }
 
 /** Follow-read style leaf (跟读 / 口语填空 / 视频配音): one scored record per child. */
-export async function buildVoicedAnswer(leaf: GrindLeaf, speech: SpeechRecordBuilder): Promise<string> {
+export async function buildVoicedAnswer(
+  leaf: GrindLeaf,
+  speech: SpeechRecordBuilder,
+  /** App 2.8.7: 口语填空 (oral-sentence-scoop / basic-oral oral-fill) records are EN_SENT_REC. */
+  type: SpeechRecordType = "EN_SENT_SCORE",
+): Promise<string> {
   const children = Array.isArray(leaf.data.children) ? leaf.data.children : [];
   const built = [];
   for (let i = 0; i < Math.max(children.length, 1); i++) {
     const text = segmentSpeakText(children[i] || {}, `Speaking practice sentence ${i + 1}.`);
-    built.push(voicedChild(await speech(text, `speak-${leaf.instanceId}-${i}`, "EN_SENT_SCORE")));
+    built.push(voicedChild(await speech(text, `speak-${leaf.instanceId}-${i}`, type)));
   }
   return JSON.stringify({ value: [], children: built });
 }

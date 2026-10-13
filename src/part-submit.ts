@@ -44,6 +44,8 @@ export type PartSubmitBodyInput = {
 
 export type PartSubmitInput = PartSubmitBodyInput & {
   openId?: string;
+  /** Override endpoint (App AI口语对话 exit posts to ucloud, others uadaptive). */
+  url?: string;
   /** When true, also send cloud WebView headers (sourceid + x-requested-with). */
   cloudHeaders?: boolean;
 };
@@ -172,7 +174,7 @@ export async function partSubmit(
     }
   }
 
-  const url = ports.partSubmitUrl ?? resolvePartSubmitUrl(ports.env);
+  const url = input.url ?? ports.partSubmitUrl ?? resolvePartSubmitUrl(ports.env);
   const body = buildPartSubmitBody(input);
 
   const response = await ulsAuthedJsonRequest(ports, {
@@ -194,6 +196,8 @@ export async function partSubmit(
       }
       const headers = ulsCloudHeaders(jwt, ports.env, input.openId);
       headers["u-app-id"] = resolveUAppId(ports.env);
+      // uadaptive WebView submit also carries u-openid (App 2.8.7 capture).
+      if (/uadaptive/.test(url) && headers.openid) headers["u-openid"] = headers.openid;
       return headers;
     },
     jsonBody: body,

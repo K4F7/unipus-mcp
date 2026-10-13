@@ -53,6 +53,16 @@ export type AiDialogFlowPorts = AuthPorts &
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
   };
 
+/** Box egress drops TLS intermittently; retry NETWORK_ERROR tool results. */
+async function retryNet<T extends ToolResult>(fn: () => Promise<T>, tries = 4): Promise<T> {
+  let r = await fn();
+  for (let i = 1; i < tries && r.isError && /NETWORK/.test(String(r.code)); i++) {
+    await new Promise((res) => setTimeout(res, 3000));
+    r = await fn();
+  }
+  return r;
+}
+
 class SaveError extends Error {
   constructor(readonly result: ToolResult) {
     super(result.message);
@@ -165,6 +175,8 @@ export type AiDialogTurn = {
 export type AiDialogFlowResult = ToolResult & {
   conversation_id?: string;
   answer?: string;
+  /** Conversation seconds (App part/submit duration). */
+  duration_sec?: number;
   turns?: AiDialogTurn[];
 };
 
@@ -186,6 +198,24 @@ function splitUserScripts(turns: number): string[] {
 }
 
 async function ttsUpload(
+  ports: AiDialogFlowPorts,
+  text: string,
+  tag: string,
+  openId?: string,
+): Promise<{ url: string; dur: number }> {
+  let last: unknown;
+  for (let i = 0; i < 4; i++) {
+    try {
+      return await ttsUploadOnce(ports, text, tag, openId);
+    } catch (e) {
+      last = e;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  throw last;
+}
+
+async function ttsUploadOnce(
   ports: AiDialogFlowPorts,
   text: string,
   tag: string,
@@ -304,7 +334,7 @@ export async function runAiDialogFlow(
   ) => {
     duration += media.dur;
     const isBot = kind === "bot";
-    const res = await conversationSave(ports, {
+    const res = await retryNet(() => conversationSave(ports, {
       speakTaskId: cid,
       duration: Math.round(duration),
       openId,
@@ -316,15 +346,16 @@ export async function runAiDialogFlow(
         botEnContent: isBot ? text : "",
         digitalPersonId: 0,
         sort: sort++,
-        speakType: 1,
+        // App: 1 = bot turn, 2 = user turn.
+        speakType: isBot ? 1 : 2,
         speed: 1,
-        userAudioDuration: isBot ? 0 : media.dur,
+        userAudioDuration: isBot ? 0 : Math.round(media.dur),
         userAudioUrl: isBot ? "" : media.url,
         userChContent: "",
         userEnContent: isBot ? "" : text,
         voiceToneId: 3,
       },
-    });
+    }));
     if (res.isError) throw new SaveError(res);
     turns.push({
       type: kind,
@@ -352,11 +383,11 @@ export async function runAiDialogFlow(
       try {
         const wav = await readFile(spoken.wavPath);
         ws.sendAudio(wav);
-        const up = await uploadAnswerAudio(ports, {
+        const up = await retryNet(() => uploadAnswerAudio(ports, {
           filePath: spoken.wavPath,
           fileName: `ai-dialog-${Date.now()}-u${i}.wav`,
           openId,
-        });
+        }));
         if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
           throw new Error(up.message || "upload_answer_audio failed");
         }
@@ -394,6 +425,7 @@ export async function runAiDialogFlow(
     message: `AI对话完成 conversationId=${cid} turns=${turns.length}`,
     conversation_id: cid,
     answer,
+    duration_sec: Math.max(1, Math.round(duration)),
     turns,
   };
 }

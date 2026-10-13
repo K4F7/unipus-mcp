@@ -24,7 +24,18 @@ const [key, nStr] = process.argv.slice(2);
 const id = await resolve(key!);
 const auth = await ensureAccountAuth(id, {});
 if (!auth.ok) { console.log(JSON.stringify({ key, error: auth.code })); process.exit(1); }
-const ports = { credentials: createStaticJwtStore(auth.jwt), http: createFetchUnipusHttp(), env: process.env };
+const baseHttp = createFetchUnipusHttp();
+const dump = process.env.DUMP_SUBMITS;
+const http = dump
+  ? { ...baseHttp, request: async (req: any) => {
+      if (/part\/submit|conversation\/(save|stop)/.test(req.url)) {
+        const { appendFile } = await import("node:fs/promises");
+        await appendFile(dump, JSON.stringify({ url: req.url, body: req.body ?? req.jsonBody }) + "\n");
+      }
+      return baseHttp.request(req);
+    } }
+  : baseHttp;
+const ports = { credentials: createStaticJwtStore(auth.jwt), http, env: process.env };
 const r = await grindSpeakGaps(ports as never, Number(nStr ?? 1), Number(nStr ?? 1) + 1);
 const h = await getHistoryTrainingTasks(ports as never, { flowType: "speak", pageSize: 10 } as never);
 const tasks = (h as any).page?.list ?? [];

@@ -155,6 +155,8 @@ export function buildEnSentScoreRecord(
   if (detail != null) {
     record.recordDetail = detail.recordDetail;
     record.specific_scores = detail.specific_scores;
+    // App 2.8.7 范例学习 submit carries both snake and camel copies.
+    record.specificScores = detail.specific_scores;
   }
   return record;
 }
