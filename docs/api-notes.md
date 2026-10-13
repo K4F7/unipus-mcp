@@ -77,7 +77,7 @@ Wrong path (do not use): `/api/uls/homework/getByTaskId`.
 
 ### AI口语对话（进关到出关；模拟器 2026-09-22）
 
-**没有**请求 `/api/uls/oral/train`。真实 path 如下（多数在 **ucloud**；业务成功码是 **`code=200`**，不是 uls 用户接口那种 `1`）。业务头：`sourceid: 116`（小写）、`x-requested-with: cn.unipus.cloud`、裸 JWT。`create` body 里 `sourceId` 也是 116。
+**没有**请求 `/api/uls/oral/train`。真实 path 如下（多数在 **ucloud**；业务成功码是 **`code=200`**，不是 uls 用户接口那种 `1`）。业务头：`sourceid: 116`（小写）、**`openid:<JWT.openId>`（必填，缺则业务码 500「服务内部异常」；HTTP 仍 200）**、`x-requested-with: cn.unipus.cloud`、`origin`/`referer: https://uadaptive.unipus.cn/`、裸 JWT。`create` body 里 `sourceId` 也是 116。进关：`ebcp/auth(scene=ai-cosplay)` → `conversation/create` → `chat/info` → `ebcp/speakers` → WS → `save`；出关需至少 1 用户话轮后 `stop` 再 `part/submit`（0 话轮结束不打 stop/submit）。
 
 | 请求 | 位置 | body / query 键 | 成功时 |
 | --- | --- | --- | --- |

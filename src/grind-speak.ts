@@ -2,12 +2,15 @@
  * Headless speak weekly grind: silent TTS → Clio score → upload → scored
  * EN_SENT/EN_PRED children → part/submit (snapshot→submit) per part.
  *
+ * AI口语对话: ebcp/auth → conversation/create → save → stop → part/submit
+ * (answer = bot/cos 话轮 list；缺 openid WebView 头会业务码 500).
+ *
  * App 「U口语 → 历史训练」 shows a number iff getHistoryTrainingTasks
  * scoreIsOut===true (false → 「评分中」). trainingScoreReport / answerStatus
  * do NOT count. scoreIsOut=true ↔ report/checkStatus===3 ↔ all parts
  * submitted+completed (incl. AI口语对话). submitAnswer alone leaves App 评分中 (#61).
  *
- * No speakers/afplay; no /oral/train.
+ * No speakers/afplay; no /oral/train; WS oral.unipus.cn not driven.
  */
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
@@ -33,6 +36,11 @@ import {
   voicedChild,
   type SpeechRecordBuilder,
 } from "./scored-speech.js";
+import {
+  isAiDialogPartName,
+  runAiDialogFlow,
+} from "./ai-dialog-flow.js";
+import { openIdFromJwt } from "./uls-business.js";
 
 export type GrindSpeakPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
@@ -315,12 +323,37 @@ export async function completeOneSpeak(
   const doneParts: string[] = [];
   const doneSuffix = () =>
     doneParts.length ? ` (已交 part: ${doneParts.join("、")})` : " (未交任何 part)";
+  const openId = openIdFromJwt(jwt);
   for (const part of parts) {
     // questionInstanceIds already validated against paper leaves above; get is safe.
     const partLeaves = part.questionInstanceIds.map((id) => byId.get(id)!);
     if (partLeaves.length === 0) {
       return { ok: false, taskId, detail: `part ${part.partName || part.partId} 无题目实例${doneSuffix()}` };
     }
+
+    // AI口语对话: real conversation path before part/submit (placeholder EN_SENT → 4113).
+    if (isAiDialogPartName(part.partName)) {
+      const qi = part.questionInstanceIds[0];
+      if (qi == null) {
+        return { ok: false, taskId, detail: `AI part ${part.partId} 无 questionInstanceId${doneSuffix()}` };
+      }
+      const flow = await runAiDialogFlow(ports, {
+        taskId,
+        questionId: qi,
+        partId: part.partId,
+        ansVersion,
+        openId,
+      });
+      if (flow.isError || flow.answer == null) {
+        return {
+          ok: false,
+          taskId,
+          detail: `AI对话 ${part.partName}: ${flow.code} ${flow.message}${doneSuffix()}`,
+        };
+      }
+      answers.set(qi, flow.answer);
+    }
+
     const finalized = finalizeUserData(
       partLeaves,
       partLeaves.map((l) => answers.get(l.instanceId)!),
@@ -344,6 +377,7 @@ export async function completeOneSpeak(
       duration: 30,
       userData: userDataSnap,
       cloudHeaders: true,
+      openId,
     });
     if (snap.isError) {
       return {
@@ -364,6 +398,7 @@ export async function completeOneSpeak(
         context: { state: "done" as const },
       })),
       cloudHeaders: true,
+      openId,
     });
     if (sub.isError) {
       return {
