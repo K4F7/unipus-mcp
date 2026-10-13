@@ -1,6 +1,8 @@
 /**
  * Headless listen weekly grind: getUserStatus → loadPaper → full submitAnswer.
- * No part/submit; no speakers.
+ * No part/submit; no speakers. Objective / gap-fill items are answered from the
+ * paper transcript (or video subtitles) via an optional LLM (choice-solver.ts);
+ * 单词跟读 / 视频配音 get Clio-scored voiced records (scored-speech.ts).
  *
  * After each submitAnswer the server briefly returns type=train_profile (taskId
  * null, flowId/tsId set) while assigning the next paper; getUserStatus flips
@@ -20,6 +22,22 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import {
+  buildVocabAnswer,
+  buildVoicedAnswer,
+  createScoredSpeechRecordBuilder,
+  type SpeechRecordBuilder,
+} from "./scored-speech.js";
+import {
+  buildSolvedFillblankAnswer,
+  buildSolvedObjectiveAnswer,
+  createLlmAsk,
+  resolveChoiceSolverConfig,
+  type FetchText,
+  type LlmAsk,
+  type SolvedAnswer,
+} from "./choice-solver.js";
+import { toError } from "./retry.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -27,8 +45,12 @@ const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
 export type GrindListenPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
-  /** Optional vocab oral builder; default marks learn-done (no TTS). */
-  buildVocabAnswer?: (leaf: GrindLeaf) => Promise<string>;
+  /** Voiced record builder (单词跟读 / 视频配音); default TTS → Clio score → upload. */
+  speechRecord?: SpeechRecordBuilder;
+  /** LLM for objective items; default when UNIPUS_LLM_API_KEY/SILICONFLOW_API_KEY set. null = heuristic only. */
+  llmAsk?: LlmAsk | null;
+  /** Subtitle (WebVTT) fetch for video items; default public fetch. */
+  fetchText?: FetchText;
   /** Test seam between getUserStatus polls while waiting out train_profile. */
   sleep?: (ms: number) => Promise<void>;
   /** Max getUserStatus polls waiting for type=train (default 15). */
@@ -38,7 +60,7 @@ export type GrindListenPorts = AuthPorts & {
 };
 
 export type GrindListenRoundResult =
-  | { ok: true; taskId: string }
+  | { ok: true; taskId: string; warnings: string[] }
   | { ok: false; taskId: string | null; detail: string };
 
 async function adaptiveGet(
@@ -83,24 +105,43 @@ async function adaptivePost(
   }
 }
 
+function resolveAsk(ports: GrindListenPorts): LlmAsk | null {
+  if (ports.llmAsk !== undefined) return ports.llmAsk;
+  const config = resolveChoiceSolverConfig(ports.env ?? process.env);
+  return config ? createLlmAsk(config) : null;
+}
+
+/** Leaf answer + warning when the solver left questions unanswered. */
 async function buildLeafAnswer(
   leaf: GrindLeaf,
   ports: GrindListenPorts,
-): Promise<string> {
-  const t = leaf.template || leaf.type || leaf.replyType;
-  if (
-    leaf.isObjective ||
-    leaf.replyType === "singlechoice" ||
-    t.includes("single-choice") ||
-    t.includes("objective")
-  ) {
-    return buildObjectiveAnswer(leaf);
+  ask: LlmAsk | null,
+): Promise<{ answer: string; warning?: string }> {
+  const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
+  const speech = () => ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+  const solved = (r: SolvedAnswer, what: string) => ({
+    answer: r.answer,
+    ...(r.unanswered > 0 ? { warning: `${leaf.name || leaf.instanceId}: ${r.unanswered} 道${what}无有效 LLM 答案` } : {}),
+  });
+  // Spoken items first: oral-fillblank must be read aloud, not gap-filled.
+  if (t.includes("video-dub") || t.includes("follow") || t.includes("oral")) {
+    return { answer: await buildVoicedAnswer(leaf, speech()) };
   }
-  if ((t.includes("vocabulary") || leaf.type === "vocabulary") && ports.buildVocabAnswer) {
-    return ports.buildVocabAnswer(leaf);
+  if (t.includes("fillblank")) {
+    return solved(await buildSolvedFillblankAnswer(leaf.data, ask, ports.fetchText), "填空");
   }
-  return buildLearnDoneAnswer();
+  if (leaf.isObjective || t.includes("single-choice") || t.includes("singlechoice") || t.includes("objective")) {
+    if (!ask) return { answer: buildObjectiveAnswer(leaf) };
+    return solved(await buildSolvedObjectiveAnswer(leaf.data, ask, ports.fetchText), "单选（已用启发式补）");
+  }
+  if (t.includes("vocabulary")) {
+    return { answer: await buildVocabAnswer(leaf, speech()) };
+  }
+  return { answer: buildLearnDoneAnswer(leaf.expectedChildren) };
 }
+
+export const NO_LLM_WARNING =
+  "未配置 LLM（UNIPUS_LLM_API_KEY / SILICONFLOW_API_KEY）或 UNIPUS_LLM_SOLVER=off：听力单选走旧启发式、填空留空，分数会明显偏低";
 
 async function requireJwt(ports: GrindListenPorts): Promise<string | null> {
   return ports.credentials.getJwt();
@@ -240,9 +281,18 @@ export async function completeOneListen(
   }
 
   const leaves = walkPaperLeaves(paper);
+  const ask = resolveAsk(ports);
   const answers: string[] = [];
-  for (const leaf of leaves) {
-    answers.push(await buildLeafAnswer(leaf, ports));
+  const warnings: string[] = [];
+  try {
+    for (const leaf of leaves) {
+      const built = await buildLeafAnswer(leaf, ports, ask);
+      answers.push(built.answer);
+      if (built.warning) warnings.push(built.warning);
+    }
+  } catch (error) {
+    // LLM / TTS / Clio failure: do not submit a half-guessed paper.
+    return { ok: false, taskId, detail: `answer build failed, not submitted: ${toError(error).message}` };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {
@@ -264,13 +314,15 @@ export async function completeOneListen(
       detail: `submit error: ${sub.code} ${sub.message}`,
     };
   }
-  return { ok: true, taskId };
+  return { ok: true, taskId, warnings };
 }
 
 export type GrindListenGapsResult = {
   completed: number;
   taskIds: string[];
   stoppedReason?: string;
+  /** Non-fatal: missing LLM config, per-question unanswered counts. */
+  warnings?: string[];
 };
 
 /**
@@ -285,6 +337,12 @@ export async function grindListenGaps(
 ): Promise<GrindListenGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
+  const warnings: string[] = [];
+  if (resolveAsk(ports) == null) {
+    warnings.push(NO_LLM_WARNING);
+    console.error(`[listen] ${NO_LLM_WARNING}`);
+  }
+  const withWarnings = <T extends object>(r: T) => (warnings.length ? { ...r, warnings } : r);
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
     const before = statusValue(
       await (async () => {
@@ -302,13 +360,14 @@ export async function grindListenGaps(
 
     const result = await completeOneListen(ports);
     if (!result.ok) {
-      return {
+      return withWarnings({
         completed: taskIds.length,
         taskIds,
         stoppedReason: result.detail,
-      };
+      });
     }
     taskIds.push(result.taskId);
+    warnings.push(...result.warnings);
 
     const jwt = await requireJwt(ports);
     if (!jwt) break;
@@ -322,12 +381,12 @@ export async function grindListenGaps(
       afterTask === beforeTask &&
       after?.status === beforeStatus
     ) {
-      return {
+      return withWarnings({
         completed: taskIds.length,
         taskIds,
         stoppedReason: "same taskId+status after submit",
-      };
+      });
     }
   }
-  return { completed: taskIds.length, taskIds };
+  return withWarnings({ completed: taskIds.length, taskIds });
 }

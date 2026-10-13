@@ -361,10 +361,20 @@ describe("clioToEnSentScoreFields", () => {
   test("does not invent missing Clio score fields", () => {
     const mapped = clioToEnSentScoreFields("x", {
       audioUrl: "https://clio-audios.unipus.cn/z.wav",
-      result: { total: 10 },
+      result: { detail: "", details: [] },
     });
-    // overall absent → no invented score; total alone is not mapped as overall
     assert.equal(mapped.reviewScores, undefined);
+  });
+
+  test("maps live en.sent.score shape (total/accuracy/completeness/fluency.overall)", () => {
+    const mapped = clioToEnSentScoreFields("x", {
+      audioUrl: "https://clio-audios.unipus.cn/z.wav",
+      result: { total: 94, accuracy: 90, completeness: 100, fluency: { overall: 95, pause: 0 } },
+    });
+    assert.deepEqual(mapped.reviewScores, { score: 94, smooth: 95, completed: 100, correctness: 90 });
+    assert.deepEqual(mapped.record.specific_scores, {
+      total: 0.94, fluency: 0.95, integrity: 1, accuracy: 0.9,
+    });
   });
 
   test("rejects empty/null Clio audioUrl without qiniuUrl", () => {
