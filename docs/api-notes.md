@@ -494,7 +494,8 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
 - 口语 App「历史训练」一直「评分中」有两层根因（#61）：
   1. 答体缺 `recordDetail` / `specific_scores`（#59/#60 已修：Clio 先打分再写 EN_SENT/EN_PRED）。
-  2. **交卷走 `submitAnswer` 而不是 `part/submit`**：`trainingScoreReport` 可以有分，但 `part/get` 各 part 的 `reportStatus`/`submitted` 仍为 null → App 历史页显示「评分中」。grind-speak 必须按 partList 逐 part `snapshot`→`submit`；验收以 `part/get` `reportStatus=completed` + `submitted=true` 为准（Sein：只有 App 历史训练出数字分才算）。
+  2. **交卷走 `submitAnswer` 而不是 `part/submit`**：`trainingScoreReport` 可以有分，但 `part/get` 各 part 的 `reportStatus`/`submitted` 仍为 null → App 历史页显示「评分中」。grind-speak 必须按 partList 逐 part `snapshot`→`submit`。
+- App 历史出分判定（2026-10-14 抓包，#62）：`POST ucloud /api/uls/user/getHistoryTrainingTasks` body `{"pageSize":20,"page":1,"flowType":"speak"}`；**只有该项 `scoreIsOut===true` 才算出分**（false →「评分中」）。`answerStatus` 无关；`trainingScoreReport` 有分也不算。`scoreIsOut=true` ↔ `POST adaptive /api/uls/report/checkStatus` `value===3` ↔ 三关（含 AI口语对话）均 `submitted=true` + `reportStatus=completed`。grind-speak 交卷后轮询历史列表（可翻页找 taskId），`scoreIsOut≠true` 时显式报「已交但 App 评分中」，不当成功。
 - Clio 实际 `finalResult` 字段是 `total` / `fluency.overall` / `completeness` / `accuracy`（没有 `overall` / `integrity` / `pronunciation`），`mapClioResultToReviewScores` 以此为回退，否则分数全丢。
 - 听力 `单词跟读`（视频卷每个单词一个子项）、`视频配音` 同样写有声打分记录。`音频学习` / `视频学习` / `定位精听` / `口语_音频学习` 目前仍为 0 分（答体未知）。
 - Edge TTS 在 box 网络 403，周刷实际一直走 flite；flite 音频 Clio 单条 88–99 分，不是低分原因。

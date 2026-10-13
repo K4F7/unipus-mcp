@@ -394,6 +394,33 @@ export function resolvePartSubmitUrl(
   );
 }
 
+/** App U口语/U听力「历史训练」列表（决定评分中 vs 出分）. POST ucloud. */
+export const DEFAULT_ULS_HISTORY_TRAINING_TASKS_PATH =
+  "/api/uls/user/getHistoryTrainingTasks";
+
+export function resolveHistoryTrainingTasksUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveUlsUrl(
+    env,
+    "UNIPUS_ULS_HISTORY_TRAINING_TASKS_PATH",
+    DEFAULT_ULS_HISTORY_TRAINING_TASKS_PATH,
+  );
+}
+
+/** report/checkStatus on adaptive: value 2=评分中, 3=已出分. */
+export const DEFAULT_ULS_REPORT_CHECK_STATUS_PATH = "/api/uls/report/checkStatus";
+
+export function resolveReportCheckStatusUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const path =
+    envTrim(env.UNIPUS_ULS_REPORT_CHECK_STATUS_PATH) ??
+    DEFAULT_ULS_REPORT_CHECK_STATUS_PATH;
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${resolveAdaptiveOrigin(env)}${normalized}`;
+}
+
 /** Clio / speech.unipus.cn WSS (prod business path — NOT bare /wss). */
 export const DEFAULT_CLIO_WSS_URL =
   "wss://speech.unipus.cn/speech/proxy/wss";

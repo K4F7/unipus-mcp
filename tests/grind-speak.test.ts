@@ -5,12 +5,12 @@ import {
   completeOneSpeak,
   partsAppHistoryReady,
 } from "../src/grind-speak.js";
-import type { HttpRequestCall, UnipusHttp } from "../src/http.js";
+import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
 
 function mockHttp(
-  handler: (call: HttpRequestCall) => Promise<{ statusCode: number; body: string }>,
-): UnipusHttp & { calls: HttpRequestCall[] } {
-  const calls: HttpRequestCall[] = [];
+  handler: (call: UnipusHttpRequest) => Promise<{ statusCode: number; body: string }>,
+): UnipusHttp & { calls: UnipusHttpRequest[] } {
+  const calls: UnipusHttpRequest[] = [];
   return {
     calls,
     async request(call) {
@@ -143,6 +143,22 @@ describe("completeOneSpeak", () => {
           body: JSON.stringify({ code: 1, value: { ok: true } }),
         };
       }
+      if (call.url.includes("getHistoryTrainingTasks")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            msg: "SUCCESS",
+            value: {
+              page: 1, pageSize: 20, total: 1, totalPages: 1,
+              list: [{ taskId: "555", ansVersion: 1, score: 91, scoreIsOut: true, answerStatus: 2, countScore: true }],
+            },
+          }),
+        };
+      }
+      if (call.url.includes("checkStatus")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, msg: "SUCCESS", value: 3, success: true }) };
+      }
       return { statusCode: 404, body: "{}" };
     });
 
@@ -175,7 +191,7 @@ describe("completeOneSpeak", () => {
     assert.deepEqual(actions.filter((a) => a === "submit").length >= 2, true);
   });
 
-  test("fails when part/get still missing completed after submit", async () => {
+  test("fails when history scoreIsOut stays false after submit", async () => {
     const http = mockHttp(async (call) => {
       if (call.url.includes("getUserStatus")) {
         return {
@@ -222,6 +238,18 @@ describe("completeOneSpeak", () => {
           body: JSON.stringify({ code: 1, value: { ok: true } }),
         };
       }
+      if (call.url.includes("getHistoryTrainingTasks")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: {
+              page: 1, pageSize: 20, total: 1, totalPages: 1,
+              list: [{ taskId: "555", ansVersion: 1, score: 0, scoreIsOut: false, answerStatus: 2 }],
+            },
+          }),
+        };
+      }
       return { statusCode: 404, body: "{}" };
     });
     const result = await completeOneSpeak({
@@ -234,9 +262,10 @@ describe("completeOneSpeak", () => {
         recordDetail: { score: 90 },
       }),
       sleep: async () => {},
+      appReadyPollTries: 2,
     });
     assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.detail, /未交/);
+    if (!result.ok) assert.match(result.detail, /已交但 App 评分中/);
   });
 });
 
@@ -253,6 +282,9 @@ function scenario(opts: {
   parts?: () => PartRow[];
   afterParts?: () => PartRow[];
   submit?: (body: { action: string; partId: string }) => { code: number; msg?: string };
+  /** History list item for task 555; default scoreIsOut true. */
+  history?: () => { taskId: string; scoreIsOut: boolean; score?: number; ansVersion?: number } | null;
+  checkStatus?: () => number;
 }) {
   let submitted = false;
   return mockHttp(async (call) => {
@@ -267,6 +299,23 @@ function scenario(opts: {
       const b = JSON.parse(String(call.body));
       const r = opts.submit ? opts.submit(b) : { code: 1 };
       return { statusCode: 200, body: JSON.stringify({ code: r.code, msg: r.msg ?? "x", value: {} }) };
+    }
+    if (call.url.includes("getHistoryTrainingTasks")) {
+      const item = opts.history
+        ? opts.history()
+        : { taskId: "555", scoreIsOut: true, score: 90, ansVersion: 1 };
+      const list = item == null ? [] : [item];
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          code: 1,
+          value: { page: 1, pageSize: 20, total: list.length, totalPages: 1, list },
+        }),
+      };
+    }
+    if (call.url.includes("checkStatus")) {
+      const v = opts.checkStatus ? opts.checkStatus() : 3;
+      return { statusCode: 200, body: JSON.stringify({ code: 1, msg: "SUCCESS", value: v, success: true }) };
     }
     return { statusCode: 404, body: "{}" };
   });
@@ -335,22 +384,88 @@ describe("completeOneSpeak review (#62)", () => {
     assert.equal(submitCalls(http).length, 0);
   });
 
-  test("submitted but processing after polls → 已交但 App 未就绪", async () => {
-    const http = scenario({ afterParts: () => twoParts().map((p) => ({ ...p, submitted: true, reportStatus: "processing" })) });
+  test("scoreIsOut false after polls → 已交但 App 评分中", async () => {
+    const http = scenario({
+      history: () => ({ taskId: "555", scoreIsOut: false, score: 0, ansVersion: 1 }),
+    });
     const r = await run(http);
     assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.detail, /已交但 App 未就绪/);
-    assert.equal(http.calls.filter((c) => c.url.includes("part/get")).length, 1 + 3);
+    if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+    assert.ok(http.calls.some((c) => c.url.includes("getHistoryTrainingTasks")));
   });
 
-  test("becomes ready on a later poll → ok", async () => {
+  test("scoreIsOut becomes true on later poll → ok", async () => {
     let n = 0;
-    const http = scenario({ afterParts: () => {
-      n += 1;
-      return twoParts().map((p) => ({ ...p, submitted: true, reportStatus: n >= 2 ? "completed" : "processing" }));
-    } });
+    const http = scenario({
+      history: () => {
+        n += 1;
+        return { taskId: "555", scoreIsOut: n >= 2, score: n >= 2 ? 91 : 0, ansVersion: 1 };
+      },
+    });
     const r = await run(http);
     assert.equal(r.ok, true);
+  });
+
+  test("scoreIsOut true but checkStatus stays 2 → 已交但 App 评分中", async () => {
+    const http = scenario({
+      history: () => ({ taskId: "555", scoreIsOut: true, score: 91, ansVersion: 1 }),
+      checkStatus: () => 2,
+    });
+    const r = await run(http);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+  });
+
+  test("paginates history until taskId found with scoreIsOut", async () => {
+    let histCalls = 0;
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) return { statusCode: 200, body: JSON.stringify({ code: 1, value: { type: "train", taskId: "999", ansVersion: 1, status: 1 } }) };
+      if (call.url.includes("loadPaper")) return { statusCode: 200, body: JSON.stringify({ code: 1, value: paper }) };
+      if (call.url.includes("part/get")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { partList: twoParts().map((p) => ({ ...p, submitted: true, reportStatus: "completed" })) } }) };
+      }
+      if (call.url.includes("part/submit")) return { statusCode: 200, body: JSON.stringify({ code: 1, value: {} }) };
+      if (call.url.includes("getHistoryTrainingTasks")) {
+        histCalls += 1;
+        const body = JSON.parse(String(call.body));
+        if (body.page === 1) {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              code: 1,
+              value: {
+                page: 1, pageSize: 20, total: 21, totalPages: 2,
+                list: [{ taskId: "111", scoreIsOut: true, score: 80, ansVersion: 1 }],
+              },
+            }),
+          };
+        }
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: {
+              page: 2, pageSize: 20, total: 21, totalPages: 2,
+              list: [{ taskId: "999", scoreIsOut: true, score: 88, ansVersion: 1 }],
+            },
+          }),
+        };
+      }
+      if (call.url.includes("checkStatus")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: 3 }) };
+      }
+      return { statusCode: 404, body: "{}" };
+    });
+    const r = await completeOneSpeak({
+      credentials: { getJwt: async () => JWT },
+      http,
+      env: {},
+      speechRecord: okSpeech,
+      sleep: async () => {},
+      appReadyPollTries: 2,
+    });
+    assert.equal(r.ok, true);
+    assert.ok(histCalls >= 2);
   });
 
   test("classifyAppReadiness", () => {

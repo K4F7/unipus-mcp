@@ -2,9 +2,10 @@
  * Headless speak weekly grind: silent TTS → Clio score → upload → scored
  * EN_SENT/EN_PRED children → part/submit (snapshot→submit) per part.
  *
- * App 「U口语 → 历史训练」 only leaves 「评分中」 when part/get has
- * reportStatus=completed + submitted=true. submitAnswer alone fills
- * trainingScoreReport but leaves those fields null → App stays 评分中 (#61).
+ * App 「U口语 → 历史训练」 shows a number iff getHistoryTrainingTasks
+ * scoreIsOut===true (false → 「评分中」). trainingScoreReport / answerStatus
+ * do NOT count. scoreIsOut=true ↔ report/checkStatus===3 ↔ all parts
+ * submitted+completed (incl. AI口语对话). submitAnswer alone leaves App 评分中 (#61).
  *
  * No speakers/afplay; no /oral/train.
  */
@@ -19,6 +20,10 @@ import {
   type GrindLeaf,
 } from "./grind-paper.js";
 import { summarizeHttpErrorBody } from "./http.js";
+import {
+  checkReportStatus,
+  findHistoryTrainingTask,
+} from "./history-training-tasks.js";
 import { partSubmit } from "./part-submit.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
@@ -36,9 +41,18 @@ export type GrindSpeakPorts = AuthPorts & {
   speechRecord?: SpeechRecordBuilder;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
-  /** part/get poll after submit (default 2000ms × 10 ≈ 20s). */
+  /** History scoreIsOut poll after submit (default 2000ms × 10 ≈ 20s). */
   appReadyPollMs?: number;
   appReadyPollTries?: number;
+  /** Override getHistoryTrainingTasks URL (tests). */
+  historyTrainingTasksUrl?: string;
+  /** Override report/checkStatus URL (tests). */
+  reportCheckStatusUrl?: string;
+  /**
+   * When true (default), after scoreIsOut===true also require
+   * report/checkStatus===3 before success.
+   */
+  requireCheckStatusOut?: boolean;
 };
 
 export type GrindSpeakRoundResult =
@@ -363,36 +377,61 @@ export async function completeOneSpeak(
 
   const sleep =
     ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  // Each paper waits ~20s here (default 2000ms × 10) for part/get App readiness.
+  // Each paper waits ~20s here (default 2000ms × 10) for App history scoreIsOut.
   const pollMs = ports.appReadyPollMs ?? 2000;
   const tries = Math.max(1, ports.appReadyPollTries ?? 10);
-  let readiness: AppReadiness = "not_submitted";
+  const requireCheck = ports.requireCheckStatusOut !== false;
+  const historyPorts = {
+    credentials: ports.credentials,
+    http: ports.http,
+    env: ports.env,
+    historyTrainingTasksUrl: ports.historyTrainingTasksUrl,
+    reportCheckStatusUrl: ports.reportCheckStatusUrl,
+  };
+  let lastHint = "历史未查到该 task";
   for (let i = 0; i < tries; i++) {
     if (i > 0) await sleep(pollMs);
-    const after = (await adaptiveGet(
-      ports,
-      `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
-      jwt,
-    )) as Record<string, unknown>;
-    readiness = classifyAppReadiness(after?.value ?? after);
-    if (readiness === "ready") break;
-  }
-  if (readiness === "submitted_not_ready") {
-    return {
-      ok: false,
+    const found = await findHistoryTrainingTask(historyPorts, {
       taskId,
-      detail: `已交但 App 未就绪：part/submit 全部成功，但 part/get 轮询后 reportStatus 仍非 completed（App 仍会显示评分中）${doneSuffix()}`,
-    };
-  }
-  if (readiness === "not_submitted") {
-    return {
-      ok: false,
-      taskId,
-      detail: `未交：part/submit 返回成功，但 part/get 仍有 part submitted≠true${doneSuffix()}`,
-    };
+      flowType: "speak",
+      pageSize: 20,
+      maxPages: 5,
+    });
+    if (found.isError) {
+      lastHint = found.message;
+      continue;
+    }
+    const task = found.task;
+    if (task == null) {
+      lastHint = "历史列表未找到该 taskId";
+      continue;
+    }
+    if (task.scoreIsOut !== true) {
+      lastHint = `scoreIsOut=false score=${task.score ?? 0}`;
+      continue;
+    }
+    if (requireCheck) {
+      const cs = await checkReportStatus(historyPorts, {
+        taskId,
+        ansVersion: task.ansVersion ?? ansVersion,
+      });
+      if (cs.isError) {
+        lastHint = `scoreIsOut=true 但 checkStatus 失败：${cs.message}`;
+        continue;
+      }
+      if (cs.check_status !== 3) {
+        lastHint = `scoreIsOut=true 但 checkStatus=${cs.check_status}（需 3）`;
+        continue;
+      }
+    }
+    return { ok: true, taskId };
   }
 
-  return { ok: true, taskId };
+  return {
+    ok: false,
+    taskId,
+    detail: `已交但 App 评分中：part/submit 全部成功，但 getHistoryTrainingTasks 轮询后 scoreIsOut≠true（${lastHint}）${doneSuffix()}`,
+  };
 }
 
 export type GrindSpeakGapsResult = {
