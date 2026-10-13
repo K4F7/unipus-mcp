@@ -489,7 +489,8 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 
 ## 周刷分数（#59）
 
-- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；`UNIPUS_LLM_SOLVER=off` 或无 key 时回退旧的加粗/字面启发式。
+- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；LLM 调用失败（HTTP 错误 / 超时 / JSON 解析失败）会重试，共 3 次，仍失败就抛错，**该卷不交**。单题字母无效时用启发式补上，计入 summary 的 `warnings`。
+- 关闭模式（无 key 或 `UNIPUS_LLM_SOLVER=off`）是明确的旧行为：单选走加粗/字面启发式，填空留空，开跑时打印警告并写入 summary 的 `warnings`。
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
 - 口语评「评分中」根因：直交的 `EN_SENT_SCORE` 不带 `recordDetail` / `specific_scores`。现在每条录音先 Clio `en.sent.score` 打分再上传，写入有限分数；自由表达用 `EN_PRED_SCORE`。
 - Clio 实际 `finalResult` 字段是 `total` / `fluency.overall` / `completeness` / `accuracy`（没有 `overall` / `integrity` / `pronunciation`），`mapClioResultToReviewScores` 以此为回退，否则分数全丢。

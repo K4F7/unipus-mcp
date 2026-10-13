@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
+  LLM_SOLVE_ATTEMPTS,
+  LlmSolveError,
   buildSolvedFillblankAnswer,
   buildSolvedObjectiveAnswer,
   parseChoiceAnswers,
@@ -27,7 +29,7 @@ describe("choice-solver", () => {
     assert.deepEqual(parseChoiceAnswers("garbage", qs), [null]);
   });
 
-  test("multi-child: solver picks win, null falls back to heuristic", async () => {
+  test("multi-child: LLM picks win, invalid letter → heuristic and counted", async () => {
     const data = {
       contents: [{ text: "<p>We are <strong>Neighbors.</strong></p>" }],
       children: [
@@ -41,7 +43,8 @@ describe("choice-solver", () => {
       return '{"answers":["A","?"]}';
     });
     assert.match(seen[0]!, /We are Neighbors\.[\s\S]*Q1\. Q1\?[\s\S]*Q2\. Q2\?/);
-    assert.deepEqual(JSON.parse(out).children.map((c: { value: string[] }) => c.value[0]), ["A", "B"]);
+    assert.deepEqual(JSON.parse(out.answer).children.map((c: { value: string[] }) => c.value[0]), ["A", "B"]);
+    assert.equal(out.unanswered, 1);
   });
 
   test("video item: question from quesText, context from WebVTT subtitles", async () => {
@@ -58,22 +61,33 @@ describe("choice-solver", () => {
     assert.match(prompt, /We are neighbors\.[\s\S]*Q1\. Who\?/);
   });
 
-  test("fillblank: one child per blank from LLM; no LLM → empty blanks", async () => {
-    const data = { children: [{ quesText: "<p>a ____1____ b ____2____</p>" }, { quesText: "" }] };
-    const out = await buildSolvedFillblankAnswer(data, async () => '{"answers":["marine","take its toll"]}');
-    assert.deepEqual(JSON.parse(out).children, [
-      { value: ["marine"], isDone: true },
-      { value: ["take its toll"], isDone: true },
-    ]);
-    const empty = await buildSolvedFillblankAnswer(data, null);
-    assert.deepEqual(JSON.parse(empty).children.map((c: { value: string[] }) => c.value[0]), ["", ""]);
+  test("LLM retries transient failure / bad JSON, then succeeds", async () => {
+    const replies = [() => { throw new Error("timeout"); }, () => "not json", () => '{"answers":["B"]}'];
+    let n = 0;
+    const out = await buildSolvedObjectiveAnswer({ options: opts }, async () => replies[n++]!());
+    assert.equal(n, LLM_SOLVE_ATTEMPTS);
+    assert.deepEqual(JSON.parse(out.answer).children[0].value, ["B"]);
   });
 
-  test("solver throw → heuristic for single-question leaf", async () => {
-    const data = { contents: [{ text: "<p>We are <strong>Neighbors.</strong></p>" }], options: opts };
-    const out = await buildSolvedObjectiveAnswer(data, async () => {
-      throw new Error("down");
-    });
-    assert.deepEqual(JSON.parse(out), { value: [], children: [{ value: ["B"], isDone: true }] });
+  test("objective: LLM keeps failing → throws LlmSolveError (no heuristic fallback)", async () => {
+    let n = 0;
+    await assert.rejects(
+      buildSolvedObjectiveAnswer({ options: opts }, async () => { n++; throw new Error("HTTP 500"); }),
+      (e: unknown) => e instanceof LlmSolveError && /HTTP 500/.test((e as Error).message),
+    );
+    assert.equal(n, LLM_SOLVE_ATTEMPTS);
+  });
+
+  test("fillblank: LLM answers per blank; failure throws; off (null) = empty blanks counted", async () => {
+    const data = { children: [{ quesText: "<p>a ____1____ b ____2____</p>" }, { quesText: "" }] };
+    const out = await buildSolvedFillblankAnswer(data, async () => '{"answers":["marine",""]}');
+    assert.deepEqual(JSON.parse(out.answer).children, [
+      { value: ["marine"], isDone: true },
+      { value: [""], isDone: true },
+    ]);
+    assert.equal(out.unanswered, 1);
+    await assert.rejects(buildSolvedFillblankAnswer(data, async () => "garbage"), LlmSolveError);
+    const off = await buildSolvedFillblankAnswer(data, null);
+    assert.equal(off.unanswered, 2);
   });
 });

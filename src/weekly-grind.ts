@@ -63,6 +63,8 @@ export type AccountGrindSummary = {
   /** Non-null when speak side skipped by CLI/meta policy. */
   speak_skipped: string | null;
   errors: string[];
+  /** Non-fatal notes (e.g. no LLM configured, unanswered listen questions). */
+  warnings?: string[];
   /** Set when the account run threw unexpectedly (TIMEOUT/NETWORK/FORBIDDEN/…). */
   error_class?: ErrorClass;
 };
@@ -553,11 +555,12 @@ export async function grindOneAccount(
   // Each side isolated: a throw on one side keeps the other side's completions.
   const runSide = async (
     side: "listen" | "speak",
-    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass }>,
+    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass; warnings?: string[] }>,
   ) => {
     try {
       const r = await run();
       base[`${side}_completed`] = r.completed;
+      if (r.warnings?.length) base.warnings = [...(base.warnings ?? []), ...r.warnings.map((w) => `${side}: ${w}`)];
       if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
       if (r.errorClass) base.error_class ??= r.errorClass;
     } catch (error) {

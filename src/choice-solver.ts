@@ -3,7 +3,9 @@
  * paperReport's standardAnswer only appears after submit), but the paper ships the
  * transcript (contents[].text) or WebVTT subtitles for video items, so an
  * OpenAI-compatible LLM can answer from the transcript. Off unless an API key is
- * configured; callers then fall back to the bold/literal heuristic.
+ * configured. Off mode (no key, or UNIPUS_LLM_SOLVER=off) is the explicit legacy
+ * path: single-choice uses the bold/literal heuristic, gap-fill blanks stay empty,
+ * and the grind summary warns. With the LLM on, failures throw (no silent fallback).
  */
 import { pickSingleChoice, stripHtml } from "./grind-paper.js";
 
@@ -138,70 +140,101 @@ export function buildFillblankPrompt(context: string, passage: string, blanks: n
   );
 }
 
-function parseAnswers(raw: string, n: number): string[] {
+/** Answer the LLM produced: one string per question, or null when unparsable. */
+function parseAnswers(raw: string, n: number): string[] | null {
   const m = raw.match(/\{[\s\S]*\}/);
   try {
     const parsed = JSON.parse(m ? m[0] : raw) as { answers?: unknown };
-    const arr = Array.isArray(parsed.answers) ? parsed.answers : [];
+    if (!Array.isArray(parsed.answers)) return null;
+    const arr = parsed.answers;
     return Array.from({ length: n }, (_, i) => String(arr[i] ?? "").trim());
   } catch {
-    return Array.from({ length: n }, () => "");
+    return null;
   }
 }
 
-export function parseChoiceAnswers(raw: string, questions: ChoiceQuestion[]): Array<string | null> {
-  return parseAnswers(raw, questions.length).map((a, i) => {
-    const v = a.toUpperCase().replace(/[^A-Z]/g, "");
-    return questions[i]!.options.some((o) => o.value === v) ? v : null;
-  });
+export class LlmSolveError extends Error {}
+
+/** Default 3 attempts (1 + 2 retries) on HTTP error / timeout / unparsable JSON, then throw. */
+export const LLM_SOLVE_ATTEMPTS = 3;
+
+async function askAnswers(ask: LlmAsk, prompt: string, n: number, attempts = LLM_SOLVE_ATTEMPTS): Promise<string[]> {
+  let last = "no attempt";
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const parsed = parseAnswers(await ask(prompt), n);
+      if (parsed) return parsed;
+      last = "unparsable JSON";
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new LlmSolveError(`LLM 作答失败（${attempts} 次）：${last}`);
 }
 
+export function parseChoiceAnswers(raw: string, questions: ChoiceQuestion[]): Array<string | null> {
+  const parsed = parseAnswers(raw, questions.length) ?? questions.map(() => "");
+  return parsed.map((a, i) => toChoiceValue(a, questions[i]!));
+}
+
+function toChoiceValue(a: string, q: ChoiceQuestion): string | null {
+  const v = a.toUpperCase().replace(/[^A-Z]/g, "");
+  return q.options.some((o) => o.value === v) ? v : null;
+}
+
+/** Answer JSON plus how many questions the LLM left without a usable answer. */
+export type SolvedAnswer = { answer: string; unanswered: number };
+
 /**
- * Objective single-choice answer (same shape as buildObjectiveAnswer). LLM picks win;
- * any null / LLM failure falls back to the bold/literal heuristic per question.
+ * Objective single-choice answer (same shape as buildObjectiveAnswer).
+ * LLM/transport/JSON failure after retries throws LlmSolveError — the caller must
+ * not submit the paper. Per-question invalid letters fall back to the heuristic
+ * and are counted in `unanswered` so the run summary can warn.
  */
 export async function buildSolvedObjectiveAnswer(
   data: Record<string, unknown>,
   ask: LlmAsk,
   fetchText: FetchText = defaultFetchText,
-): Promise<string> {
+): Promise<SolvedAnswer> {
   const parentContents = asArray(data.contents);
   const kids = asArray(data.children).map(asRecord);
   const nodes = kids.length > 0 ? kids : [data];
   const questions = nodes.map((n) => (n === data ? { ...toChoiceQuestion(n), question: "" } : toChoiceQuestion(n)));
-  let picks: Array<string | null> = questions.map(() => null);
-  try {
-    const context = await contentsContext(parentContents, fetchText);
-    picks = parseChoiceAnswers(await ask(buildChoicePrompt(context, questions)), questions);
-  } catch {
-    // heuristic fallback below
-  }
+  const context = await contentsContext(parentContents, fetchText);
+  const raw = await askAnswers(ask, buildChoicePrompt(context, questions), questions.length);
+  const picks = raw.map((a, i) => toChoiceValue(a, questions[i]!));
   const children = nodes.map((n, i) => {
     const ctx = n === data ? parentContents : [...parentContents, ...asArray(n.contents)];
     return { value: [picks[i] ?? pickSingleChoice(n, ctx)], isDone: true };
   });
-  return JSON.stringify({ value: [], children });
+  return {
+    answer: JSON.stringify({ value: [], children }),
+    unanswered: picks.filter((p) => p == null).length,
+  };
 }
 
-/** fillblank-scoop: passage in children[0].quesText, one child per blank. */
+/**
+ * fillblank-scoop: passage in children[0].quesText, one child per blank.
+ * `ask === null` (LLM off) is the explicit legacy path: blanks submitted empty and
+ * all counted as unanswered. LLM failure after retries throws LlmSolveError.
+ */
 export async function buildSolvedFillblankAnswer(
   data: Record<string, unknown>,
   ask: LlmAsk | null,
   fetchText: FetchText = defaultFetchText,
-): Promise<string> {
+): Promise<SolvedAnswer> {
   const kids = asArray(data.children).map(asRecord);
   const n = Math.max(kids.length, 1);
   let words: string[] = Array.from({ length: n }, () => "");
   if (ask) {
-    try {
-      const contexts = [data, ...kids].map((k) => asArray(k.contents)).flat();
-      const context = await contentsContext(contexts, fetchText);
-      const passage = kids.map((k) => stripHtml(String(k.quesText || ""))).filter(Boolean).join(" ")
-        || stripHtml(String(data.quesText || ""));
-      words = parseAnswers(await ask(buildFillblankPrompt(context, passage, n)), n);
-    } catch {
-      // leave blanks empty
-    }
+    const contents = [data, ...kids].flatMap((k) => asArray(k.contents));
+    const context = await contentsContext(contents, fetchText);
+    const passage = kids.map((k) => stripHtml(String(k.quesText || ""))).filter(Boolean).join(" ")
+      || stripHtml(String(data.quesText || ""));
+    words = await askAnswers(ask, buildFillblankPrompt(context, passage, n), n);
   }
-  return JSON.stringify({ value: [], children: words.map((w) => ({ value: [w], isDone: true })) });
+  return {
+    answer: JSON.stringify({ value: [], children: words.map((w) => ({ value: [w], isDone: true })) }),
+    unanswered: words.filter((w) => !w).length,
+  };
 }

@@ -26,17 +26,28 @@ function wordDetails(result: Record<string, unknown>): Array<{ char: string; sco
   });
 }
 
+/** Test seams for the three network steps. */
+export type ScoredSpeechDeps = {
+  synthesize?: typeof synthesizeSpeechWav;
+  score?: typeof scoreEnSent;
+  upload?: typeof uploadAnswerAudio;
+};
+
 /** Clio failure is fatal: an unscored record would land as 「评分中」 again. */
 export function createScoredSpeechRecordBuilder(
   ports: UploadAnswerAudioPorts,
+  deps: ScoredSpeechDeps = {},
 ): SpeechRecordBuilder {
+  const synthesize = deps.synthesize ?? synthesizeSpeechWav;
+  const score = deps.score ?? scoreEnSent;
+  const upload = deps.upload ?? uploadAnswerAudio;
   return async (text, tag, type) => {
-    const spoken = await synthesizeSpeechWav({ text }, { env: ports.env });
+    const spoken = await synthesize({ text }, { env: ports.env });
     try {
-      const scored = await scoreEnSent({ transcript: text, wavPath: spoken.wavPath, timeoutMs: 45_000 }, { env: ports.env });
+      const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: 45_000 }, { env: ports.env });
       const reviewScores = mapClioResultToReviewScores(scored.result);
       if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
-      const up = await uploadAnswerAudio(ports, { filePath: spoken.wavPath, fileName: `${tag}.wav` });
+      const up = await upload(ports, { filePath: spoken.wavPath, fileName: `${tag}.wav` });
       if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
         throw new Error(`upload fail: ${up.message || up.code}`);
       }
