@@ -34,6 +34,11 @@ export type GrindSpeakPorts = AuthPorts & {
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
   speechRecord?: SpeechRecordBuilder;
+  /** Test seam; default setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+  /** part/get poll after submit (default 2000ms × 10 ≈ 20s). */
+  appReadyPollMs?: number;
+  appReadyPollTries?: number;
 };
 
 export type GrindSpeakRoundResult =
@@ -123,6 +128,26 @@ export function partsAppHistoryReady(value: unknown): boolean {
     const submitted = rec.submitted === true || rec.submitted === 1;
     return rec.reportStatus === "completed" && submitted;
   });
+}
+
+export type AppReadiness = "ready" | "submitted_not_ready" | "not_submitted";
+
+/**
+ * ready: every part completed+submitted (App shows a number).
+ * submitted_not_ready: all parts submitted but some reportStatus≠completed (已交但 App 未就绪).
+ * not_submitted: at least one part not submitted (未交).
+ */
+export function classifyAppReadiness(value: unknown): AppReadiness {
+  if (partsAppHistoryReady(value)) return "ready";
+  const root = (value ?? {}) as Record<string, unknown>;
+  const list = Array.isArray(root.partList) ? root.partList : [];
+  const allSubmitted =
+    list.length > 0 &&
+    list.every((raw) => {
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return r.submitted === true || r.submitted === 1;
+    });
+  return allSubmitted ? "submitted_not_ready" : "not_submitted";
 }
 
 /** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE. */
@@ -232,10 +257,31 @@ export async function completeOneSpeak(
     return { ok: false, taskId, detail: "part/get returned no parts" };
   }
 
-  const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
-
   const leaves = walkPaperLeaves(paper);
   const byId = new Map(leaves.map((l) => [l.instanceId, l]));
+
+  // Paper instance ids must exactly match the union of part questionInstanceIds.
+  const partIds = parts.flatMap((p) => p.questionInstanceIds);
+  const partSet = new Set(partIds);
+  const missingInPaper = partIds.filter((id) => !byId.has(id));
+  const missingInParts = leaves
+    .map((l) => l.instanceId)
+    .filter((id) => !partSet.has(id));
+  if (
+    missingInPaper.length > 0 ||
+    missingInParts.length > 0 ||
+    partSet.size !== partIds.length
+  ) {
+    return {
+      ok: false,
+      taskId,
+      detail:
+        `instance id mismatch paper vs part/get: notInPaper=[${missingInPaper.join(",")}] ` +
+        `notInParts=[${missingInParts.join(",")}] dupInParts=${partIds.length - partSet.size}`,
+    };
+  }
+
+  const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
   const answers = new Map<string, string>();
   try {
     for (const leaf of leaves) {
@@ -252,17 +298,20 @@ export async function completeOneSpeak(
     };
   }
 
+  const doneParts: string[] = [];
+  const doneSuffix = () =>
+    doneParts.length ? ` (已交 part: ${doneParts.join("、")})` : " (未交任何 part)";
   for (const part of parts) {
-    const partLeaves = part.questionInstanceIds
-      .map((id) => byId.get(id))
-      .filter((l): l is GrindLeaf => l != null);
-    if (partLeaves.length === 0) continue;
+    const partLeaves = part.questionInstanceIds.map((id) => byId.get(id)!);
+    if (partLeaves.length === 0) {
+      return { ok: false, taskId, detail: `part ${part.partName || part.partId} 无题目实例${doneSuffix()}` };
+    }
     const finalized = finalizeUserData(
       partLeaves,
       partLeaves.map((l) => answers.get(l.instanceId)!),
     );
     if (!finalized.ok) {
-      return { ok: false, taskId, detail: finalized.detail };
+      return { ok: false, taskId, detail: `${finalized.detail}${doneSuffix()}` };
     }
     const userDataSnap = finalized.userData.map((u) => ({
       instanceId: u.instanceId,
@@ -285,7 +334,7 @@ export async function completeOneSpeak(
       return {
         ok: false,
         taskId,
-        detail: `part/submit snapshot ${part.partName || part.partId}: ${snap.code} ${snap.message}`,
+        detail: `part/submit snapshot ${part.partName || part.partId}: ${snap.code} ${snap.message}${doneSuffix()}`,
       };
     }
     const sub = await partSubmit(ports, {
@@ -305,22 +354,39 @@ export async function completeOneSpeak(
       return {
         ok: false,
         taskId,
-        detail: `part/submit submit ${part.partName || part.partId}: ${sub.code} ${sub.message}`,
+        detail: `part/submit submit ${part.partName || part.partId}: ${sub.code} ${sub.message}${doneSuffix()}`,
       };
     }
+    doneParts.push(part.partName || part.partId);
   }
 
-  const after = (await adaptiveGet(
-    ports,
-    `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
-    jwt,
-  )) as Record<string, unknown>;
-  if (!partsAppHistoryReady(after?.value ?? after)) {
+  const sleep =
+    ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const pollMs = ports.appReadyPollMs ?? 2000;
+  const tries = Math.max(1, ports.appReadyPollTries ?? 10);
+  let readiness: AppReadiness = "not_submitted";
+  for (let i = 0; i < tries; i++) {
+    if (i > 0) await sleep(pollMs);
+    const after = (await adaptiveGet(
+      ports,
+      `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+      jwt,
+    )) as Record<string, unknown>;
+    readiness = classifyAppReadiness(after?.value ?? after);
+    if (readiness === "ready") break;
+  }
+  if (readiness === "submitted_not_ready") {
     return {
       ok: false,
       taskId,
-      detail:
-        "part/submit succeeded but part/get still missing reportStatus=completed (App would stay 评分中)",
+      detail: `已交但 App 未就绪：part/submit 全部成功，但 part/get 轮询后 reportStatus 仍非 completed（App 仍会显示评分中）${doneSuffix()}`,
+    };
+  }
+  if (readiness === "not_submitted") {
+    return {
+      ok: false,
+      taskId,
+      detail: `未交：part/submit 返回成功，但 part/get 仍有 part submitted≠true${doneSuffix()}`,
     };
   }
 
@@ -344,6 +410,7 @@ export async function grindSpeakGaps(
   try {
     return await grindSpeakLoop(ports, need, maxRounds, taskIds);
   } catch (error) {
+    // Keep already-submitted tasks in the count even if a later call throws.
     const err = toError(error);
     const errorClass = classifyError(err);
     return {
