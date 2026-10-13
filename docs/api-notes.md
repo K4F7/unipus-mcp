@@ -492,7 +492,9 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 - `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；LLM 调用失败（HTTP 错误 / 超时 / JSON 解析失败）会重试，共 3 次，仍失败就抛错，**该卷不交**。单题字母无效时用启发式补上，计入 summary 的 `warnings`。
 - 关闭模式（无 key 或 `UNIPUS_LLM_SOLVER=off`）是明确的旧行为：单选走加粗/字面启发式，填空留空，开跑时打印警告并写入 summary 的 `warnings`。
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
-- 口语评「评分中」根因：直交的 `EN_SENT_SCORE` 不带 `recordDetail` / `specific_scores`。现在每条录音先 Clio `en.sent.score` 打分再上传，写入有限分数；自由表达用 `EN_PRED_SCORE`。
+- 口语 App「历史训练」一直「评分中」有两层根因（#61）：
+  1. 答体缺 `recordDetail` / `specific_scores`（#59/#60 已修：Clio 先打分再写 EN_SENT/EN_PRED）。
+  2. **交卷走 `submitAnswer` 而不是 `part/submit`**：`trainingScoreReport` 可以有分，但 `part/get` 各 part 的 `reportStatus`/`submitted` 仍为 null → App 历史页显示「评分中」。grind-speak 必须按 partList 逐 part `snapshot`→`submit`；验收以 `part/get` `reportStatus=completed` + `submitted=true` 为准（Sein：只有 App 历史训练出数字分才算）。
 - Clio 实际 `finalResult` 字段是 `total` / `fluency.overall` / `completeness` / `accuracy`（没有 `overall` / `integrity` / `pronunciation`），`mapClioResultToReviewScores` 以此为回退，否则分数全丢。
 - 听力 `单词跟读`（视频卷每个单词一个子项）、`视频配音` 同样写有声打分记录。`音频学习` / `视频学习` / `定位精听` / `口语_音频学习` 目前仍为 0 分（答体未知）。
 - Edge TTS 在 box 网络 403，周刷实际一直走 flite；flite 音频 Clio 单条 88–99 分，不是低分原因。

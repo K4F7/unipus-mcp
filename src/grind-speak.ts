@@ -1,6 +1,12 @@
 /**
- * Headless speak weekly grind: silent TTS → Clio score → upload → scored EN_SENT/EN_PRED children → submitAnswer.
- * No speakers/afplay; no /oral/train; no part/submit.
+ * Headless speak weekly grind: silent TTS → Clio score → upload → scored
+ * EN_SENT/EN_PRED children → part/submit (snapshot→submit) per part.
+ *
+ * App 「U口语 → 历史训练」 only leaves 「评分中」 when part/get has
+ * reportStatus=completed + submitted=true. submitAnswer alone fills
+ * trainingScoreReport but leaves those fields null → App stays 评分中 (#61).
+ *
+ * No speakers/afplay; no /oral/train.
  */
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
@@ -13,8 +19,8 @@ import {
   type GrindLeaf,
 } from "./grind-paper.js";
 import { summarizeHttpErrorBody } from "./http.js";
+import { partSubmit } from "./part-submit.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
-import { submitAnswer } from "./submit-answer.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 import {
   buildVoicedAnswer,
@@ -33,6 +39,12 @@ export type GrindSpeakPorts = AuthPorts & {
 export type GrindSpeakRoundResult =
   | { ok: true; taskId: string }
   | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
+
+type SpeakPart = {
+  partId: string;
+  partName: string;
+  questionInstanceIds: string[];
+};
 
 async function adaptiveGet(
   ports: GrindSpeakPorts,
@@ -76,16 +88,63 @@ async function adaptivePost(
   }
 }
 
-/** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE (docs/api-notes.md). */
-async function buildAiOrFree(leaf: GrindLeaf, speech: SpeechRecordBuilder): Promise<string> {
+function parsePartList(value: unknown): SpeakPart[] {
+  const root =
+    value != null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const list = Array.isArray(root.partList) ? root.partList : [];
+  const out: SpeakPart[] = [];
+  for (const raw of list) {
+    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const rec = raw as Record<string, unknown>;
+    if (rec.partId == null) continue;
+    const ids = Array.isArray(rec.questionInstanceIds)
+      ? rec.questionInstanceIds.map((id) => String(id))
+      : [];
+    out.push({
+      partId: String(rec.partId),
+      partName: typeof rec.partName === "string" ? rec.partName : "",
+      questionInstanceIds: ids,
+    });
+  }
+  return out;
+}
+
+/** True when every part is App-history ready (not 「评分中」). */
+export function partsAppHistoryReady(value: unknown): boolean {
+  const parts = parsePartList(value);
+  if (parts.length === 0) return false;
+  const root = value as Record<string, unknown>;
+  const list = Array.isArray(root.partList) ? root.partList : [];
+  return list.every((raw) => {
+    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const rec = raw as Record<string, unknown>;
+    const submitted = rec.submitted === true || rec.submitted === 1;
+    return rec.reportStatus === "completed" && submitted;
+  });
+}
+
+/** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE. */
+async function buildAiOrFree(
+  leaf: GrindLeaf,
+  speech: SpeechRecordBuilder,
+): Promise<string> {
   const type = `${leaf.template} ${leaf.type}`.includes("oral-personal-state")
     ? "EN_PRED_SCORE"
     : "EN_SENT_SCORE";
-  const record = await speech(DEFAULT_AI_SPEAK_SCRIPT, `speak-${leaf.instanceId}-main`, type);
+  const record = await speech(
+    DEFAULT_AI_SPEAK_SCRIPT,
+    `speak-${leaf.instanceId}-main`,
+    type,
+  );
   return JSON.stringify({ value: [], children: [voicedChild(record)] });
 }
 
-async function buildLeafAnswer(leaf: GrindLeaf, speech: SpeechRecordBuilder): Promise<string> {
+async function buildLeafAnswer(
+  leaf: GrindLeaf,
+  speech: SpeechRecordBuilder,
+): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   if (
     t.includes("audio-learn") ||
@@ -107,7 +166,7 @@ async function buildLeafAnswer(leaf: GrindLeaf, speech: SpeechRecordBuilder): Pr
   return buildAiOrFree(leaf, speech);
 }
 
-/** Complete one speak train paper. */
+/** Complete one speak train paper via part/submit (App 历史训练 path). */
 export async function completeOneSpeak(
   ports: GrindSpeakPorts,
 ): Promise<GrindSpeakRoundResult> {
@@ -153,46 +212,118 @@ export async function completeOneSpeak(
       detail: `loadPaper failed: ${JSON.stringify(loadRes).slice(0, 300)}`,
     };
   }
-  const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<string, unknown>;
+  const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<
+    string,
+    unknown
+  >;
   const paperToken = String(data.token || "");
   const paper = extractParsedPaperJson(data);
   if (!paperToken || paper == null) {
     return { ok: false, taskId, detail: "missing token/paper" };
   }
 
+  const partBody = (await adaptiveGet(
+    ports,
+    `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+    jwt,
+  )) as Record<string, unknown>;
+  const parts = parsePartList(partBody?.value ?? partBody);
+  if (parts.length === 0) {
+    return { ok: false, taskId, detail: "part/get returned no parts" };
+  }
+
   const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
 
   const leaves = walkPaperLeaves(paper);
-  const answers: string[] = [];
+  const byId = new Map(leaves.map((l) => [l.instanceId, l]));
+  const answers = new Map<string, string>();
   try {
     for (const leaf of leaves) {
-      answers.push(await buildLeafAnswer(leaf, speech));
+      answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech));
     }
   } catch (error) {
     const err = toError(error);
     const errorClass = classifyError(err);
-    return { ok: false, taskId, detail: `tts/upload ${errorClass}: ${err.message}`, errorClass };
-  }
-  const finalized = finalizeUserData(leaves, answers);
-  if (!finalized.ok) {
-    return { ok: false, taskId, detail: finalized.detail };
-  }
-
-  const sub = await submitAnswer(ports, {
-    taskId,
-    paperToken,
-    ansVersion,
-    durationSec: 600,
-    userData: finalized.userData,
-    wrapAudioUrl: false,
-  });
-  if (sub.isError) {
     return {
       ok: false,
       taskId,
-      detail: `submit error: ${sub.code} ${sub.message}`,
+      detail: `tts/upload ${errorClass}: ${err.message}`,
+      errorClass,
     };
   }
+
+  for (const part of parts) {
+    const partLeaves = part.questionInstanceIds
+      .map((id) => byId.get(id))
+      .filter((l): l is GrindLeaf => l != null);
+    if (partLeaves.length === 0) continue;
+    const finalized = finalizeUserData(
+      partLeaves,
+      partLeaves.map((l) => answers.get(l.instanceId)!),
+    );
+    if (!finalized.ok) {
+      return { ok: false, taskId, detail: finalized.detail };
+    }
+    const userDataSnap = finalized.userData.map((u) => ({
+      instanceId: u.instanceId,
+      answer: u.answer,
+      answerVersion: u.answerVersion,
+      context: { state: "doing" as const },
+      contextVersion: 1,
+    }));
+    const snap = await partSubmit(ports, {
+      action: "snapshot",
+      taskId,
+      partId: part.partId,
+      token: paperToken,
+      ansVersion,
+      duration: 30,
+      userData: userDataSnap,
+      cloudHeaders: true,
+    });
+    if (snap.isError) {
+      return {
+        ok: false,
+        taskId,
+        detail: `part/submit snapshot ${part.partName || part.partId}: ${snap.code} ${snap.message}`,
+      };
+    }
+    const sub = await partSubmit(ports, {
+      action: "submit",
+      taskId,
+      partId: part.partId,
+      token: paperToken,
+      ansVersion,
+      duration: 600,
+      userData: userDataSnap.map((u) => ({
+        ...u,
+        context: { state: "done" as const },
+      })),
+      cloudHeaders: true,
+    });
+    if (sub.isError) {
+      return {
+        ok: false,
+        taskId,
+        detail: `part/submit submit ${part.partName || part.partId}: ${sub.code} ${sub.message}`,
+      };
+    }
+  }
+
+  const after = (await adaptiveGet(
+    ports,
+    `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+    jwt,
+  )) as Record<string, unknown>;
+  if (!partsAppHistoryReady(after?.value ?? after)) {
+    return {
+      ok: false,
+      taskId,
+      detail:
+        "part/submit succeeded but part/get still missing reportStatus=completed (App would stay 评分中)",
+    };
+  }
+
   return { ok: true, taskId };
 }
 
@@ -213,7 +344,6 @@ export async function grindSpeakGaps(
   try {
     return await grindSpeakLoop(ports, need, maxRounds, taskIds);
   } catch (error) {
-    // Keep already-submitted tasks in the count even if a later call throws.
     const err = toError(error);
     const errorClass = classifyError(err);
     return {
