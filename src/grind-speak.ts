@@ -438,8 +438,8 @@ export async function completeOneSpeak(
   const sleep =
     ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   // Each paper waits ~20s here (default 2000ms × 10) for App history scoreIsOut.
-  const pollMs = ports.appReadyPollMs ?? 2000;
-  const tries = Math.max(1, ports.appReadyPollTries ?? 10);
+  const pollMs = ports.appReadyPollMs ?? 3000;
+  const tries = Math.max(1, ports.appReadyPollTries ?? 20);
   const requireCheck = ports.requireCheckStatusOut !== false;
   const historyPorts = {
     credentials: ports.credentials,
