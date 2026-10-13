@@ -302,6 +302,7 @@ export async function completeOneSpeak(
   const doneSuffix = () =>
     doneParts.length ? ` (已交 part: ${doneParts.join("、")})` : " (未交任何 part)";
   for (const part of parts) {
+    // questionInstanceIds already validated against paper leaves above; get is safe.
     const partLeaves = part.questionInstanceIds.map((id) => byId.get(id)!);
     if (partLeaves.length === 0) {
       return { ok: false, taskId, detail: `part ${part.partName || part.partId} 无题目实例${doneSuffix()}` };
@@ -362,6 +363,7 @@ export async function completeOneSpeak(
 
   const sleep =
     ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  // Each paper waits ~20s here (default 2000ms × 10) for part/get App readiness.
   const pollMs = ports.appReadyPollMs ?? 2000;
   const tries = Math.max(1, ports.appReadyPollTries ?? 10);
   let readiness: AppReadiness = "not_submitted";

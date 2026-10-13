@@ -276,6 +276,19 @@ const run = (http: ReturnType<typeof mockHttp>, speechRecord = okSpeech) =>
 const submitCalls = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("part/submit"));
 
 describe("completeOneSpeak review (#62)", () => {
+  test("partSubmit isError → fail with part/submit detail, no further parts", async () => {
+    const http = scenario({ submit: () => ({ code: 200, msg: "业务错误" }) });
+    const r = await run(http);
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.detail, /part\/submit snapshot/);
+      assert.match(r.detail, /BUSINESS_ERROR|业务错误|200/);
+      assert.match(r.detail, /未交任何 part/);
+    }
+    // snapshot fails on first part → only one part/submit call
+    assert.equal(submitCalls(http).length, 1);
+  });
+
   test("snapshot 4113 → fail and stop", async () => {
     const http = scenario({ submit: () => ({ code: 4113, msg: "提交作答失败" }) });
     const r = await run(http);
