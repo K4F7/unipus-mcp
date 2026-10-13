@@ -10,6 +10,7 @@ import {
   parseBusinessBody,
   ulsAuthedJsonRequest,
   ulsCloudHeaders,
+  openIdFromJwt,
 } from "./uls-business.js";
 
 /**
@@ -185,9 +186,9 @@ export async function partSubmit(
           authorization: jwt,
           "content-type": "application/json",
         };
-        const openId = input.openId?.trim();
+        const openId = input.openId?.trim() || openIdFromJwt(jwt);
         if (openId != null && openId.length > 0) {
-          headers.openId = openId;
+          headers.openid = openId;
         }
         return headers;
       }
