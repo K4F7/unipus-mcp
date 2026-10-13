@@ -11,6 +11,7 @@ const CLIO = "https://clio-audios.unipus.cn/a.mp3";
 function deps(over: Partial<ScoredSpeechDeps> & { cleaned?: string[] } = {}): ScoredSpeechDeps {
   const cleaned = over.cleaned ?? [];
   return {
+    convertToMp3: async (w: string) => w,
     synthesize: async () => ({ wavPath: "/tmp/x.wav", cleanup: async () => void cleaned.push("x") }),
     score: async () => ({
       overall: 94, total: 94, audioUrl: CLIO, raw: {},

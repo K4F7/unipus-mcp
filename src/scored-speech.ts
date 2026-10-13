@@ -8,6 +8,10 @@ import { buildEnSentScoreRecord } from "./grade-question.js";
 import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
 import { synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+import { mkdtemp, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 export type SpeechRecordType = "EN_SENT_SCORE" | "EN_SENT_REC" | "EN_PRED_SCORE";
 
@@ -31,6 +35,8 @@ export type ScoredSpeechDeps = {
   synthesize?: typeof synthesizeSpeechWav;
   score?: typeof scoreEnSent;
   upload?: typeof uploadAnswerAudio;
+  /** Convert scored wav → mp3 path for birdflock (App SOE uploads mp3). Default ffmpeg. */
+  convertToMp3?: (wavPath: string) => Promise<string>;
   retryDelayMs?: number;
 };
 
@@ -42,17 +48,28 @@ export function createScoredSpeechRecordBuilder(
   const synthesize = deps.synthesize ?? synthesizeSpeechWav;
   const score = deps.score ?? scoreEnSent;
   const upload = deps.upload ?? uploadAnswerAudio;
+  const convertToMp3 = deps.convertToMp3 ?? ((w) => wavToMp3(w, ports.env));
   const once: SpeechRecordBuilder = async (text, tag, type) => {
     const spoken = await synthesize({ text }, { env: ports.env });
     try {
       const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: 45_000 }, { env: ports.env });
       const reviewScores = mapClioResultToReviewScores(scored.result);
       if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
-      const up = await upload(ports, { filePath: spoken.wavPath, fileName: `${tag}.wav` });
-      if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
-        throw new Error(`upload fail: ${up.message || up.code}`);
+      // App 2.8.7 uploads mp3 (SOE/Clio path); wav CDN URLs leave 范例学习 processing.
+      const mp3Path = await convertToMp3(spoken.wavPath);
+      let url: string;
+      try {
+        const up = await upload(ports, {
+          filePath: mp3Path,
+          fileName: `${tag}.mp3`,
+        });
+        if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
+          throw new Error(`upload fail: ${up.message || up.code}`);
+        }
+        url = String(up.cdn_url);
+      } finally {
+        if (mp3Path !== spoken.wavPath) await unlink(mp3Path).catch(() => {});
       }
-      const url = String(up.cdn_url);
       const record = buildEnSentScoreRecord({
         text,
         url,
@@ -123,4 +140,29 @@ export async function buildVocabAnswer(leaf: GrindLeaf, speech: SpeechRecordBuil
     children.push(voicedChild(await speech(word, `vocab-${leaf.instanceId}-${i}`, "EN_SENT_SCORE")));
   }
   return JSON.stringify({ value: [], children });
+}
+
+
+/** Convert 16k wav → mp3 for birdflock upload (matches App SOE path). */
+async function wavToMp3(wavPath: string, env?: NodeJS.ProcessEnv): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "unipus-mp3-"));
+  const out = join(dir, "speech.mp3");
+  const ffmpeg = env?.UNIPUS_FFMPEG?.trim() || "ffmpeg";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      ffmpeg,
+      ["-y", "-i", wavPath, "-codec:a", "libmp3lame", "-q:a", "4", out],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let err = "";
+    child.stderr?.on("data", (c) => {
+      err += String(c);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg mp3: ${err.slice(-400) || code}`));
+    });
+  });
+  return out;
 }
