@@ -41,6 +41,9 @@ import {
   runAiDialogFlow,
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
+import { generateFreeTalk, leafTaskText } from "./speak-content.js";
+
+let speechEnv: NodeJS.ProcessEnv | undefined;
 
 /** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
 function resolveAdaptivePartSubmitUrl(env?: NodeJS.ProcessEnv): string {
@@ -54,6 +57,8 @@ function resolveUcloudPartSubmitUrl(env?: NodeJS.ProcessEnv): string {
 }
 
 export type GrindSpeakPorts = AuthPorts & {
+  /** Minimum App history score counted as success (default 80). */
+  minAppScore?: number;
   env?: NodeJS.ProcessEnv;
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
@@ -75,7 +80,7 @@ export type GrindSpeakPorts = AuthPorts & {
 };
 
 export type GrindSpeakRoundResult =
-  | { ok: true; taskId: string }
+  | { ok: true; taskId: string; appScore?: number }
   | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
 
 type SpeakPart = {
@@ -191,8 +196,13 @@ async function buildAiOrFree(
   const type = `${leaf.template} ${leaf.type}`.includes("oral-personal-state")
     ? "EN_PRED_SCORE"
     : "EN_SENT_SCORE";
+  // #63: free talk must address the task points (server grades appropriateness).
+  const text =
+    type === "EN_PRED_SCORE"
+      ? await generateFreeTalk(leafTaskText(leaf), { env: speechEnv })
+      : DEFAULT_AI_SPEAK_SCRIPT;
   const record = await speech(
-    DEFAULT_AI_SPEAK_SCRIPT,
+    text,
     `speak-${leaf.instanceId}-main`,
     type,
   );
@@ -319,6 +329,7 @@ export async function completeOneSpeak(
     };
   }
 
+  speechEnv = ports.env;
   const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
   const answers = new Map<string, string>();
   try {
@@ -361,6 +372,7 @@ export async function completeOneSpeak(
         partId: part.partId,
         ansVersion,
         openId,
+        taskText: leafTaskText(byId.get(qi)!),
       });
       if (flow.isError || flow.answer == null) {
         return {
@@ -441,6 +453,8 @@ export async function completeOneSpeak(
   const pollMs = ports.appReadyPollMs ?? 3000;
   const tries = Math.max(1, ports.appReadyPollTries ?? 20);
   const requireCheck = ports.requireCheckStatusOut !== false;
+  // #63: App 显示分 <80 视为失败（UNIPUS_SPEAK_MIN_SCORE 可调，0 关闭）。
+  const minAppScore = ports.minAppScore ?? Number(ports.env?.UNIPUS_SPEAK_MIN_SCORE ?? 80);
   const historyPorts = {
     credentials: ports.credentials,
     http: ports.http,
@@ -484,7 +498,15 @@ export async function completeOneSpeak(
         continue;
       }
     }
-    return { ok: true, taskId };
+    const appScore = task.score ?? 0;
+    if (appScore < minAppScore) {
+      return {
+        ok: false,
+        taskId,
+        detail: `App 历史已出分但 score=${appScore} < ${minAppScore}（scoreIsOut=true）${doneSuffix()}`,
+      };
+    }
+    return { ok: true, taskId, appScore };
   }
 
   return {
@@ -497,6 +519,8 @@ export async function completeOneSpeak(
 export type GrindSpeakGapsResult = {
   completed: number;
   taskIds: string[];
+  /** App 历史显示分，与 taskIds 对齐 (#63). */
+  appScores?: number[];
   stoppedReason?: string;
   errorClass?: ErrorClass;
 };
@@ -529,10 +553,11 @@ async function grindSpeakLoop(
   maxRounds: number,
   taskIds: string[],
 ): Promise<GrindSpeakGapsResult> {
+  const appScores: number[] = [];
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
     const jwt = await ports.credentials.getJwt();
     if (!jwt) {
-      return { completed: taskIds.length, taskIds, stoppedReason: "no jwt" };
+      return { completed: taskIds.length, taskIds, appScores, stoppedReason: "no jwt" };
     }
     const beforeBody = (await adaptiveGet(
       ports,
@@ -547,13 +572,14 @@ async function grindSpeakLoop(
     const result = await completeOneSpeak(ports);
     if (!result.ok) {
       return {
-        completed: taskIds.length,
+        completed: taskIds.length, appScores,
         taskIds,
         stoppedReason: result.detail,
         errorClass: result.errorClass,
       };
     }
     taskIds.push(result.taskId);
+    appScores.push(result.appScore ?? 0);
 
     const afterBody = (await adaptiveGet(
       ports,
@@ -570,11 +596,11 @@ async function grindSpeakLoop(
       after?.status === beforeStatus
     ) {
       return {
-        completed: taskIds.length,
+        completed: taskIds.length, appScores,
         taskIds,
         stoppedReason: "same taskId+status after submit",
       };
     }
   }
-  return { completed: taskIds.length, taskIds };
+  return { completed: taskIds.length, taskIds, appScores };
 }

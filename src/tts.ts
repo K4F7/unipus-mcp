@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,9 +61,13 @@ export async function synthesizeSpeechWav(
   const dir = await mkdtemp(join(tmpdir(), "unipus-tts-"));
   const wavPath = input.outPath?.trim() || join(dir, "speech-16k.wav");
 
+  // node-edge-tts lacks Sec-MS-GEC → 403; prefer the maintained edge-tts CLI when present.
+  const cli = ports.synthesizeMp3 ? null : resolveEdgeTtsCli(ports.env);
   const synthesize =
     ports.synthesizeMp3 ??
-    ((t: string, v: string, out: string) => edgeSynthesizeMp3(t, v, out));
+    (cli
+      ? (t: string, v: string, out: string) => edgeCliSynthesizeMp3(cli, t, v, out)
+      : (t: string, v: string, out: string) => edgeSynthesizeMp3(t, v, out));
 
   const ffmpeg = ports.ffmpegPath ?? "ffmpeg";
   const fallback =
@@ -69,7 +75,7 @@ export async function synthesizeSpeechWav(
   const engine = resolveTtsEngine(ports.env);
 
   try {
-    if (engine === "flite" || (engine === "auto" && edgeForbidden)) {
+    if (engine === "flite" || (engine === "auto" && edgeForbidden && !cli)) {
       await fallback(text, wavPath);
     } else {
       try {
@@ -219,4 +225,35 @@ function runFlite(ffmpegPath: string, text: string, wavPath: string): Promise<vo
     "-y", "-f", "lavfi", "-i", `flite=text='${safe}':voice=slt`,
     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wavPath,
   ], "flite 合成失败");
+}
+
+
+/** Path to python `edge-tts` CLI (UNIPUS_EDGE_TTS_BIN, ~/.local/bin, PATH), or null. */
+export function resolveEdgeTtsCli(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.UNIPUS_EDGE_TTS_BIN === "off") return null;
+  const cands = [
+    env.UNIPUS_EDGE_TTS_BIN?.trim(),
+    join(homedir(), ".local", "bin", "edge-tts"),
+    "/usr/local/bin/edge-tts",
+    "/usr/bin/edge-tts",
+  ].filter((x): x is string => !!x);
+  for (const c of cands) if (existsSync(c)) return c;
+  return null;
+}
+
+function edgeCliSynthesizeMp3(bin: string, text: string, voice: string, out: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, ["--voice", voice, "--text", text, "--write-media", out], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let err = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.stderr.on("data", (c: Buffer) => (err += c.toString("utf8")));
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`edge-tts CLI 失败 (code=${code}): ${err.slice(-300)}`));
+    });
+  });
 }

@@ -16,6 +16,7 @@ import {
 } from "./conversation.js";
 import { ebcpAuth, ebcpSpeakers, type EbcpPorts } from "./ebcp.js";
 import { DEFAULT_AI_SPEAK_SCRIPT } from "./grind-paper.js";
+import { generateDialogReply } from "./speak-content.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { synthesizeSpeechWav, type SynthesizeSpeechPorts } from "./tts.js";
 import {
@@ -161,6 +162,8 @@ export type AiDialogFlowInput = {
   userTurns?: number;
   openId?: string;
   role?: string;
+  /** Task prompt (stripped) so user turns answer on-topic (#63). */
+  taskText?: string;
 };
 
 export type AiDialogTurn = {
@@ -375,8 +378,11 @@ export async function runAiDialogFlow(
   try {
     const opener = (await ws.nextReply()).text || DEFAULT_BOT_OPENERS[0]!;
     await saveTurn("bot", opener, await ttsUpload(ports, opener, `${Date.now()}-b0`, openId));
+    let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
-      const userText = userScripts[i]!;
+      const userText = input.taskText
+        ? await generateDialogReply(input.taskText, lastBot, i, { env: ports.env })
+        : userScripts[i]!;
       const spoken = await synthesizeSpeechWav({ text: userText }, ports);
       let reply: DialogReply;
       let media: { url: string; dur: number };
@@ -398,6 +404,7 @@ export async function runAiDialogFlow(
       }
       await saveTurn("cos", reply.asr || userText, media);
       const botText = reply.text || DEFAULT_BOT_OPENERS[(i + 1) % DEFAULT_BOT_OPENERS.length]!;
+      lastBot = botText;
       await saveTurn("bot", botText, await ttsUpload(ports, botText, `${Date.now()}-b${i + 1}`, openId));
     }
   } catch (error) {
