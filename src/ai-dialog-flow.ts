@@ -251,6 +251,28 @@ async function ttsUploadOnce(
   }
 }
 
+/** chat/info records with audio+text → turns (skips empty WS bot placeholders). */
+export function existingTurnsFromChatInfo(data: unknown): AiDialogTurn[] {
+  const rec = (data as { record?: { list?: unknown } } | null)?.record;
+  const list = Array.isArray(rec?.list) ? (rec!.list as Record<string, unknown>[]) : [];
+  const out: AiDialogTurn[] = [];
+  for (const r of list) {
+    const type = r?.type === "bot" ? "bot" : r?.type === "cos" ? "cos" : null;
+    const url = typeof r?.audioUrl === "string" ? r.audioUrl : "";
+    const text = typeof r?.text === "string" ? r.text.trim() : "";
+    if (type == null || !url || !text) continue;
+    out.push({
+      type,
+      text,
+      url,
+      audioDuration: typeof r.audioDuration === "number" && r.audioDuration > 0 ? r.audioDuration : 3,
+      id: String(r.id ?? randomUUID()),
+      curTime: typeof r.curTime === "string" ? r.curTime.slice(0, 16) : nowCurTime(),
+    });
+  }
+  return out;
+}
+
 /** Build part/submit answer JSON matching App loadAnswer shape for AI口语对话. */
 export function buildAiDialogAnswer(turns: AiDialogTurn[]): string {
   const list = turns.map((t) => ({
@@ -294,7 +316,7 @@ export async function runAiDialogFlow(
     input.ansVersion != null && Number.isFinite(input.ansVersion)
       ? Number(input.ansVersion)
       : 1;
-  const userTurns = Math.max(1, Math.min(10, input.userTurns ?? 4));
+  let userTurns = Math.max(1, Math.min(10, input.userTurns ?? 4));
   const role = (input.role ?? "B").trim() || "B";
 
   const bizExt = {
@@ -332,13 +354,20 @@ export async function runAiDialogFlow(
   const cid = created.conversation_id;
 
   // App order: create → chat/info → ebcp/speakers → WS → save. Best-effort.
-  await conversationChatInfo(ports, { conversationId: cid, openId });
+  const info = (await conversationChatInfo(ports, { conversationId: cid, openId })) as { data?: unknown };
+  // create returns the same conversation per task; turns accumulate across attempts (#74).
+  const prior = existingTurnsFromChatInfo(info?.data);
+  const priorUser = prior.filter((t) => t.type === "cos").length;
+  const reusePrior = priorUser >= 2;
   await ebcpSpeakers(ports, { scene: "ai-cosplay", bizExt, openId });
 
+  if (!reusePrior && priorUser > 0) {
+    userTurns = Math.max(1, Math.min(userTurns, 10 - priorUser));
+  }
   const userScripts = splitUserScripts(userTurns);
-  const turns: AiDialogTurn[] = [];
+  const turns: AiDialogTurn[] = reusePrior ? [...prior] : [];
   const cur = nowCurTime();
-  let duration = 0;
+  let duration = reusePrior ? prior.reduce((a, t) => a + t.audioDuration, 0) : 0;
   let sort = 0;
 
   const saveTurn = async (
@@ -381,6 +410,9 @@ export async function runAiDialogFlow(
     });
   };
 
+  if (reusePrior) {
+    console.error(`[ai-dialog] 复用已有会话记录 user=${priorUser} total=${prior.length}（话轮累计上限，#74）`);
+  } else {
   const sockArgs = {
     conversationId: cid,
     sceneId: String(created.scene_id ?? ""),
@@ -445,6 +477,7 @@ export async function runAiDialogFlow(
     return toolError("TTS_ERROR", `AI对话 WS/TTS/上传失败：${detail}`);
   } finally {
     ws.close();
+  }
   }
 
   const stop = await conversationStop(ports, {
