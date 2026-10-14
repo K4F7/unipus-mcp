@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 /**
  * Headless voiced answer: TTS → Clio en.sent.score → Qiniu upload → EN_SENT_SCORE /
  * EN_PRED_SCORE record carrying recordDetail + specific_scores (what the app writes
@@ -41,6 +42,15 @@ export type ScoredSpeechDeps = {
 };
 
 /** Clio failure is fatal: an unscored record would land as 「评分中」 again. */
+/** Clio can be slow (≈real time or worse); scale with audio length (#78). */
+export function clioTimeoutMs(wavPath: string, env?: NodeJS.ProcessEnv, sizeOf: (p: string) => number = (p) => statSync(p).size): number {
+  const o = Number(env?.UNIPUS_CLIO_TIMEOUT_MS);
+  if (Number.isFinite(o) && o >= 5000) return o;
+  let sec = 30;
+  try { sec = Math.max(1, (sizeOf(wavPath) - 44) / 32000); } catch {}
+  return Math.max(120_000, Math.round(60_000 + 4_000 * sec));
+}
+
 export function createScoredSpeechRecordBuilder(
   ports: UploadAnswerAudioPorts,
   deps: ScoredSpeechDeps = {},
@@ -52,7 +62,7 @@ export function createScoredSpeechRecordBuilder(
   const once: SpeechRecordBuilder = async (text, tag, type) => {
     const spoken = await synthesize({ text }, { env: ports.env });
     try {
-      const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: 45_000 }, { env: ports.env });
+      const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: clioTimeoutMs(spoken.wavPath, ports.env) }, { env: ports.env });
       const reviewScores = mapClioResultToReviewScores(scored.result);
       if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
       // App 2.8.7 uploads mp3 (SOE/Clio path); wav CDN URLs leave 范例学习 processing.
