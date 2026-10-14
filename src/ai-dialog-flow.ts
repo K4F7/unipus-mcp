@@ -437,6 +437,15 @@ export async function runAiDialogFlow(
         ws.close();
         await new Promise((r) => setTimeout(r, 2000));
         ws = openSock();
+        if (wav != null) {
+          // A reopened socket greets first ("welcome back."); drop it so replies stay aligned (#76).
+          try {
+            const g = await ws.nextReply();
+            console.error(`[oral-ws] ${label} reconnect greeting dropped: ${g.text.slice(0, 40)}`);
+          } catch (ge) {
+            console.error(`[oral-ws] ${label} reconnect greeting missing: ${ge instanceof Error ? ge.message : String(ge)}`);
+          }
+        }
       }
     }
   };
