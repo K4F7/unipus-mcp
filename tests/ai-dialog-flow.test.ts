@@ -62,3 +62,17 @@ test("oral WS retry classification + timeout env (#72)", async () => {
   assert.equal(resolveOralWsTimeoutMs({ UNIPUS_ORAL_WS_TIMEOUT_MS: "90000" }), 90_000);
   assert.equal(resolveOralWsTimeoutMs({ UNIPUS_ORAL_WS_TIMEOUT_MS: "1" }), 60_000);
 });
+
+test("existingTurnsFromChatInfo keeps audio+text records (#74)", async () => {
+  const { existingTurnsFromChatInfo } = await import("../src/ai-dialog-flow.js");
+  const t = existingTurnsFromChatInfo({ record: { list: [
+    { type: "cos", text: "Hi there", audioUrl: "https://x/u.wav", audioDuration: 18, id: 1, curTime: "2026-10-14 17:34:02" },
+    { type: "bot", text: "", audioUrl: null, id: 2 },
+    { type: "bot", text: "Nice.", audioUrl: "https://x/b.wav", audioDuration: 8, id: 3, curTime: "2026-10-14 17:34:07" },
+  ] } });
+  assert.equal(t.length, 2);
+  assert.equal(t[0]!.type, "cos");
+  assert.equal(t[0]!.curTime, "2026-10-14 17:34");
+  assert.equal(t[1]!.audioDuration, 8);
+  assert.deepEqual(existingTurnsFromChatInfo(null), []);
+});
