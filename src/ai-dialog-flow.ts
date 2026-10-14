@@ -97,11 +97,22 @@ export function createReplyParser() {
  * App WS: text frames (bot reply chunks, "[+]ASR: …", "[end]") + binary TTS audio.
  * Client sends one whole 16k WAV per user utterance (raw PCM / small chunks → "didn't catch").
  */
+export function resolveOralWsTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.UNIPUS_ORAL_WS_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 5000 ? n : 60_000;
+}
+
+/** Reply timeout / socket closed / socket error → worth reopening the WS (#72). */
+export function isRetryableWsError(e: unknown): boolean {
+  const m = e instanceof Error ? e.message : String(e);
+  return /oral WS (reply timeout|closed)|ECONNRESET|socket|ETIMEDOUT|Unexpected server response|TLS/i.test(m);
+}
+
 export function openOralDialogSocket(o: {
   conversationId: string;
   sceneId: string;
   token: string;
-}, timeoutMs = 45_000): DialogSocket {
+}, timeoutMs = resolveOralWsTimeoutMs()): DialogSocket {
   const url =
     `wss://oral.unipus.cn/oral_api/ws//${encodeURIComponent(o.conversationId)}` +
     `?scene_id=${encodeURIComponent(o.sceneId)}&language=en-uspeak&tts_gender=female&tts_speed=normal&token=${encodeURIComponent(o.token)}`;
@@ -370,13 +381,35 @@ export async function runAiDialogFlow(
     });
   };
 
-  const ws = (ports.openDialogSocket ?? openOralDialogSocket)({
+  const sockArgs = {
     conversationId: cid,
     sceneId: String(created.scene_id ?? ""),
     token: String(created.token ?? ""),
-  });
+  };
+  const openSock = () => (ports.openDialogSocket ?? openOralDialogSocket)(sockArgs);
+  let ws = openSock();
+  const wsRetries = Math.max(0, Number(ports.env?.UNIPUS_ORAL_WS_RETRIES ?? 2) || 0);
+  /** Await one bot reply; on timeout/close reopen WS (same cid/token) and resend `wav`. */
+  const replyWithRetry = async (label: string, wav: Buffer | null): Promise<DialogReply> => {
+    for (let attempt = 0; ; attempt++) {
+      const t0 = Date.now();
+      try {
+        if (wav != null) ws.sendAudio(wav);
+        const r = await ws.nextReply();
+        console.error(`[oral-ws] ${label} ok ${Date.now() - t0}ms${wav ? ` wav=${wav.length}B` : ""}${attempt ? ` retry=${attempt}` : ""}`);
+        return r;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[oral-ws] ${label} fail ${Date.now() - t0}ms${wav ? ` wav=${wav.length}B` : ""} attempt=${attempt}: ${msg}`);
+        if (attempt >= wsRetries || !isRetryableWsError(e)) throw e;
+        ws.close();
+        await new Promise((r) => setTimeout(r, 2000));
+        ws = openSock();
+      }
+    }
+  };
   try {
-    const opener = (await ws.nextReply()).text || DEFAULT_BOT_OPENERS[0]!;
+    const opener = (await replyWithRetry("opener", null)).text || DEFAULT_BOT_OPENERS[0]!;
     await saveTurn("bot", opener, await ttsUpload(ports, opener, `${Date.now()}-b0`, openId));
     let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
@@ -388,7 +421,6 @@ export async function runAiDialogFlow(
       let media: { url: string; dur: number };
       try {
         const wav = await readFile(spoken.wavPath);
-        ws.sendAudio(wav);
         const up = await retryNet(() => uploadAnswerAudio(ports, {
           filePath: spoken.wavPath,
           fileName: `ai-dialog-${Date.now()}-u${i}.wav`,
@@ -398,7 +430,7 @@ export async function runAiDialogFlow(
           throw new Error(up.message || "upload_answer_audio failed");
         }
         media = { url: String(up.cdn_url), dur: Math.max(1, Math.round(wav.length / 32000)) };
-        reply = await ws.nextReply();
+        reply = await replyWithRetry(`turn${i}`, wav);
       } finally {
         await spoken.cleanup?.();
       }
