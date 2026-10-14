@@ -59,3 +59,10 @@ describe("scored-speech", () => {
     await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), /upload fail: qiniu down/);
   });
 });
+
+test("clioTimeoutMs scales with audio length (#78)", async () => {
+  const { clioTimeoutMs } = await import("../src/scored-speech.js");
+  assert.equal(clioTimeoutMs("x", {}, () => 44 + 32000 * 10), 120_000);
+  assert.equal(clioTimeoutMs("x", {}, () => 44 + 32000 * 60), 300_000);
+  assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_TIMEOUT_MS: "90000" }, () => 0), 90_000);
+});
