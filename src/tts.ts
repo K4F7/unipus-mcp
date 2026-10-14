@@ -25,7 +25,65 @@ export type SynthesizeSpeechPorts = {
   synthesizeFallbackWav?: (text: string, wavPath: string) => Promise<void>;
   env?: NodeJS.ProcessEnv;
   sleep?: (ms: number) => Promise<void>;
+  /** Local neural TTS (Kokoro/Piper) writing a 16k wav; injected in tests. */
+  synthesizeLocalWav?: (text: string, wavPath: string) => Promise<void>;
 };
+
+export type LocalTtsEngine = "kokoro" | "piper";
+
+/**
+ * #66: default engine is local Kokoro (no cloud, no flite fallback). Legacy
+ * edge/flite/auto only when UNIPUS_TTS_ENGINE asks for them (or tests inject
+ * the old mp3/fallback seams).
+ */
+export function resolveLocalTtsEngine(
+  env: NodeJS.ProcessEnv = process.env,
+  legacyInjected = false,
+): LocalTtsEngine | null {
+  const v = env.UNIPUS_TTS_ENGINE?.trim().toLowerCase();
+  if (v === "kokoro" || v === "piper") return v;
+  if (v === "edge" || v === "flite" || v === "auto") return null;
+  return legacyInjected ? null : "kokoro";
+}
+
+export function resolveLocalTtsScript(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    env.UNIPUS_LOCAL_TTS_BIN?.trim() || join(homedir(), "tts-local", "synth.py")
+  );
+}
+
+function defaultVoice(engine: LocalTtsEngine, env: NodeJS.ProcessEnv): string {
+  return engine === "kokoro"
+    ? env.UNIPUS_KOKORO_VOICE?.trim() || "af_heart"
+    : env.UNIPUS_PIPER_VOICE?.trim() || "en_US-lessac-high";
+}
+
+/** Run scripts/local-tts.py (venv python shebang): text on stdin → 16k mono wav. */
+export function localSynthesizeWav(
+  engine: LocalTtsEngine,
+  env: NodeJS.ProcessEnv,
+): (text: string, wavPath: string) => Promise<void> {
+  const script = resolveLocalTtsScript(env);
+  const voice = defaultVoice(engine, env);
+  return (text, wavPath) =>
+    new Promise((resolve, reject) => {
+      if (!existsSync(script)) {
+        reject(new Error(`本地 TTS 脚本不存在：${script}（见 docs/local-tts.md）`));
+        return;
+      }
+      const child = spawn(script, [engine, voice, wavPath], { stdio: ["pipe", "ignore", "pipe"] });
+      let err = "";
+      const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+      child.stderr.on("data", (c: Buffer) => (err += c.toString("utf8")));
+      child.on("error", (e) => { clearTimeout(timer); reject(e); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0 && existsSync(wavPath)) resolve();
+        else reject(new Error(`本地 TTS(${engine}) 失败 code=${code}: ${err.slice(-300)}`));
+      });
+      child.stdin.end(text);
+    });
+}
 
 /** Per-attempt Edge TTS budget (node-edge-tts' own 10s timer leaks the socket). */
 export const EDGE_TTS_ATTEMPT_TIMEOUT_MS = 20_000;
@@ -63,6 +121,25 @@ export async function synthesizeSpeechWav(
 
   // node-edge-tts lacks Sec-MS-GEC → 403; prefer the maintained edge-tts CLI when present.
   const cli = ports.synthesizeMp3 ? null : resolveEdgeTtsCli(ports.env);
+  const legacyInjected = !!(ports.synthesizeMp3 || ports.synthesizeFallbackWav);
+  const local = resolveLocalTtsEngine(ports.env ?? process.env, legacyInjected);
+  if (local) {
+    const run = ports.synthesizeLocalWav ?? localSynthesizeWav(local, ports.env ?? process.env);
+    try {
+      // No silent fallback (#66): a failed synthesis aborts the paper.
+      await run(text, wavPath);
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+    return {
+      wavPath,
+      cleanup: async () => {
+        await rm(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
   const synthesize =
     ports.synthesizeMp3 ??
     (cli
