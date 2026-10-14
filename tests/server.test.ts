@@ -13,6 +13,7 @@ const EXPECTED_TOOLS = [
   "list_accounts",
   "list_accounts_progress",
   "list_week_progress",
+  "learning_report",
   "start_listening_training",
   "start_speaking_training",
   "load_graded_questions",
