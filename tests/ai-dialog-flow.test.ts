@@ -51,3 +51,14 @@ test("createReplyParser: ASR + chunked bot reply until [end]", async () => {
   });
   assert.deepEqual(p.push("[end]"), { asr: "", text: "" });
 });
+
+test("oral WS retry classification + timeout env (#72)", async () => {
+  const { isRetryableWsError, resolveOralWsTimeoutMs } = await import("../src/ai-dialog-flow.js");
+  assert.equal(isRetryableWsError(new Error("oral WS reply timeout")), true);
+  assert.equal(isRetryableWsError(new Error("oral WS closed")), true);
+  assert.equal(isRetryableWsError(new Error("read ECONNRESET")), true);
+  assert.equal(isRetryableWsError(new Error("upload_answer_audio failed")), false);
+  assert.equal(resolveOralWsTimeoutMs({}), 60_000);
+  assert.equal(resolveOralWsTimeoutMs({ UNIPUS_ORAL_WS_TIMEOUT_MS: "90000" }), 90_000);
+  assert.equal(resolveOralWsTimeoutMs({ UNIPUS_ORAL_WS_TIMEOUT_MS: "1" }), 60_000);
+});
