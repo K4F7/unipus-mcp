@@ -87,6 +87,8 @@ type SpeakPart = {
   partId: string;
   partName: string;
   questionInstanceIds: string[];
+  /** part/get says already submitted (resume a half-done paper, #70). */
+  submitted?: boolean;
 };
 
 async function adaptiveGet(
@@ -149,6 +151,7 @@ function parsePartList(value: unknown): SpeakPart[] {
       partId: String(rec.partId),
       partName: typeof rec.partName === "string" ? rec.partName : "",
       questionInstanceIds: ids,
+      submitted: rec.submitted === true || rec.submitted === 1,
     });
   }
   return out;
@@ -358,6 +361,10 @@ export async function completeOneSpeak(
       return { ok: false, taskId, detail: `part ${part.partName || part.partId} 无题目实例${doneSuffix()}` };
     }
 
+    if (part.submitted === true) {
+      doneParts.push(`${part.partName || part.partId}(已交,跳过)`);
+      continue;
+    }
     let isAi = false;
     let aiDuration = 0;
     // AI口语对话: real conversation path before part/submit (placeholder EN_SENT → 4113).
