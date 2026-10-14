@@ -27,6 +27,7 @@ import type { PartSubmitPorts } from "./part-submit.js";
 import { registerConversationTools } from "./register-conversation-tools.js";
 import { registerPartSubmitTool } from "./register-part-submit-tool.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
+import { getLearningReport } from "./learning-report.js";
 import {
   uploadAnswerAudio,
   type UploadAnswerAudioPorts,
@@ -243,6 +244,41 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
         weekProgressUrl: ports?.weekProgressUrl,
       };
       return toMcpToolResponse(await listWeekProgress(wp));
+    },
+  );
+
+  server.registerTool(
+    "learning_report",
+    {
+      title: "Learning report (学习档案周报)",
+      description:
+        "Read-only: 学习档案→学习报告. GET ucloud /api/uls/user/profile/learning-report. Returns hasData, periodLabel, kpi{avgScore,count,durationHours}, topicScores, genreScores, skillRadar, reportTime. Default: speak, this week (Mon–Sun, Asia/Shanghai). periodStart alone → +6 days. account_key = account id or note (e.g. me); account_id also accepted. Never submits anything.",
+      inputSchema: {
+        account_id: optionalAccountId,
+        account_key: z.string().min(1).optional().describe("Account id or note (备注), e.g. \"me\". Does not change active."),
+        skillType: z.string().min(1).optional().describe("speak | listen | … (default speak)"),
+        periodType: z.string().min(1).optional().describe("default week"),
+        periodStart: z.string().optional().describe("YYYY-MM-DD (default: this Monday)"),
+        periodEnd: z.string().optional().describe("YYYY-MM-DD (default: periodStart+6)"),
+      },
+    },
+    async (args) => {
+      let accountId = args.account_id;
+      const key = args.account_key?.trim();
+      if (accountId == null && key != null && key.length > 0) {
+        const all = await listAccounts({ env: ports?.env } as never);
+        const hit = all.find((a) => a.account_id === key) ?? all.find((a) => a.note === key);
+        if (hit == null) {
+          return toMcpToolResponse({ isError: true, status: "error", code: "ACCOUNT_NOT_FOUND", message: `找不到账号：${key}` } as never);
+        }
+        accountId = hit.account_id;
+      }
+      return toMcpToolResponse(
+        (await getLearningReport(
+          { ...authPortsFor(accountId), env: ports?.env },
+          { skillType: args.skillType, periodType: args.periodType, periodStart: args.periodStart, periodEnd: args.periodEnd },
+        )) as never,
+      );
     },
   );
 
