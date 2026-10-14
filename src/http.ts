@@ -43,6 +43,12 @@ export function isTrustedUnipusUrl(value: string): boolean {
   }
 }
 
+/** Per-request timeout so a stuck socket can't hang a grind forever (#70). */
+export function resolveHttpTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.UNIPUS_HTTP_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 1000 ? n : 60_000;
+}
+
 export function createFetchUnipusHttp(fetchImpl: FetchLike = globalThis.fetch): UnipusHttp {
   return {
     async request(input) {
@@ -61,6 +67,7 @@ export function createFetchUnipusHttp(fetchImpl: FetchLike = globalThis.fetch): 
         headers,
         body: input.body,
         redirect: "manual",
+        signal: AbortSignal.timeout(resolveHttpTimeoutMs()),
       });
       return {
         statusCode: response.status,
