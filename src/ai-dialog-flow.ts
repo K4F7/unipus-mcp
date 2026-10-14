@@ -112,8 +112,10 @@ export function openOralDialogSocket(o: {
   conversationId: string;
   sceneId: string;
   token: string;
+  /** Test-only endpoint override. */
+  url?: string;
 }, timeoutMs = resolveOralWsTimeoutMs()): DialogSocket {
-  const url =
+  const url = o.url ??
     `wss://oral.unipus.cn/oral_api/ws//${encodeURIComponent(o.conversationId)}` +
     `?scene_id=${encodeURIComponent(o.sceneId)}&language=en-uspeak&tts_gender=female&tts_speed=normal&token=${encodeURIComponent(o.token)}`;
   const ws = new WebSocket(url, { headers: { origin: "https://uadaptive.unipus.cn" } });
@@ -154,7 +156,8 @@ export function openOralDialogSocket(o: {
       });
     },
     sendAudio(wav) {
-      void opened.then(() => ws.send(wav));
+      // Handshake failure (e.g. HTTP 500) surfaces via nextReply; never leave this rejection unhandled (#80).
+      opened.then(() => ws.send(wav)).catch(() => {});
     },
     close() {
       ws.removeAllListeners("close");
@@ -420,7 +423,7 @@ export async function runAiDialogFlow(
   };
   const openSock = () => (ports.openDialogSocket ?? openOralDialogSocket)(sockArgs);
   let ws = openSock();
-  const wsRetries = Math.max(0, Number(ports.env?.UNIPUS_ORAL_WS_RETRIES ?? 2) || 0);
+  const wsRetries = Math.max(0, Number(ports.env?.UNIPUS_ORAL_WS_RETRIES ?? 4) || 0);
   /** Await one bot reply; on timeout/close reopen WS (same cid/token) and resend `wav`. */
   const replyWithRetry = async (label: string, wav: Buffer | null): Promise<DialogReply> => {
     for (let attempt = 0; ; attempt++) {
@@ -435,7 +438,7 @@ export async function runAiDialogFlow(
         console.error(`[oral-ws] ${label} fail ${Date.now() - t0}ms${wav ? ` wav=${wav.length}B` : ""} attempt=${attempt}: ${msg}`);
         if (attempt >= wsRetries || !isRetryableWsError(e)) throw e;
         ws.close();
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
         ws = openSock();
         if (wav != null) {
           // A reopened socket greets first ("welcome back."); drop it so replies stay aligned (#76).

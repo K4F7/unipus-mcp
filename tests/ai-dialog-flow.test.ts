@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildAiDialogAnswer,
+  openOralDialogSocket,
   isAiDialogPartName,
 } from "../src/ai-dialog-flow.js";
 
@@ -75,4 +76,31 @@ test("existingTurnsFromChatInfo keeps audio+text records (#74)", async () => {
   assert.equal(t[0]!.curTime, "2026-10-14 17:34");
   assert.equal(t[1]!.audioDuration, 8);
   assert.deepEqual(existingTurnsFromChatInfo(null), []);
+});
+
+test("oral WS handshake 500 rejects nextReply without crashing the process (#80)", async () => {
+  const http = await import("node:http");
+  const srv = http.createServer((_q, s) => { s.writeHead(500); s.end(); });
+  srv.on("upgrade", (_req, sock) => {
+    sock.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    sock.destroy();
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    for (let i = 0; i < 2; i++) {
+      const s = openOralDialogSocket({ conversationId: "c", sceneId: "s", token: "t", url: `ws://127.0.0.1:${port}/x` }, 5000);
+      s.sendAudio(Buffer.from("wav"));
+      await assert.rejects(s.nextReply(), /500|closed/);
+      s.close();
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    srv.close();
+  }
 });
