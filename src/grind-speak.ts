@@ -191,6 +191,36 @@ export function classifyAppReadiness(value: unknown): AppReadiness {
   return allSubmitted ? "submitted_not_ready" : "not_submitted";
 }
 
+/** part/submit 业务码 4110「该任务已提交，请重新获取任务」(#84). */
+export function isAlreadySubmittedError(message: string | undefined): boolean {
+  return /4110|该任务已提交/.test(String(message ?? ""));
+}
+
+/**
+ * Re-read part/get after 4110: the server may have closed the part itself
+ * (e.g. AI口语对话 auto-submitted after the box stalled ~18min mid-dialog, #84).
+ */
+async function partSubmittedOnServer(
+  ports: GrindSpeakPorts,
+  jwt: string,
+  taskId: string,
+  ansVersion: number,
+  partId: string,
+): Promise<boolean> {
+  try {
+    const body = (await adaptiveGet(
+      ports,
+      `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+      jwt,
+    )) as Record<string, unknown>;
+    return parsePartList(body?.value ?? body).some(
+      (p) => p.partId === partId && p.submitted === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE. */
 async function buildAiOrFree(
   leaf: GrindLeaf,
@@ -420,6 +450,15 @@ export async function completeOneSpeak(
       openId,
     });
     if (snap.isError) {
+      if (
+        isAlreadySubmittedError(snap.message) &&
+        (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId))
+      ) {
+        // #84: server already closed this part; continue, App history decides the score.
+        console.error(`[part/submit] ${part.partName || part.partId} 4110 服务端已交，跳过本 part 续交后续 part`);
+        doneParts.push(`${part.partName || part.partId}(服务端已交,跳过)`);
+        continue;
+      }
       return {
         ok: false,
         taskId,
@@ -445,6 +484,14 @@ export async function completeOneSpeak(
       openId,
     });
     if (sub.isError) {
+      if (
+        isAlreadySubmittedError(sub.message) &&
+        (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId))
+      ) {
+        console.error(`[part/submit] ${part.partName || part.partId} submit 4110 但 part/get 已交，视为已交`);
+        doneParts.push(`${part.partName || part.partId}(服务端已交)`);
+        continue;
+      }
       return {
         ok: false,
         taskId,
