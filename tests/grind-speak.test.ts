@@ -347,6 +347,48 @@ describe("completeOneSpeak review (#62)", () => {
     assert.equal(submitCalls(http).length, 1);
   });
 
+  test("snapshot 4110 but part/get shows part submitted → skip and continue (#84)", async () => {
+    const http = scenario({
+      submit: (b) => (b.partId === "p1" ? { code: 4110, msg: "该任务已提交，请重新获取任务" } : { code: 1 }),
+      afterParts: () => [
+        { partId: "p1", partName: "范例学习", questionInstanceIds: ["111"], reportStatus: "processing", submitted: true },
+        { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], reportStatus: null, submitted: null },
+      ],
+    });
+    const r = await run(http);
+    assert.equal(r.ok, true);
+    // p1 snapshot (4110, skipped) + p2 snapshot + p2 submit
+    assert.deepEqual(
+      submitCalls(http).map((c) => { const b = JSON.parse(String(c.body)); return `${b.partId}:${b.action}`; }),
+      ["p1:snapshot", "p2:snapshot", "p2:submit"],
+    );
+  });
+
+  test("snapshot 4110 and part/get still not submitted → fail (#84)", async () => {
+    const http = scenario({ submit: () => ({ code: 4110, msg: "该任务已提交，请重新获取任务" }) });
+    const r = await run(http);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.detail, /4110/);
+    assert.equal(submitCalls(http).length, 1);
+  });
+
+  test("4110 skip still requires App history scoreIsOut (#84)", async () => {
+    const http = scenario({
+      submit: (b) => (b.partId === "p1" ? { code: 4110, msg: "该任务已提交" } : { code: 1 }),
+      afterParts: () => [
+        { partId: "p1", partName: "范例学习", questionInstanceIds: ["111"], reportStatus: "processing", submitted: true },
+        { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], reportStatus: null, submitted: null },
+      ],
+      history: () => ({ taskId: "555", scoreIsOut: false, score: 0, ansVersion: 1 }),
+    });
+    const r = await run(http);
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.detail, /已交但 App 评分中/);
+      assert.match(r.detail, /服务端已交,跳过/);
+    }
+  });
+
   test("submit 4113 on 2nd part → fail, stop, lists done parts", async () => {
     const http = scenario({ submit: (b) => (b.partId === "p2" && b.action === "submit" ? { code: 4113, msg: "提交作答失败" } : { code: 1 }) });
     const r = await run(http);
