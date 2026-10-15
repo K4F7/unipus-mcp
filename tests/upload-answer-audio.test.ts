@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import type { UnipusHttp } from "../src/http.js";
 import {
   parseQueryUploadBody,
+  resolveUploadTimeoutMs,
   uploadAnswerAudio,
 } from "../src/upload-answer-audio.js";
 
@@ -116,6 +117,7 @@ describe("uploadAnswerAudio", () => {
           const file = body.get("file");
           assert.ok(file instanceof Blob);
           uploadedBytes = file.size;
+          assert.ok(init?.signal instanceof AbortSignal);
           return new Response(JSON.stringify({ hash: "h1" }), { status: 200 });
         },
       },
@@ -147,5 +149,13 @@ describe("uploadAnswerAudio", () => {
     assert.equal(result.code, "INVALID_ARGUMENT");
     assert.match(result.message, /过大|limit|20/i);
     assert.deepEqual(http.calls, []);
+  });
+});
+
+describe("resolveUploadTimeoutMs", () => {
+  test("default 60s, env override, floor 5s", () => {
+    assert.equal(resolveUploadTimeoutMs({}), 60_000);
+    assert.equal(resolveUploadTimeoutMs({ UNIPUS_UPLOAD_TIMEOUT_MS: "15000" }), 15_000);
+    assert.equal(resolveUploadTimeoutMs({ UNIPUS_UPLOAD_TIMEOUT_MS: "100" }), 60_000);
   });
 });

@@ -40,6 +40,13 @@ class MockWebSocket extends EventEmitter implements ClioWebSocketLike {
     this.emit("close");
   }
 
+  terminated = false;
+  terminate(): void {
+    this.terminated = true;
+    this.closed = true;
+    this.emit("close");
+  }
+
   /** Simulate Clio final response after client frames. */
   respondFinal(payload: unknown): void {
     this.emit("message", Buffer.from(JSON.stringify(payload), "utf8"));
@@ -227,6 +234,17 @@ describe("scoreEnSent (mocked WSS)", () => {
         return true;
       },
     );
+  });
+
+  test("timeout terminates socket and rejects (#82)", async () => {
+    MockWebSocket.instances = [];
+    const p = scoreEnSent(
+      { transcript: "hello", audioBytes: Buffer.from("RIFF"), timeoutMs: 30 },
+      { createWebSocket: (url) => new MockWebSocket(url) },
+    );
+    await assert.rejects(p, /Clio WSS 超时/);
+    const sock = MockWebSocket.instances[0]!;
+    assert.equal(sock.terminated, true);
   });
 
   test("scoreSpeechTool maps EN_SENT_SCORE content", async () => {
