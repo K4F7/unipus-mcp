@@ -55,6 +55,8 @@ export type ClioWebSocketLike = {
   ): void;
   send(data: string | Buffer | Uint8Array): void;
   close(code?: number, reason?: string): void;
+  /** Force-drop the TCP socket when the peer ignores close handshake (#82). */
+  terminate?(): void;
 };
 
 export type ScoreEnSentPorts = {
@@ -141,15 +143,20 @@ export async function scoreEnSent(
       fail(new Error(`Clio WSS 超时 (${timeoutMs}ms)`));
     }, timeoutMs);
 
+    const destroySocket = () => {
+      try {
+        if (typeof socket.terminate === "function") socket.terminate();
+        else socket.close();
+      } catch {
+        /* ignore */
+      }
+    };
+
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try {
-        socket.close();
-      } catch {
-        /* ignore */
-      }
+      destroySocket();
       fn();
     };
 

@@ -33,6 +33,12 @@ const DEFAULT_QINIU_UPLOAD = "https://up-z1.qiniup.com";
 /** Soft cap for silent uploads (20 MiB) — avoids buffering huge files. */
 export const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 
+/** Qiniu form POST budget so a stuck upload can't hang grind forever (#82). */
+export function resolveUploadTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.UNIPUS_UPLOAD_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 5_000 ? n : 60_000;
+}
+
 /**
  * Silent audio path: POST query-upload-url → Qiniu multipart (token,key,file).
  * Does not submit the answer; returns CDN url + storage key for later submitAnswer.
@@ -125,9 +131,14 @@ export async function uploadAnswerAudio(
     fileName,
   );
 
+  const uploadTimeoutMs = resolveUploadTimeoutMs(ports.env ?? process.env);
   let uploadResponse: Response;
   try {
-    uploadResponse = await uploadFetch(qiniuUrl, { method: "POST", body: form });
+    uploadResponse = await uploadFetch(qiniuUrl, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(uploadTimeoutMs),
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return toolError("NETWORK_ERROR", `七牛上传网络失败：${detail}`);
