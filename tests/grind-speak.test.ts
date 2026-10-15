@@ -364,6 +364,22 @@ describe("completeOneSpeak review (#62)", () => {
     );
   });
 
+  test("submit 4110 after ok snapshot but part/get shows submitted → continue (#84)", async () => {
+    const http = scenario({
+      submit: (b) => (b.partId === "p1" && b.action === "submit" ? { code: 4110, msg: "该任务已提交，请重新获取任务" } : { code: 1 }),
+      afterParts: () => [
+        { partId: "p1", partName: "范例学习", questionInstanceIds: ["111"], reportStatus: "processing", submitted: true },
+        { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], reportStatus: null, submitted: null },
+      ],
+    });
+    const r = await run(http);
+    assert.equal(r.ok, true);
+    assert.deepEqual(
+      submitCalls(http).map((c) => { const b = JSON.parse(String(c.body)); return `${b.partId}:${b.action}`; }),
+      ["p1:snapshot", "p1:submit", "p2:snapshot", "p2:submit"],
+    );
+  });
+
   test("snapshot 4110 and part/get still not submitted → fail (#84)", async () => {
     const http = scenario({ submit: () => ({ code: 4110, msg: "该任务已提交，请重新获取任务" }) });
     const r = await run(http);
