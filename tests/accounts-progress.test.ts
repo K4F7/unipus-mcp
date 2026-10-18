@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
+import { assistUntil } from "../src/account-usage.js";
 import { listAccountsProgress } from "../src/accounts-progress.js";
 import {
   saveAccountTokens,
   setAccountGrind,
+  setAccountUsage,
 } from "../src/accounts.js";
 import { mockHttp } from "./mock-http.js";
 
@@ -57,6 +59,11 @@ describe("listAccountsProgress", () => {
       { env },
     );
     await setAccountGrind("bbb", "speak", { env });
+    await setAccountUsage(
+      "bbb",
+      { ...assistUntil("2026-12-31", "2026-10-19"), listen_per_week: 5, speak_per_week: 3 },
+      { env },
+    );
 
     const http = mockHttp(async (call) => {
       const auth = call.headers.authorization ?? "";
@@ -91,11 +98,17 @@ describe("listAccountsProgress", () => {
     assert.equal(aaa!.speak_total, 3);
     assert.equal(aaa!.level, "S1");
     assert.equal(aaa!.grind, "both");
+    assert.equal(aaa!.usage.mode, "self");
+    assert.equal(aaa!.usage.listen_per_week, null);
     assert.equal(aaa!.placement.status, "ok");
 
     const bbb = result.accounts.find((r) => r.account_id === "bbb");
     assert.ok(bbb);
     assert.equal(bbb!.grind, "speak");
+    assert.equal(bbb!.usage.mode, "assist");
+    assert.equal(bbb!.usage.expires_at, "2026-12-31");
+    assert.equal(bbb!.usage.listen_per_week, 5);
+    assert.equal(bbb!.usage.speak_per_week, 3);
     assert.ok(bbb!.error);
     assert.equal(bbb!.listen_done, null);
     assert.equal(bbb!.placement.status, "error");

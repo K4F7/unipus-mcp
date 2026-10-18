@@ -23,6 +23,8 @@ export type GrindPlacementPorts = AuthPorts & {
   sleep?: (ms: number) => Promise<void>;
   maxPolls?: number;
   pollMs?: number;
+  /** Flows allowed to auto-place. Default both. A flow left out is never checked or submitted. */
+  flows?: readonly PlacementFlow[];
 };
 
 export type PlacementFlow = "listen" | "speak";
@@ -306,7 +308,8 @@ export async function runAutoPlacement(
 
   const out: AutoPlacementResult = { attempted: false };
 
-  for (const flow of ["listen", "speak"] as const) {
+  const flows = ports.flows ?? (["listen", "speak"] as const);
+  for (const flow of flows) {
     const body = await adaptiveGet(
       ports,
       `/api/uls/user/getUserStatus?flowType=${flow}`,

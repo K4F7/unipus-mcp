@@ -187,7 +187,7 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   accounts/<account_id>/
     jwt   # 0600
     rt    # 0600；与 jwt 同次写入
-    meta.json  # 无秘密：alias、note（用途标记）、grind（both|listen|speak）、last_login_at、last_refresh_at、jwt_expire 等
+    meta.json  # 无秘密：alias、note（用途标记）、grind（both|listen|speak）、usage（self|assist，含 listen_per_week/speak_per_week）、last_login_at、last_refresh_at、jwt_expire 等
 ```
 
 - JWT **读取顺序**：
@@ -199,9 +199,10 @@ Grok Bot AddMcpServer 没有 cwd，必须用上面的绝对路径脚本或 `--pr
   - `npx tsx scripts/sso-login.ts [--account <id>]` — 账密登录，写入 `accounts/<id>/{jwt,rt}` + 同步 legacy + 更新 active。密码：`accounts/<id>/password` 或 `UNIPUS_PASSWORD_<id>` / `UNIPUS_PASSWORD`（登录解析仍回退全局）。`accounts set-password <id>`：`UNIPUS_PASSWORD_<id>` → stdin 写入文件（0600）；**不读**全局 `UNIPUS_PASSWORD`；永不打印。`list` 的 `pw=` / `has_password` 只认文件或 per-id env。用户名：`UNIPUS_USERNAME_<id>` / `UNIPUS_USERNAME` / 默认账户 id。
   - 可选从现有 env 迁移：`UNIPUS_PASSWORD_<id>=… npx tsx scripts/accounts.ts set-password <id>`，或 `printf '%s' '…' | npx tsx scripts/accounts.ts set-password <id>`（勿把密文提交进 git；有全局 `UNIPUS_PASSWORD` 时请用 stdin / per-id，勿指望全局被写入文件）。
   - `npx tsx scripts/sso-login.ts --refresh [--account <id>]` 或 `npm run refresh-jwt` — 优先 `rt` 续期；失败回退账密；极验 → 退出码 **3**（`CAPTCHA_REQUIRED`）
-  - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` / `grind <id> both|listen|speak` — 只动指针与脱敏展示（含 alias/note/grind）；**切换账户仅 CLI**（MCP 无 `use_account`）
+  - `npx tsx scripts/accounts.ts list` / `use <id>` / `note <id> <text>` / `note <id> --clear` / `grind <id> both|listen|speak` / `usage <id> self|assist …` — 只动指针与脱敏展示（含 alias/note/grind/usage）；**切换账户仅 CLI**（MCP 无 `use_account`）
+  - `usage`：`self` 自用，不过期。`assist --months <1-24>`、`assist --semester`、`assist --until YYYY-MM-DD` 是帮别人刷，到期日按 Asia/Shanghai 日历写入 `meta.usage.expires_at`（含当天）。`--from` 默认今天。学期边界：秋 9/1–次年 1/15，春 2/20–7/10。`--months` 先加自然月，再截到起始日所在学期的结束日，不进入下学期（假期起算则截到下一学期结束日）。`--from` 在未来时，到那天之前 `weekly-grind` 状态 `skipped_not_started`。登录续票不会清掉这个字段。到期后 `weekly-grind` 状态 `skipped_expired`，不登录、不交卷。不要从 `note` 文本解析到期。`--listen` / `--speak` 在 self 和 assist 上都能写每周篇数（0–30 的整数，或 `platform`）。没写的一侧保留原值。`null` 用平台 `weekFrequency`；写了数字后，这一侧只做到 `min(配置, weekFrequency)`。`0` 表示这一侧本周不做；启用的各侧都是 `0` 时直接 `skipped_done`，不登录、不定级。配额为 `0` 的一侧不会自动定级；若只有那一侧还在定级，平台拿不到另一侧的周进度，状态为 `needs_placement`（不交卷），需先手动完成那一侧定级或调整配额。
 - 极验（SSO `code=1506`）：无头无法过。请用**有头浏览器**登录 sso.unipus.cn 后把 jwt/rt 写入对应 `accounts/<id>/`。日志/工具**永不**打印 jwt/rt/密码。
-- MCP `list_accounts`：只读、无秘密字段（含 `alias`/`note`/`grind`）；切换、写备注与 grind 策略请 CLI。
+- MCP `list_accounts`：只读、无秘密字段（含 `alias`/`note`/`grind`/`usage`）；切换、写备注、grind 与 usage 请 CLI。
 - MCP `list_accounts_progress`：多账户周进度只读表（listen/speak/level/grind/placement）；单行失败不拖垮整表；无调度；无 jwt/rt/password。
 - **周任务 harness**：`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — 无状态按账户续票+查进度+交卷缺口；`effective = CLI 覆盖 ?? meta.grind ?? both`；stdout JSON 汇总（含 alias/note/grind/skips）；**永不**打印 jwt/rt/password；**不**改 active-account（除非显式）。MCP **仍无调度** / 无 `run_weekly`，由 harness routine 调此 CLI。合入后口语-only 号（如 `15346096028`）设 `grind=speak`。
 - 进度路径（可选）：默认 host `https://ucloud.unipus.cn`（`UNIPUS_ULS_ORIGIN` 可覆盖），path `UNIPUS_ULS_USER_STATUS_FOR_APP_PATH`（默认 `/api/uls/user/getUserStatusForApp`）。请求头 `u-app-id` 默认 `116`（`UNIPUS_U_APP_ID` 可覆盖），这是服务端的 `sourceId`。`UNIPUS_ULS_WEEK_PROGRESS_PATH` 若设置则**强制** legacy 单 GET。Authorization 为**原始 JWT**（不加 `Bearer `）。

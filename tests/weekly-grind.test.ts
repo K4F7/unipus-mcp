@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
+import { assistMonths, assistUntil, selfUsage } from "../src/account-usage.js";
 import {
+  listAccounts,
   saveAccountTokens,
   setAccountGrind,
+  setAccountUsage,
   setActiveAccountId,
 } from "../src/accounts.js";
 import {
@@ -255,6 +258,92 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     assert.equal(result.after?.listen_done, 5);
   });
 
+  test("self and assist weekly quotas cap gaps and count as done below platform totals", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-quota-"));
+    const env = {};
+    const cases = [
+      ["self-q", { ...selfUsage(), listen_per_week: 2, speak_per_week: 1 }],
+      ["assist-q", { ...assistMonths(2, "2026-10-19"), listen_per_week: 2, speak_per_week: 1 }],
+    ] as const;
+    for (const [id, usage] of cases) {
+      await saveAccountTokens(
+        {
+          accountId: id,
+          jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.q",
+          makeActive: false,
+          syncLegacy: false,
+        },
+        { home, env },
+      );
+      await setAccountUsage(id, usage, { home, env });
+      let phase = 0;
+      const needs: number[] = [];
+      const row = (await resolveTargetAccounts({ kind: "ids", ids: [id] }, { home, env }))[0]!;
+      const result = await grindOneAccount(row, {
+        home,
+        env,
+        now: () => new Date("2026-10-19T04:00:00Z"),
+        listProgress: async () => {
+          phase += 1;
+          if (phase === 1) {
+            return { listen_done: 0, listen_total: 5, speak_done: 0, speak_total: 3 };
+          }
+          return { listen_done: 2, listen_total: 5, speak_done: 1, speak_total: 3 };
+        },
+        grindListen: async (_p, need) => {
+          needs.push(need);
+          return { completed: need, taskIds: ["l"] };
+        },
+        grindSpeak: async (_p, need) => {
+          needs.push(need);
+          return { completed: need, taskIds: ["s"] };
+        },
+      });
+      assert.equal(result.status, "done", id);
+      assert.deepEqual(needs, [2, 1], id);
+      assert.equal(result.before?.listen_total, 5, id);
+      assert.equal(result.usage.listen_per_week, 2, id);
+      assert.equal(result.usage.speak_per_week, 1, id);
+    }
+  });
+
+  test("a side already at its weekly quota is not ground even if the platform total is higher", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-quota-done-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "capped", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.c" },
+      { home, env },
+    );
+    await setAccountUsage(
+      "capped",
+      { ...selfUsage(), listen_per_week: 2, speak_per_week: 0 },
+      { home, env },
+    );
+    let grindCalls = 0;
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: ["capped"] }, { home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      listProgress: async () => ({
+        listen_done: 2,
+        listen_total: 5,
+        speak_done: 0,
+        speak_total: 3,
+      }),
+      grindListen: async () => {
+        grindCalls += 1;
+        return { completed: 1, taskIds: ["l"] };
+      },
+      grindSpeak: async () => {
+        grindCalls += 1;
+        return { completed: 1, taskIds: ["s"] };
+      },
+    });
+    assert.equal(result.status, "skipped_done");
+    assert.equal(grindCalls, 0);
+    assert.equal(result.before?.speak_total, 3);
+  });
+
   test("sanitizeSummaryForStdout redacts jwt-shaped error text", () => {
     const cleaned = sanitizeSummaryForStdout({
       started_at: "t0",
@@ -272,6 +361,8 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
           speak_completed: 0,
           listen_skipped: null,
           speak_skipped: null,
+          usage: selfUsage(),
+          usage_skip: null,
           errors: ["boom eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig end"],
         },
       ],
@@ -633,6 +724,172 @@ describe("grind side policy", () => {
     assert.equal(row.speak_skipped, null);
     assert.equal(row.listen_completed, 0);
     assert.equal(row.speak_completed, 3);
+  });
+
+  test("expired assist skips before progress; a later window still runs", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "assist-old", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.old" },
+      { home, env },
+    );
+    await setAccountUsage("assist-old", assistMonths(1, "2020-01-01"), { home, env });
+    const listed = await listAccounts({ home, env });
+    let progressCalls = 0;
+    const expired = await grindOneAccount(listed[0]!, {
+      home,
+      env,
+      now: () => new Date("2026-10-19T04:00:00Z"),
+      listProgress: async () => {
+        progressCalls += 1;
+        return { listen_done: 5, listen_total: 5, speak_done: 3, speak_total: 3 };
+      },
+    });
+    assert.equal(progressCalls, 0);
+    assert.equal(expired.status, "skipped_expired");
+    assert.match(expired.usage_skip ?? "", /2020-01-15/);
+    assert.equal(expired.listen_completed, 0);
+
+    await setAccountUsage("assist-old", assistMonths(4, "2026-10-19"), { home, env });
+    const again = (await listAccounts({ home, env }))[0]!;
+    const open = await grindOneAccount(again, {
+      home,
+      env,
+      now: () => new Date("2026-10-19T04:00:00Z"),
+      listProgress: async () => {
+        progressCalls += 1;
+        return { listen_done: 5, listen_total: 5, speak_done: 3, speak_total: 3 };
+      },
+    });
+    assert.equal(progressCalls, 1);
+    assert.equal(open.status, "skipped_done");
+    assert.equal(open.usage_skip, null);
+    assert.equal(open.usage.expires_at, "2027-01-15");
+  });
+
+  test("a zero-quota side with null platform counters still counts as done", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-null-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "zn", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.n" },
+      { home, env },
+    );
+    await setAccountUsage("zn", { ...selfUsage(), speak_per_week: 0 }, { home, env });
+    let grindCalls = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      listProgress: async () => ({ listen_done: 5, listen_total: 5, speak_done: null, speak_total: null }),
+      grindListen: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
+      grindSpeak: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
+    });
+    assert.equal(result.status, "skipped_done");
+    assert.equal(grindCalls, 0);
+  });
+
+  test("a zero-quota side is never auto-placed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-place-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "zp", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.zp" },
+      { home, env },
+    );
+    await setAccountUsage("zp", { ...selfUsage(), listen_per_week: 0, speak_per_week: 3 }, { home, env });
+    const statusFlows: string[] = [];
+    let submits = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      skipPlacement: false,
+      listProgress: async () => ({ error: "NEEDS_PLACEMENT: 听力仍在定级", code: "NEEDS_PLACEMENT" }),
+      http: mockHttp(async (call) => {
+        if (call.url.includes("getUserStatus")) {
+          statusFlows.push(call.url.includes("flowType=listen") ? "listen" : "speak");
+          return {
+            statusCode: 200,
+            body: JSON.stringify({ code: 1, value: { type: "train", taskId: "t1", ansVersion: 1, status: 1 } }),
+          };
+        }
+        if (call.url.includes("submitAnswer")) submits += 1;
+        return { statusCode: 404, body: "{}" };
+      }),
+    });
+    assert.deepEqual(statusFlows, ["speak"]);
+    assert.equal(submits, 0);
+    assert.equal(result.status, "needs_placement");
+    assert.match(result.errors.join(" "), /配额为 0 的一侧（listen）不自动定级/);
+  });
+
+  test("assist with a future --from skips before progress", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-future-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "assist-future", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.f" },
+      { home, env },
+    );
+    await setAccountUsage("assist-future", assistUntil("2027-06-30", "2027-01-01"), { home, env });
+    let progressCalls = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      now: () => new Date("2026-10-19T04:00:00Z"),
+      listProgress: async () => {
+        progressCalls += 1;
+        return { listen_done: 0, listen_total: 5, speak_done: 0, speak_total: 3 };
+      },
+    });
+    assert.equal(progressCalls, 0);
+    assert.equal(result.status, "skipped_not_started");
+    assert.match(result.usage_skip ?? "", /2027-01-01/);
+  });
+
+  test("all enabled quotas 0 skip before auth, progress, and placement", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-zero-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "zero", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.z" },
+      { home, env },
+    );
+    await setAccountUsage(
+      "zero",
+      { ...selfUsage(), listen_per_week: 0, speak_per_week: 0 },
+      { home, env },
+    );
+    let progressCalls = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      listProgress: async () => {
+        progressCalls += 1;
+        return { error: "NEEDS_PLACEMENT: grade", code: "NEEDS_PLACEMENT" };
+      },
+    });
+    assert.equal(progressCalls, 0);
+    assert.equal(result.status, "skipped_done");
+    assert.match(result.usage_skip ?? "", /0/);
+    assert.equal(result.listen_completed + result.speak_completed, 0);
+
+    // speak-only policy with speak=0 also counts as all-zero even if listen is configured.
+    await setAccountUsage(
+      "zero",
+      { ...selfUsage(), listen_per_week: 3, speak_per_week: 0 },
+      { home, env },
+    );
+    const speakOnly = await grindOneAccount((await listAccounts({ home, env }))[0]!, {
+      home,
+      env,
+      grindOverride: "speak",
+      listProgress: async () => {
+        progressCalls += 1;
+        return { listen_done: 0, listen_total: 5, speak_done: 0, speak_total: 3 };
+      },
+    });
+    assert.equal(progressCalls, 0);
+    assert.equal(speakOnly.status, "skipped_done");
   });
 
   test("CLI override beats meta.grind", async () => {
