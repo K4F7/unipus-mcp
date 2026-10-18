@@ -41,7 +41,7 @@ export function doctorReport(
     const script = resolveLocalTtsScript(env);
     let ok = exists(script);
     let note = "";
-    if (ok && engine === "kokoro") {
+    if (ok && (engine === "kokoro" || engine === "piper")) {
       // #92: an older synth.py copy ignores speed/pause → 自由表达 too short → every paper refused.
       let text = "";
       try { text = readText(script); } catch { /* unreadable: treat as old */ }

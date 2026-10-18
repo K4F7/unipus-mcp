@@ -454,14 +454,17 @@ export async function completeOneSpeak(
   try {
     ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
     const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+    /** One UNIPUS_PART_MAX_MS budget per part, shared by its leaves, never past the paper deadline. */
+    const partDeadlines = new Map<SpeakPart | undefined, number>();
     for (const leaf of leaves) {
       if (skipIds.has(leaf.instanceId)) continue;
+      const part = parts.find((p) => p.questionInstanceIds.includes(leaf.instanceId));
+      if (!partDeadlines.has(part)) partDeadlines.set(part, Math.min(clock() + partMaxMs, paperDeadline));
       answers.set(
         leaf.instanceId,
         await withWallTimeout(
           buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta),
-          // Never past the paper deadline either (review #93).
-          Math.max(1, Math.min(partMaxMs, paperDeadline - clock())),
+          Math.max(1, partDeadlines.get(part)! - clock()),
           `口语答案 ${leaf.name || leaf.instanceId} 单 part / 整卷上限`,
         ),
       );

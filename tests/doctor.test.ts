@@ -39,4 +39,6 @@ test("doctor lists the #92 wall-clock budgets and flags a synth.py without speed
   const old = doctorReport({ PATH: "/usr/bin" }, "linux", all, () => "#!/py\neng, voice, out = sys.argv[1:4]\n");
   assert.equal(tts(old).ok, false);
   assert.match(tts(old).detail, /语速|停顿/);
+  const oldPiper = doctorReport({ PATH: "/usr/bin", UNIPUS_TTS_ENGINE: "piper" }, "linux", all, () => "#!/py\neng, voice, out = sys.argv[1:4]\n");
+  assert.equal(tts(oldPiper).ok, false);
 });

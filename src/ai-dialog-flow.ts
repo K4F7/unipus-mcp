@@ -340,14 +340,17 @@ async function ttsUpload(
   let last: unknown;
   for (let i = 0; i < 4; i++) {
     try {
-      const spoken = await synthesizeSpeechWav({ text }, ports);
-      try {
-        const wav = await readFile(spoken.wavPath);
-        const url = await uploadWav(ports, spoken.wavPath, `ai-dialog-${Date.now()}.wav`, openId, sleep);
-        return { url, dur: Math.max(1, (wav.length - 44) / 32000) };
-      } finally {
-        await spoken.cleanup?.();
-      }
+      // Each attempt gets only what is left of the budget, so success can't land after it.
+      return await withWallTimeout((async () => {
+        const spoken = await synthesizeSpeechWav({ text }, ports);
+        try {
+          const wav = await readFile(spoken.wavPath);
+          const url = await uploadWav(ports, spoken.wavPath, `ai-dialog-${Date.now()}.wav`, openId, sleep);
+          return { url, dur: Math.max(1, (wav.length - 44) / 32000) };
+        } finally {
+          await spoken.cleanup?.();
+        }
+      })(), Math.max(1, deadline - Date.now()), "AI对话 TTS 重试总时长上限");
     } catch (e) {
       last = e;
       if (Date.now() >= deadline) break;
