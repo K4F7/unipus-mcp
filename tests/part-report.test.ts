@@ -18,7 +18,8 @@ test("parsePartReport: AI / 自由表达 / 范例 scores, 500 pending, other err
   assert.equal(parsePartReport("s", sample).score, 97);
   assert.deepEqual(parsePartReport("a", pending), { partId: "a", score: null, status: "pending", detail: "报告尚未生成完成" });
   assert.equal(parsePartReport("a", "<html>").status, "error");
-  assert.equal(parsePartReport("a", JSON.stringify({ code: 401, message: "未登录" })).status, "error");
+  // An explicit server answer other than "not generated yet" is final, not worth polling.
+  assert.equal(parsePartReport("a", JSON.stringify({ code: 401, message: "未登录" })).status, "failed");
 });
 
 test("pollPartReports: GET part-report per part with JWT; stops once every report is out", async () => {
@@ -52,6 +53,27 @@ test("pollPartReports: report never generated → pending after maxMs/pollMs + 1
   );
   assert.equal(r["AI口语对话"]!.status, "pending");
   assert.equal(http.calls.length, 5);
+});
+
+test("pollPartReports: a terminal server error is read once; transport errors keep polling (review #93)", async () => {
+  let failedReads = 0;
+  let flakyReads = 0;
+  const http = mockHttp(async (c) => {
+    if (c.url.includes("partId=x")) {
+      failedReads++;
+      return { statusCode: 200, body: JSON.stringify({ code: 404, message: "part 不存在" }) };
+    }
+    if (++flakyReads < 3) throw new Error("ECONNRESET");
+    return { statusCode: 200, body: ok("ai-spoken_subjective", 91) };
+  });
+  const out = await pollPartReports(
+    { credentials: { getJwt: async () => "jwt" }, http, sleep: async () => {} } as never,
+    { taskId: "t", ansVersion: 1, parts: [{ partId: "x", partName: "X" }, { partId: "ai", partName: "AI" }] },
+    { pollMs: 1000, maxMs: 10_000 },
+  );
+  assert.equal(failedReads, 1);
+  assert.equal(out.X!.status, "failed");
+  assert.equal(out.AI!.score, 91);
 });
 
 test("pollWithin stops at the wall-clock budget even when reads are slow", async () => {

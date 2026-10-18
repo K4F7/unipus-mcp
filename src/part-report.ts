@@ -19,8 +19,11 @@ export type PartReportPorts = AuthPorts & {
 export type PartScore = {
   partId: string;
   score: number | null;
-  /** ok = report generated; pending = 500 报告尚未生成完成; error = anything else. */
-  status: "ok" | "pending" | "error";
+  /**
+   * ok = report generated; pending = 500 报告尚未生成完成; failed = any other explicit server
+   * code (final, not polled again); error = transport / unreadable reply (polled again).
+   */
+  status: "ok" | "pending" | "failed" | "error";
   detail?: string;
   /** 自由表达: words the server ASR heard (userResponse.fullText). */
   asrWords?: number;
@@ -61,8 +64,11 @@ export function parsePartReport(partId: string, body: string): PartScore {
   }
   const msg = String(j?.message ?? "");
   if (Number(j?.code) === 500 && /尚未生成/.test(msg)) return { partId, score: null, status: "pending", detail: msg };
-  return { partId, score: null, status: "error", detail: `code=${String(j?.code)} ${msg}`.slice(0, 120) };
+  if (j?.code != null) return { partId, score: null, status: "failed", detail: `code=${String(j.code)} ${msg}`.slice(0, 120) };
+  return { partId, score: null, status: "error", detail: `无 code：${body.slice(0, 80)}` };
 }
+
+const isFinal = (s: PartScore) => s.status === "ok" || s.status === "failed";
 
 export async function readPartReport(
   ports: PartReportPorts,
@@ -100,11 +106,11 @@ export async function pollPartReports(
       markProgress(`speak:part-report ${input.taskId}`);
       for (const p of input.parts) {
         const name = p.partName || p.partId;
-        if (out[name]?.status === "ok") continue;
+        if (out[name] && isFinal(out[name]!)) continue;
         out[name] = await readPartReport(ports, { taskId: input.taskId, ansVersion: input.ansVersion, partId: p.partId });
       }
-      const waiting = Object.entries(out).filter(([, s]) => s.status !== "ok").map(([n, s]) => `${n}:${s.status}`);
-      console.error(`[part-report] ${input.taskId} ${waiting.length ? `未出：${waiting.join(" ")}` : "全部已出"}`);
+      const waiting = Object.entries(out).filter(([, s]) => !isFinal(s)).map(([n, s]) => `${n}:${s.status}`);
+      console.error(`[part-report] ${input.taskId} ${waiting.length ? `未出：${waiting.join(" ")}` : "全部结束"}`);
       return waiting.length === 0 ? true : undefined;
     },
     { sleep: ports.sleep, now: ports.clockMs },
