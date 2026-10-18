@@ -548,12 +548,21 @@ export async function grindOneAccount(
       env: ports.env,
       flows: placeFlows,
     };
+    const zeroQuotaNote =
+      placeFlows.length < 2
+        ? `usage 配额为 0 的一侧（${(["listen", "speak"] as const)
+            .filter((f) => !placeFlows.includes(f))
+            .join("/")}）不自动定级；若它仍在定级，平台进度拿不到另一侧计数，本周需先手动完成该侧定级或改配额`
+        : null;
     const placed = await runAutoPlacement(placePorts);
     if (!placed.attempted) {
       return {
         ...base,
         status: "needs_placement",
-        errors: [`needs_placement: ${beforeRaw.error}`],
+        errors: [
+          `needs_placement: ${beforeRaw.error}`,
+          ...(zeroQuotaNote ? [zeroQuotaNote] : []),
+        ],
       };
     }
     for (const side of [placed.listen, placed.speak]) {
@@ -570,6 +579,7 @@ export async function grindOneAccount(
         errors: [
           ...errors,
           `progress_after_placement: ${afterPlace.error}`,
+          ...(zeroQuotaNote ? [zeroQuotaNote] : []),
         ],
       };
     }

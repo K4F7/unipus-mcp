@@ -819,6 +819,7 @@ describe("grind side policy", () => {
     assert.deepEqual(statusFlows, ["speak"]);
     assert.equal(submits, 0);
     assert.equal(result.status, "needs_placement");
+    assert.match(result.errors.join(" "), /配额为 0 的一侧（listen）不自动定级/);
   });
 
   test("assist with a future --from skips before progress", async () => {
