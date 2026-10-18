@@ -347,7 +347,14 @@ async function listenAppScore(
   for (let i = 0; i < tries; i++) {
     if (i > 0) await sleep(ports.scorePollMs ?? 3000);
     markProgress(`listen:score-poll ${taskId}`);
-    const found = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
+    let found: Awaited<ReturnType<typeof findHistoryTrainingTask>>;
+    try {
+      found = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
+    } catch (error) {
+      // The paper is already submitted: a history timeout must not turn it into a failed round.
+      last = toError(error).message;
+      continue;
+    }
     if (found.isError) {
       last = found.message;
       continue;
@@ -458,7 +465,7 @@ export async function grindListenGaps(
       await ports.results?.report({
         skill: "听", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
         status: "failed", error: `${errorClass}: ${err.message}`,
-      });
+      }).catch(() => {});
       return withWarnings({
         completed: taskIds.length,
         taskIds,

@@ -119,14 +119,22 @@ export function installProcessStallWatchdog(
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
   const originals = [stdout.write, stderr.write] as const;
-  const print = (i: 0 | 1, line: string) =>
-    (originals[i] as (s: string) => boolean).call(i === 0 ? stdout : stderr, `${line}\n`);
+  const print = (i: 0 | 1, line: string, done?: () => void) =>
+    (originals[i] as (s: string, cb?: () => void) => boolean).call(i === 0 ? stdout : stderr, `${line}\n`, done);
   const wd = createStallWatchdog(stallMs, ({ idleMs, stage }) => {
     const minutes = Math.round(idleMs / 60_000);
     const message = `${label}: ${minutes} 分钟无进展（最后阶段 ${stage}），stall watchdog 退出 ${EXIT_STALL}`;
+    const exit = opts.exit ?? ((code) => process.exit(code));
+    let exited = false;
+    const exitOnce = () => {
+      if (exited) return;
+      exited = true;
+      exit(EXIT_STALL);
+    };
     print(1, `[watchdog] ${message}`);
-    print(0, JSON.stringify({ event: "fatal", error_code: "STALL", stage, idle_ms: idleMs, message }));
-    (opts.exit ?? ((code) => process.exit(code)))(EXIT_STALL);
+    // Piped stdout writes are async: exit only after the fatal line is flushed (2s cap).
+    print(0, JSON.stringify({ event: "fatal", error_code: "STALL", stage, idle_ms: idleMs, message }), exitOnce);
+    wallClockTimer(2000, exitOnce);
   });
   [stdout, stderr].forEach((stream, i) => {
     const original = originals[i] as (...a: unknown[]) => boolean;

@@ -87,7 +87,7 @@ test("installProcessStallWatchdog: writes count as progress; stall exits EXIT_ST
   const codes: number[] = [];
   const out: string[] = [];
   const err: string[] = [];
-  const stdout = { write: (s: string) => (out.push(s), true) };
+  const stdout = { write: (s: string, cb?: () => void) => (out.push(s), setTimeout(() => cb?.(), 20), true) };
   const stderr = { write: (s: string) => (err.push(s), true) };
   // 0.002 min = 120ms stall window
   const wd = installProcessStallWatchdog("weekly-grind", {

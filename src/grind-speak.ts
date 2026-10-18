@@ -645,7 +645,7 @@ export async function grindSpeakGaps(
     await ports.results?.report({
       skill: "说", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
       status: "failed", error: `${errorClass}: ${err.message}`,
-    });
+    }).catch(() => {});
     return {
       completed: taskIds.length,
       taskIds,

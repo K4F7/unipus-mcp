@@ -6,7 +6,8 @@
  * (`UNIPUS_RESULTS_FILE`, default ~/.config/unipus-mcp/results.jsonl). Accounts
  * appear only by note; phone numbers and jwt-shaped strings are redacted.
  * The file doubles as an idempotency ledger: a taskId+ansVersion recorded as
- * submitted (ok / low_score / grading) is never submitted again.
+ * submitted (ok / low_score / grading) is never submitted again; if the
+ * file cannot be written, report() throws and the grind stops.
  */
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -113,13 +114,14 @@ export async function createPaperReporter(opts: {
       const dupKey = JSON.stringify([line.note, line.skill, line.taskId, line.ansVersion, line.status, line.score, line.scoreIsOut]);
       // Re-runs that reach the same outcome reuse the existing ledger row.
       if (seen.has(dupKey) && line.taskId != null) return;
-      remember(line);
       try {
         await mkdir(dirname(file), { recursive: true });
         await appendFile(file, `${json}\n`);
       } catch (error) {
-        process.stderr.write(`[results] 写状态文件失败 ${file}: ${error instanceof Error ? error.message : String(error)}\n`);
+        // The file is the idempotency ledger: without it a re-run could resubmit, so stop the run.
+        throw new Error(`状态文件写入失败，停止交卷 ${file}: ${error instanceof Error ? error.message : String(error)}`);
       }
+      remember(line);
     },
   };
 }

@@ -77,3 +77,14 @@ test("ledger tolerates foreign / partial lines", async () => {
   const r = await createPaperReporter({ note: "n", file, print: () => {} });
   assert.equal(r.isSubmitted("说", ok.taskId!, 1), true);
 });
+
+test("unwritable ledger → report throws (run must stop instead of losing idempotency)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "results-ro-"));
+  const blocker = join(dir, "file");
+  await writeFile(blocker, "x"); // a file where a directory is expected
+  const printed: string[] = [];
+  const r = await createPaperReporter({ note: "n", file: join(blocker, "results.jsonl"), print: (l) => printed.push(l) });
+  await assert.rejects(r.report(ok), /状态文件写入失败，停止交卷/);
+  assert.equal(r.isSubmitted("说", ok.taskId!, 1), false);
+  assert.equal(printed.length, 1, "stdout line still printed");
+});

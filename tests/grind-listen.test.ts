@@ -111,6 +111,18 @@ describe("grind-listen per-paper results (#88)", () => {
     assert.match(String(lines[0]!.error), /未出分/);
   });
 
+  test("history lookup throwing after submit → grading line, paper still counted", async () => {
+    const base = withHistory(null);
+    const h = { calls: base.calls, request: async (c: never) => {
+      if (String((c as { url: string }).url).includes("getHistoryTrainingTasks")) throw new Error("The operation was aborted due to timeout");
+      return base.request(c);
+    } };
+    const { r, lines } = await run(h as never);
+    assert.equal(r.completed, 1);
+    assert.equal(lines[0]!.status, "grading");
+    assert.match(String(lines[0]!.error), /timeout/);
+  });
+
   test("ledger hit → skipped_existing, no submitAnswer", async () => {
     const h = withHistory(null);
     const { r, lines } = await run(h, ["听|100000000000000001|2"]);
