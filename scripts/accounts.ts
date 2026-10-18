@@ -63,8 +63,8 @@ usage 写入 meta.json：self 自用不过期；assist 帮刷，到期日（上�
 --listen / --speak 对 self 和 assist 都可用，写每周听力、口语篇数（0–30）。platform 改回平台 weekFrequency。
 未写的一侧沿用已保存的篇数。周任务取 min(配置, 平台达标数)。0 表示这一侧本周不做。
 --semester 按配置当天所在学期结束：秋 9/1–次年 1/15，春 2/20–7/10；假期则落到下一学期结束日。
---months 在同一套校历里加自然月，但到期日停在起始日所在学期的结束日，不进入下学期。
---until 按指定日期。--from 默认今天。已保存的 expires_at 不会事后重算。
+--months 在同一套校历里加自然月，但到期日停在起始日所在学期的结束日，不进入下学期；假期起算则停在下一学期结束日。
+--until 按指定日期。--from 默认今天；--from 在未来时，到那天之前 weekly-grind 跳过（skipped_not_started）。已保存的 expires_at 不会事后重算。
 set-password：UNIPUS_PASSWORD_<id> → stdin 写入 accounts/<id>/password（0600）；不读全局 UNIPUS_PASSWORD；永不回显。
 本仓自管密码，不强制 SecretSpec；禁止把密码作 MCP 工具参数。`);
 }

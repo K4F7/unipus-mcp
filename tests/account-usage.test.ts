@@ -9,14 +9,31 @@ import {
   effectiveWeekTotal,
   formatUsage,
   isUsageExpired,
+  isUsageNotStarted,
   normalizeUsage,
   parseUsageArgs,
+  selfUsage,
   semesterEnd,
   shanghaiDate,
   usageFromCommand,
 } from "../src/account-usage.js";
 
 describe("account usage window", () => {
+  test("months started in a vacation cap at the next semester end", () => {
+    assert.equal(assistMonths(12, "2026-08-01").expires_at, "2027-01-15");
+    assert.equal(assistMonths(1, "2026-08-01").expires_at, "2026-09-01");
+    assert.equal(assistMonths(12, "2026-02-01").expires_at, "2026-07-10");
+  });
+
+  test("a future started_at is not started yet, then active", () => {
+    const usage = assistUntil("2027-06-30", "2027-01-01");
+    assert.equal(isUsageNotStarted(usage, "2026-12-31"), true);
+    assert.equal(isUsageExpired(usage, "2026-12-31"), false);
+    assert.match(formatUsage(usage, "2026-12-31"), /not_started/);
+    assert.equal(isUsageNotStarted(usage, "2027-01-01"), false);
+    assert.equal(isUsageNotStarted(selfUsage(), "2000-01-01"), false);
+  });
+
   test("calendar months clamp the day", () => {
     assert.equal(addCalendarMonths("2026-01-31", 1), "2026-02-28");
     assert.equal(addCalendarMonths("2024-01-31", 1), "2024-02-29");

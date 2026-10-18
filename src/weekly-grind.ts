@@ -6,6 +6,7 @@
 import {
   effectiveWeekTotal,
   isUsageExpired,
+  isUsageNotStarted,
   normalizeUsage,
   selfUsage,
   shanghaiDate,
@@ -61,6 +62,7 @@ export type AccountGrindSummary = {
     | "skipped_done"
     | "skipped_captcha"
     | "skipped_expired"
+    | "skipped_not_started"
     | "needs_placement"
     | "error";
   before: ProgressSnap | null;
@@ -73,7 +75,7 @@ export type AccountGrindSummary = {
   speak_skipped: string | null;
   /** self 不过期；assist 带到期日。两边都可以带每周听力/口语篇数。缺省档案按 self。 */
   usage: AccountUsage;
-  /** Non-null when an assist window has ended and this account was not ground. */
+  /** Non-null when usage stopped this run (assist expired / not started / all quotas 0). */
   usage_skip: string | null;
   errors: string[];
   /** Non-fatal notes (e.g. no LLM configured, unanswered listen questions). */
@@ -471,6 +473,25 @@ export async function grindOneAccount(
       ...base,
       status: "skipped_expired",
       usage_skip: `帮刷已到期 ${until}（term=${usage.term}），周任务已跳过`,
+    };
+  }
+
+  if (isUsageNotStarted(usage, today)) {
+    return {
+      ...base,
+      status: "skipped_not_started",
+      usage_skip: `帮刷尚未开始（from=${usage.started_at}），周任务已跳过`,
+    };
+  }
+
+  // 0 = 这一侧本周不做。所有启用侧都是 0 时，在登录 / 定级之前就跳过，避免定级交卷。
+  const listenZero = !sides.listen || usage.listen_per_week === 0;
+  const speakZero = !sides.speak || usage.speak_per_week === 0;
+  if ((sides.listen || sides.speak) && listenZero && speakZero) {
+    return {
+      ...base,
+      status: "skipped_done",
+      usage_skip: "本周配置篇数为 0（usage listen/speak），不登录、不定级、不交卷",
     };
   }
 

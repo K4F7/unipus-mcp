@@ -46,6 +46,8 @@ Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
 Exit codes (stdout always carries the JSON summary when accounts were resolved):
   0  at least one account done/ground/skipped_* / needs_placement
      skipped_expired = 帮刷窗口已过（meta.usage），不登录、不交卷
+     skipped_not_started = 帮刷 --from 还没到，不登录、不交卷
+     启用侧配置篇数全为 0 → skipped_done（不登录、不定级）
   1  every targeted account ended in status=error (see errors / error_class)
   2  usage error or no target accounts
 TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
@@ -77,7 +79,7 @@ async function main(): Promise<void> {
   );
   // captcha skips are soft; exit 0 if anything ground/done/skipped
   const anyOk = summary.accounts.some((a) =>
-    ["done", "ground", "skipped_done", "skipped_captcha", "skipped_expired", "needs_placement"].includes(
+    ["done", "ground", "skipped_done", "skipped_captcha", "skipped_expired", "skipped_not_started", "needs_placement"].includes(
       a.status,
     ),
   );

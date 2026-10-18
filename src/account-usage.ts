@@ -178,10 +178,11 @@ export function assistMonths(months: number, startedAt: string): AccountUsage {
   }
   if (!isIsoDate(startedAt)) throw new Error(`起始日非法：${startedAt}`);
   const added = addCalendarMonths(startedAt, months);
-  const semester = currentSemesterEnd(startedAt);
+  // 学期内：截到本学期结束日。假期起算：截到下一学期结束日（与 --semester 一致），不跨多个学期。
+  const semester = semesterEnd(startedAt);
   return {
     mode: "assist",
-    expires_at: semester != null && added > semester ? semester : added,
+    expires_at: added > semester ? semester : added,
     term: "months",
     months,
     started_at: startedAt,
@@ -263,6 +264,12 @@ export function isUsageExpired(usage: AccountUsage, today = shanghaiDate()): boo
   return today > usage.expires_at;
 }
 
+/** Assist whose started_at is still in the future (Asia/Shanghai date): not active yet. */
+export function isUsageNotStarted(usage: AccountUsage, today = shanghaiDate()): boolean {
+  if (usage.mode !== "assist") return false;
+  return usage.started_at != null && today < usage.started_at;
+}
+
 function formatPerWeek(value: number | null): string {
   return value == null ? "platform" : String(value);
 }
@@ -277,7 +284,11 @@ export function formatUsage(usage: AccountUsage, today = shanghaiDate()): string
   const months = usage.months != null ? ` months=${usage.months}` : "";
   const started = usage.started_at != null ? ` from=${usage.started_at}` : "";
   const until = usage.expires_at ?? "?";
-  const expired = isUsageExpired(usage, today) ? " expired" : "";
+  const expired = isUsageExpired(usage, today)
+    ? " expired"
+    : isUsageNotStarted(usage, today)
+      ? " not_started"
+      : "";
   return `usage=assist term=${usage.term}${months}${started} until=${until}${expired}${quota}`;
 }
 
