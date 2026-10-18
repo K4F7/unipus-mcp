@@ -42,6 +42,8 @@ import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { accountDir } from "./accounts.js";
+import type { PaperReporter } from "./paper-result.js";
+import { markProgress } from "./watchdog.js";
 
 export type ProgressSnap = {
   listen_done: number | null;
@@ -123,6 +125,11 @@ export type WeeklyGrindPorts = AccountFs & {
    * null/undefined → use meta.grind (default both).
    */
   grindOverride?: GrindMode | null;
+  /**
+   * Per-account result reporter (#88): one JSON line per paper on stdout + JSONL
+   * status file. CLI passes createPaperReporter; omitted → no per-paper lines.
+   */
+  resultsFor?: (note: string | null) => Promise<PaperReporter>;
 };
 
 export type SelectAccountsMode =
@@ -495,6 +502,7 @@ export async function grindOneAccount(
     };
   }
 
+  markProgress(`account:auth ${base.note ?? "(无备注)"}`);
   const auth = await ensureAccountAuth(account.account_id, ports);
   if (!auth.ok) {
     if (auth.code === "CAPTCHA_REQUIRED") {
@@ -616,6 +624,7 @@ export async function grindOneAccount(
     credentials,
     http,
     env: ports.env,
+    results: ports.resultsFor ? await ports.resultsFor(base.note) : undefined,
   };
 
   const grindListen = ports.grindListen ?? grindListenGaps;

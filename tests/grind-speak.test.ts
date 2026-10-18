@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   classifyAppReadiness,
   completeOneSpeak,
+  grindSpeakGaps,
   partsAppHistoryReady,
 } from "../src/grind-speak.js";
 import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
@@ -531,5 +532,75 @@ describe("completeOneSpeak review (#62)", () => {
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: true, reportStatus: "completed" }] }), "ready");
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: true, reportStatus: "processing" }] }), "submitted_not_ready");
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: null, reportStatus: null }] }), "not_submitted");
+  });
+});
+
+describe("per-paper results + no silent LLM fallback (#88)", () => {
+  const recorder = (submittedKeys: string[] = []) => {
+    const lines: Array<Record<string, unknown>> = [];
+    return {
+      lines,
+      report: async (r: Record<string, unknown>) => void lines.push(r),
+      isSubmitted: (skill: string, taskId: string, v: number) => submittedKeys.includes(`${skill}|${taskId}|${v}`),
+    };
+  };
+  const ports = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) => ({
+    credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech,
+    sleep: async () => {}, appReadyPollTries: 2, ...extra,
+  });
+
+  test("ok paper → status ok with App score + ansVersion", async () => {
+    const results = recorder();
+    const r = await grindSpeakGaps(ports(scenario({}), { results }) as never, 1, 1);
+    assert.equal(r.completed, 1);
+    assert.deepEqual(results.lines, [{
+      skill: "说", taskId: "555", ansVersion: 1, score: 90, scoreIsOut: true, status: "ok", error: null,
+    }]);
+  });
+
+  test("low App score → low_score line; still grading → grading line", async () => {
+    const low = recorder();
+    await grindSpeakGaps(ports(scenario({ history: () => ({ taskId: "555", scoreIsOut: true, score: 74, ansVersion: 1 }) }), { results: low }) as never, 1, 1);
+    assert.equal(low.lines[0]!.status, "low_score");
+    assert.equal(low.lines[0]!.score, 74);
+    assert.equal(low.lines[0]!.scoreIsOut, true);
+    const grading = recorder();
+    await grindSpeakGaps(ports(scenario({ history: () => ({ taskId: "555", scoreIsOut: false, score: 0, ansVersion: 1 }) }), { results: grading }) as never, 1, 1);
+    assert.equal(grading.lines[0]!.status, "grading");
+    assert.equal(grading.lines[0]!.scoreIsOut, false);
+  });
+
+  test("taskId+ansVersion already in the ledger → skipped_existing, nothing loaded or submitted", async () => {
+    const http = scenario({});
+    const results = recorder(["说|555|1"]);
+    const r = await grindSpeakGaps(ports(http, { results }) as never, 1, 1);
+    assert.equal(r.completed, 0);
+    assert.equal(results.lines[0]!.status, "skipped_existing");
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 0);
+    assert.equal(submitCalls(http).length, 0);
+  });
+});
+
+describe("grindSpeakGaps rounds (#88)", () => {
+  test("maxRounds defaults to max(5, need): need=7 submits 7 papers", async () => {
+    let n = 0;
+    const inner = scenario({});
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) {
+        n++;
+        // per round: before + completeOneSpeak see the same task, after sees the next one
+        const taskId = n % 3 === 0 ? `9${n}` : `${Math.ceil(n / 3)}`;
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { type: "train", taskId, ansVersion: 1, status: 1 } }) };
+      }
+      if (call.url.includes("getHistoryTrainingTasks")) {
+        const list = Array.from({ length: 10 }, (_, i) => ({ taskId: String(i + 1), ansVersion: 1, score: 90, scoreIsOut: true }));
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { page: 1, pageSize: 20, total: 10, totalPages: 1, list } }) };
+      }
+      return inner.request(call);
+    });
+    const r = await grindSpeakGaps({
+      credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 1,
+    } as never, 7);
+    assert.equal(r.completed, 7, String(r.stoppedReason));
   });
 });

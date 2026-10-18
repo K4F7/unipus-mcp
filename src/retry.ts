@@ -1,4 +1,5 @@
 /** Shared retry/backoff + error classification for flaky upstreams (Edge TTS, fetch). */
+import { withWallTimeout } from "./watchdog.js";
 
 export type ErrorClass =
   | "TIMEOUT"
@@ -73,13 +74,5 @@ export async function withRetry<T>(
   }
 }
 
-/** Reject after ms; underlying work is abandoned (caller should clean up). */
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  return Promise.race([
-    p.finally(() => clearTimeout(timer)),
-    new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out (${ms}ms)`)), ms);
-    }),
-  ]);
-}
+/** Reject after ms of wall time (#88); underlying work is abandoned (caller should clean up). */
+export { withWallTimeout as withTimeout };

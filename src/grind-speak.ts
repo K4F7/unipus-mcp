@@ -42,6 +42,8 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
+import type { PaperReporter, PaperResult } from "./paper-result.js";
+import { markProgress } from "./watchdog.js";
 
 let speechEnv: NodeJS.ProcessEnv | undefined;
 
@@ -77,11 +79,23 @@ export type GrindSpeakPorts = AuthPorts & {
    * report/checkStatus===3 before success.
    */
   requireCheckStatusOut?: boolean;
+  /** Per-paper JSONL result lines + idempotency ledger (#88); CLI-only. */
+  results?: PaperReporter;
 };
 
 export type GrindSpeakRoundResult =
-  | { ok: true; taskId: string; appScore?: number }
-  | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
+  | { ok: true; taskId: string; ansVersion?: number; appScore?: number }
+  | {
+      ok: false;
+      taskId: string | null;
+      detail: string;
+      errorClass?: ErrorClass;
+      ansVersion?: number;
+      /** Set when every part was submitted (or the ledger says so) — see paper-result.ts. */
+      outcome?: "low_score" | "grading" | "skipped_existing";
+      appScore?: number;
+      scoreIsOut?: boolean;
+    };
 
 type SpeakPart = {
   partId: string;
@@ -297,6 +311,16 @@ export async function completeOneSpeak(
   }
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
+  if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      outcome: "skipped_existing",
+      detail: `状态文件已记录 ${taskId} v${ansVersion} 已交，跳过不重复交`,
+    };
+  }
+  markProgress(`speak:load ${taskId}`);
 
   const loadUrl = ports.loadPaperUrl ?? resolveLoadPaperUrl(ports.env);
   const loadPath = (() => {
@@ -395,6 +419,7 @@ export async function completeOneSpeak(
       doneParts.push(`${part.partName || part.partId}(已交,跳过)`);
       continue;
     }
+    markProgress(`speak:part ${part.partName || part.partId}`);
     let isAi = false;
     let aiDuration = 0;
     // AI口语对话: real conversation path before part/submit (placeholder EN_SENT → 4113).
@@ -517,8 +542,10 @@ export async function completeOneSpeak(
     reportCheckStatusUrl: ports.reportCheckStatusUrl,
   };
   let lastHint = "历史未查到该 task";
+  let lastScore: number | undefined;
   for (let i = 0; i < tries; i++) {
     if (i > 0) await sleep(pollMs);
+    markProgress(`speak:score-poll ${taskId}`);
     const found = await findHistoryTrainingTask(historyPorts, {
       taskId,
       flowType: "speak",
@@ -534,6 +561,7 @@ export async function completeOneSpeak(
       lastHint = "历史列表未找到该 taskId";
       continue;
     }
+    lastScore = task.score;
     if (task.scoreIsOut !== true) {
       lastHint = `scoreIsOut=false score=${task.score ?? 0}`;
       continue;
@@ -557,16 +585,37 @@ export async function completeOneSpeak(
       return {
         ok: false,
         taskId,
+        ansVersion,
+        outcome: "low_score",
+        appScore,
+        scoreIsOut: true,
         detail: `App 历史已出分但 score=${appScore} < ${minAppScore}（scoreIsOut=true）${doneSuffix()}`,
       };
     }
-    return { ok: true, taskId, appScore };
+    return { ok: true, taskId, ansVersion, appScore };
   }
 
   return {
     ok: false,
     taskId,
+    ansVersion,
+    outcome: "grading",
+    appScore: lastScore,
+    scoreIsOut: false,
     detail: `已交但 App 评分中：part/submit 全部成功，但 getHistoryTrainingTasks 轮询后 scoreIsOut≠true（${lastHint}）${doneSuffix()}`,
+  };
+}
+
+/** Round result → fixed-shape result line (#88). */
+export function speakPaperResult(r: GrindSpeakRoundResult): PaperResult {
+  const base = { skill: "说" as const, taskId: r.taskId, ansVersion: r.ansVersion ?? null };
+  if (r.ok) return { ...base, score: r.appScore ?? null, scoreIsOut: true, status: "ok", error: null };
+  return {
+    ...base,
+    score: r.appScore ?? null,
+    scoreIsOut: r.scoreIsOut ?? null,
+    status: r.outcome ?? "failed",
+    error: r.detail,
   };
 }
 
@@ -582,7 +631,8 @@ export type GrindSpeakGapsResult = {
 export async function grindSpeakGaps(
   ports: GrindSpeakPorts,
   need: number,
-  maxRounds = 5,
+  // Never cap below the requested count.
+  maxRounds = Math.max(5, need),
 ): Promise<GrindSpeakGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
@@ -592,6 +642,10 @@ export async function grindSpeakGaps(
     // Keep already-submitted tasks in the count even if a later call throws.
     const err = toError(error);
     const errorClass = classifyError(err);
+    await ports.results?.report({
+      skill: "说", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
+      status: "failed", error: `${errorClass}: ${err.message}`,
+    }).catch(() => {});
     return {
       completed: taskIds.length,
       taskIds,
@@ -624,6 +678,7 @@ async function grindSpeakLoop(
     const beforeStatus = before?.status;
 
     const result = await completeOneSpeak(ports);
+    await ports.results?.report(speakPaperResult(result));
     if (!result.ok) {
       return {
         completed: taskIds.length, appScores,

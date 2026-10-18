@@ -17,6 +17,7 @@
     "refresh-jwt": "tsx scripts/refresh-jwt.ts",
     "accounts": "tsx scripts/accounts.ts",
     "weekly-grind": "tsx scripts/weekly-grind.ts",
+    "doctor": "tsx scripts/doctor.ts",
     "import-tokens": "tsx scripts/import-tokens.ts"
   },
   "dependencies": {
