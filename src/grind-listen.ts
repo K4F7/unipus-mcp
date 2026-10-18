@@ -36,7 +36,10 @@ import {
   type FetchText,
   type LlmAsk,
 } from "./choice-solver.js";
-import { toError } from "./retry.js";
+import { classifyError, toError, type ErrorClass } from "./retry.js";
+import { findHistoryTrainingTask } from "./history-training-tasks.js";
+import { MIN_APP_SCORE, statusFromScore, type PaperReporter } from "./paper-result.js";
+import { markProgress } from "./watchdog.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -56,11 +59,24 @@ export type GrindListenPorts = AuthPorts & {
   trainProfileMaxPolls?: number;
   /** Delay ms between polls (default 500). */
   trainProfilePollMs?: number;
+  /** Per-paper JSONL result lines + idempotency ledger (#88); CLI-only. */
+  results?: PaperReporter;
+  /** App history score polls per paper when `results` is set (default 5 × 3000ms). */
+  scorePollTries?: number;
+  scorePollMs?: number;
 };
 
 export type GrindListenRoundResult =
-  | { ok: true; taskId: string }
-  | { ok: false; taskId: string | null; detail: string; /** No LLM answer → not submitted. */ refused?: boolean };
+  | { ok: true; taskId: string; ansVersion: number }
+  | {
+      ok: false;
+      taskId: string | null;
+      ansVersion?: number;
+      detail: string;
+      skippedExisting?: boolean;
+      /** No LLM answer → not submitted. */
+      refused?: boolean;
+    };
 
 async function adaptiveGet(
   ports: GrindListenPorts,
@@ -236,6 +252,16 @@ export async function completeOneListen(
   const status = waited.status;
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
+  if (ports.results?.isSubmitted("听", taskId, ansVersion)) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      skippedExisting: true,
+      detail: `状态文件已记录 ${taskId} v${ansVersion} 已交，跳过不重复交`,
+    };
+  }
+  markProgress(`listen:load ${taskId}`);
 
   const loadUrl = ports.loadPaperUrl ?? resolveLoadPaperUrl(ports.env);
   const loadPath = (() => {
@@ -276,6 +302,7 @@ export async function completeOneListen(
     return {
       ok: false,
       taskId,
+      ansVersion,
       detail: `answer build failed, not submitted: ${toError(error).message}`,
       refused: error instanceof AnswerRefusedError,
     };
@@ -300,13 +327,64 @@ export async function completeOneListen(
       detail: `submit error: ${sub.code} ${sub.message}`,
     };
   }
-  return { ok: true, taskId };
+  return { ok: true, taskId, ansVersion };
+}
+
+/** Poll App listen history for the paper's score (reporting only; never fails the grind). */
+async function listenAppScore(
+  ports: GrindListenPorts,
+  taskId: string,
+): Promise<{ score: number | null; scoreIsOut: boolean | null; error: string | null }> {
+  const tries = Math.max(1, ports.scorePollTries ?? 5);
+  const sleep = ports.sleep ?? defaultSleep;
+  let last = "历史列表未找到该 taskId";
+  let score: number | null = null;
+  for (let i = 0; i < tries; i++) {
+    if (i > 0) await sleep(ports.scorePollMs ?? 3000);
+    markProgress(`listen:score-poll ${taskId}`);
+    let found: Awaited<ReturnType<typeof findHistoryTrainingTask>>;
+    try {
+      found = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
+    } catch (error) {
+      // The paper is already submitted: a history timeout must not turn it into a failed round.
+      last = toError(error).message;
+      continue;
+    }
+    if (found.isError) {
+      last = found.message;
+      continue;
+    }
+    if (found.task == null) continue;
+    score = found.task.score ?? null;
+    if (found.task.scoreIsOut === true) return { score, scoreIsOut: true, error: null };
+    last = `scoreIsOut=false score=${score ?? 0}`;
+  }
+  return { score, scoreIsOut: false, error: `已交但 App 未出分：${last}` };
+}
+
+async function reportListen(ports: GrindListenPorts, r: GrindListenRoundResult): Promise<void> {
+  if (!ports.results) return;
+  const base = { skill: "听" as const, taskId: r.taskId, ansVersion: r.ansVersion ?? null };
+  if (!r.ok) {
+    await ports.results.report({
+      ...base, score: null, scoreIsOut: null,
+      status: r.skippedExisting ? "skipped_existing" : "failed", error: r.detail,
+    });
+    return;
+  }
+  const s = await listenAppScore(ports, r.taskId);
+  const status = statusFromScore(s.scoreIsOut, s.score);
+  await ports.results.report({
+    ...base, score: s.score, scoreIsOut: s.scoreIsOut, status,
+    error: s.error ?? (status === "low_score" ? `App 分 ${s.score} < ${MIN_APP_SCORE}` : null),
+  });
 }
 
 export type GrindListenGapsResult = {
   completed: number;
   taskIds: string[];
   stoppedReason?: string;
+  errorClass?: ErrorClass;
   /** A paper was refused for lack of a valid LLM answer; the account must stop. */
   refused?: boolean;
 };
@@ -319,7 +397,8 @@ export type GrindListenGapsResult = {
 export async function grindListenGaps(
   ports: GrindListenPorts,
   need: number,
-  maxRounds = 8,
+  // Never cap below the week's need (a 12-paper account stopped at 8).
+  maxRounds = Math.max(8, need),
 ): Promise<GrindListenGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
@@ -330,47 +409,63 @@ export async function grindListenGaps(
     return { completed: 0, taskIds, stoppedReason: toError(error).message, refused: true };
   }
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
-    const before = statusValue(
-      await (async () => {
-        const jwt = await requireJwt(ports);
-        if (!jwt) return null;
-        return adaptiveGet(
-          ports,
-          "/api/uls/user/getUserStatus?flowType=listen",
-          jwt,
-        );
-      })(),
-    );
-    const beforeTask = before?.taskId != null ? String(before.taskId) : null;
-    const beforeStatus = before?.status;
+    // A throw in one round (e.g. NETWORK) keeps earlier completions and its errorClass.
+    try {
+      const before = statusValue(
+        await (async () => {
+          const jwt = await requireJwt(ports);
+          if (!jwt) return null;
+          return adaptiveGet(
+            ports,
+            "/api/uls/user/getUserStatus?flowType=listen",
+            jwt,
+          );
+        })(),
+      );
+      const beforeTask = before?.taskId != null ? String(before.taskId) : null;
+      const beforeStatus = before?.status;
 
-    const result = await completeOneListen(ports);
-    if (!result.ok) {
+      const result = await completeOneListen(ports);
+      await reportListen(ports, result);
+      if (!result.ok) {
+        return {
+          completed: taskIds.length,
+          taskIds,
+          stoppedReason: result.detail,
+          refused: result.refused,
+        };
+      }
+      taskIds.push(result.taskId);
+
+      const jwt = await requireJwt(ports);
+      if (!jwt) break;
+      // Brief wait so post-submit train_profile can flip before same-task check.
+      const after = (await waitForListenTrain(ports, jwt)).status;
+      const afterTask = after?.taskId != null ? String(after.taskId) : null;
+      if (
+        afterTask &&
+        beforeTask &&
+        afterTask === beforeTask &&
+        after?.status === beforeStatus
+      ) {
+        return {
+          completed: taskIds.length,
+          taskIds,
+          stoppedReason: "same taskId+status after submit",
+        };
+      }
+    } catch (error) {
+      const err = toError(error);
+      const errorClass = classifyError(err);
+      await ports.results?.report({
+        skill: "听", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
+        status: "failed", error: `${errorClass}: ${err.message}`,
+      }).catch(() => {});
       return {
         completed: taskIds.length,
         taskIds,
-        stoppedReason: result.detail,
-        refused: result.refused,
-      };
-    }
-    taskIds.push(result.taskId);
-
-    const jwt = await requireJwt(ports);
-    if (!jwt) break;
-    // Brief wait so post-submit train_profile can flip before same-task check.
-    const afterWait = await waitForListenTrain(ports, jwt);
-    const after = afterWait.ok ? afterWait.status : afterWait.status;
-    const afterTask = after?.taskId != null ? String(after.taskId) : null;
-    if (
-      afterTask &&
-      beforeTask &&
-      afterTask === beforeTask &&
-      after?.status === beforeStatus
-    ) {
-      return {
-        completed: taskIds.length,
-        taskIds,
-        stoppedReason: "same taskId+status after submit",
+        stoppedReason: `${errorClass}: ${err.message}`,
+        errorClass,
       };
     }
   }

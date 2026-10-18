@@ -20,6 +20,7 @@ import {
   resolveEffectiveGrind,
   resolveTargetAccounts,
   runWeeklyGrind,
+  maskAccountId,
   sanitizeSummaryForStdout,
 } from "../src/weekly-grind.js";
 import { mockHttp } from "./mock-http.js";
@@ -346,6 +347,33 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     assert.equal(result.status, "skipped_done");
     assert.equal(grindCalls, 0);
     assert.equal(result.before?.speak_total, 3);
+  });
+
+  test("sanitizeSummaryForStdout: summary line carries note + masked id, never the phone", () => {
+    const row = {
+      account_id: "13912345678",
+      alias: null,
+      note: "一学期（5）",
+      grind: "both" as const,
+      status: "error" as const,
+      before: null,
+      after: null,
+      listen_completed: 0,
+      speak_completed: 0,
+      listen_skipped: null,
+      speak_skipped: null,
+      usage: selfUsage(),
+      usage_skip: null,
+      errors: ["AUTH_FAILED: 13912345678 登录失败"],
+      warnings: ["note 13912345678"],
+    };
+    const cleaned = sanitizeSummaryForStdout({ accounts: [row], started_at: "a", finished_at: "b" });
+    const line = JSON.stringify({ event: "summary", ...cleaned });
+    assert.doesNotMatch(line, /13912345678/);
+    assert.equal(cleaned.accounts[0]!.account_id, "139****5678");
+    assert.equal(cleaned.accounts[0]!.note, "一学期（5）");
+    assert.match(cleaned.accounts[0]!.errors[0]!, /139\*\*\*\*5678 登录失败/);
+    assert.equal(maskAccountId("me-local-id"), "***l-id");
   });
 
   test("sanitizeSummaryForStdout redacts jwt-shaped error text", () => {
@@ -1177,6 +1205,36 @@ describe("grindOneAccount side isolation", () => {
     assert.equal(a.listen_completed, 2);
     assert.equal(a.error_class, "TIMEOUT");
     assert.equal(a.status, "ground");
+  });
+});
+
+describe("per-paper result reporter wiring (#88)", () => {
+  test("resultsFor gets the account note (not the phone) and its reporter reaches both grind sides", async () => {
+    const { setAccountNote } = await import("../src/accounts.js");
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-results-"));
+    const env = { ...LLM_ENV };
+    await saveAccountTokens(
+      { accountId: "13900000000", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.b", makeActive: false, syncLegacy: false },
+      { home, env },
+    );
+    await setAccountNote("13900000000", "一学期（5听3口）", { home, env });
+    const notes: Array<string | null> = [];
+    const reporter = { report: async () => {}, isSubmitted: () => false };
+    const seen: unknown[] = [];
+    await runWeeklyGrind(
+      { kind: "ids", ids: ["13900000000"] },
+      {
+        home,
+        env,
+        llmAsk: okLlm,
+        resultsFor: async (note) => (notes.push(note), reporter),
+        listProgress: async () => ({ listen_done: 0, listen_total: 1, speak_done: 0, speak_total: 1 }),
+        grindListen: async (p) => (seen.push((p as { results?: unknown }).results), { completed: 1, taskIds: ["a"] }),
+        grindSpeak: async (p) => (seen.push((p as { results?: unknown }).results), { completed: 1, taskIds: ["b"] }),
+      },
+    );
+    assert.deepEqual(notes, ["一学期（5听3口）"]);
+    assert.deepEqual(seen, [reporter, reporter]);
   });
 });
 

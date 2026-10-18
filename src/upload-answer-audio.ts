@@ -1,3 +1,4 @@
+import { wallClockSignal } from "./watchdog.js";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
@@ -131,20 +132,23 @@ export async function uploadAnswerAudio(
     fileName,
   );
 
-  const uploadTimeoutMs = resolveUploadTimeoutMs(ports.env ?? process.env);
+  // Wall-clock deadline over request + response body (#82, #88: survives VM suspend).
+  const deadline = wallClockSignal(resolveUploadTimeoutMs(ports.env ?? process.env));
   let uploadResponse: Response;
+  let uploadText: string;
   try {
     uploadResponse = await uploadFetch(qiniuUrl, {
       method: "POST",
       body: form,
-      signal: AbortSignal.timeout(uploadTimeoutMs),
+      signal: deadline.signal,
     });
+    uploadText = await uploadResponse.text();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return toolError("NETWORK_ERROR", `七牛上传网络失败：${detail}`);
+  } finally {
+    deadline.clear();
   }
-
-  const uploadText = await uploadResponse.text();
   if (!uploadResponse.ok) {
     return toolError(
       "UPLOAD_ERROR",

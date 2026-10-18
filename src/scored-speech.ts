@@ -8,9 +8,8 @@ import { mapClioResultToReviewScores, scoreEnSent } from "./clio-speech.js";
 import { buildEnSentScoreRecord } from "./grade-question.js";
 import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
 import { AnswerRefusedError } from "./choice-solver.js";
-import { synthesizeSpeechWav } from "./tts.js";
+import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { mkdtemp, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -160,22 +159,10 @@ export async function buildVocabAnswer(leaf: GrindLeaf, speech: SpeechRecordBuil
 async function wavToMp3(wavPath: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "unipus-mp3-"));
   const out = join(dir, "speech.mp3");
-  const ffmpeg = env?.UNIPUS_FFMPEG?.trim() || "ffmpeg";
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      ffmpeg,
-      ["-y", "-i", wavPath, "-codec:a", "libmp3lame", "-q:a", "4", out],
-      { stdio: ["ignore", "ignore", "pipe"] },
-    );
-    let err = "";
-    child.stderr?.on("data", (c) => {
-      err += String(c);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg mp3: ${err.slice(-400) || code}`));
-    });
-  });
+  await spawnFfmpeg(
+    resolveFfmpegPath(env),
+    ["-y", "-i", wavPath, "-codec:a", "libmp3lame", "-q:a", "4", out],
+    "ffmpeg mp3",
+  );
   return out;
 }

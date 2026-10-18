@@ -2,6 +2,7 @@ import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 
 import WebSocket from "ws";
+import { wallClockTimer } from "./watchdog.js";
 
 import {
   DEFAULT_CLIO_APPLICATION_ID,
@@ -139,9 +140,9 @@ export async function scoreEnSent(
       return;
     }
 
-    const timer = setTimeout(() => {
+    const cancelTimer = wallClockTimer(timeoutMs, () => {
       fail(new Error(`Clio WSS 超时 (${timeoutMs}ms)`));
-    }, timeoutMs);
+    });
 
     const destroySocket = () => {
       try {
@@ -155,7 +156,7 @@ export async function scoreEnSent(
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cancelTimer();
       destroySocket();
       fn();
     };

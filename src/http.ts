@@ -1,3 +1,5 @@
+import { wallClockSignal } from "./watchdog.js";
+
 export const UCLOUD_ORIGIN = "https://ucloud.unipus.cn";
 export const UAI_ORIGIN = "https://uai.unipus.cn";
 export const UADAPTIVE_ORIGIN = "https://uadaptive.unipus.cn";
@@ -62,17 +64,23 @@ export function createFetchUnipusHttp(fetchImpl: FetchLike = globalThis.fetch): 
       if (!headers.has("accept")) {
         headers.set("accept", "application/json, text/plain, */*");
       }
-      const response = await fetchImpl(input.url, {
-        method: input.method ?? "GET",
-        headers,
-        body: input.body,
-        redirect: "manual",
-        signal: AbortSignal.timeout(resolveHttpTimeoutMs()),
-      });
-      return {
-        statusCode: response.status,
-        body: await response.text(),
-      };
+      // Wall-clock deadline covers connect + body read, and survives VM suspend (#88).
+      const deadline = wallClockSignal(resolveHttpTimeoutMs());
+      try {
+        const response = await fetchImpl(input.url, {
+          method: input.method ?? "GET",
+          headers,
+          body: input.body,
+          redirect: "manual",
+          signal: deadline.signal,
+        });
+        return {
+          statusCode: response.status,
+          body: await response.text(),
+        };
+      } finally {
+        deadline.clear();
+      }
     },
   };
 }

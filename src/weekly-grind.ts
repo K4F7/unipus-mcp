@@ -43,6 +43,8 @@ import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { accountDir } from "./accounts.js";
+import type { PaperReporter } from "./paper-result.js";
+import { markProgress } from "./watchdog.js";
 
 export type ProgressSnap = {
   listen_done: number | null;
@@ -126,6 +128,11 @@ export type WeeklyGrindPorts = AccountFs & {
    * null/undefined → use meta.grind (default both).
    */
   grindOverride?: GrindMode | null;
+  /**
+   * Per-account result reporter (#88): one JSON line per paper on stdout + JSONL
+   * status file. CLI passes createPaperReporter; omitted → no per-paper lines.
+   */
+  resultsFor?: (note: string | null) => Promise<PaperReporter>;
 };
 
 type SideResult = {
@@ -517,6 +524,7 @@ export async function grindOneAccount(
     return { ...base, status: "error", errors: [toError(error).message] };
   }
 
+  markProgress(`account:auth ${base.note ?? "(无备注)"}`);
   const auth = await ensureAccountAuth(account.account_id, ports);
   if (!auth.ok) {
     if (auth.code === "CAPTCHA_REQUIRED") {
@@ -642,6 +650,7 @@ export async function grindOneAccount(
     credentials,
     http,
     env: ports.env,
+    results: ports.resultsFor ? await ports.resultsFor(base.note) : undefined,
     llmAsk,
   };
 
@@ -759,20 +768,28 @@ export async function runWeeklyGrind(
   };
 }
 
-/** Redact any accidental secret-looking fields before stdout. */
+/** Phone-shaped account id → 139****0000; other ids keep only the last 4 chars. */
+export function maskAccountId(id: string): string {
+  if (/^1\d{10}$/.test(id)) return `${id.slice(0, 3)}****${id.slice(-4)}`;
+  return id.length > 4 ? `***${id.slice(-4)}` : "***";
+}
+
+const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g;
+const PHONE_RE = /(?<!\d)1\d{10}(?!\d)/g;
+
+/**
+ * stdout summary: accounts by note + masked id only (same as per-paper lines),
+ * never a full phone number or a jwt-shaped token.
+ */
 export function sanitizeSummaryForStdout(summary: WeeklyGrindSummary): WeeklyGrindSummary {
-  const json = JSON.stringify(summary);
-  // Soft guard: never echo jwt-shaped tokens in summary strings
-  if (/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(json)) {
-    return {
-      ...summary,
-      accounts: summary.accounts.map((a) => ({
-        ...a,
-        errors: a.errors.map((e) =>
-          e.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted-jwt]"),
-        ),
-      })),
-    };
-  }
-  return summary;
+  const clean = (e: string) => e.replace(JWT_RE, "[redacted-jwt]").replace(PHONE_RE, maskAccountId);
+  return {
+    ...summary,
+    accounts: summary.accounts.map((a) => ({
+      ...a,
+      account_id: maskAccountId(a.account_id),
+      errors: a.errors.map(clean),
+      ...(a.warnings ? { warnings: a.warnings.map(clean) } : {}),
+    })),
+  };
 }

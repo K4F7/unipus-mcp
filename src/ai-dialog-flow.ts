@@ -24,6 +24,7 @@ import {
   type UploadAnswerAudioPorts,
 } from "./upload-answer-audio.js";
 import { toolError, type ToolResult } from "./result.js";
+import { wallClockTimer, withWallTimeout } from "./watchdog.js";
 
 const BOT_AVATAR =
   "https://unicloud-1313083974.cos.ap-beijing.myqcloud.com/ai-icon/ai-spoken-avatar.png";
@@ -104,6 +105,15 @@ export function resolveOralWsTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
   return Number.isFinite(n) && n >= 5000 ? n : 60_000;
 }
 
+/**
+ * Wall-clock cap for one dialog turn including reconnects/resends (#88):
+ * UNIPUS_ORAL_WS_TURN_MAX_MS, default 240s. Exceeding it fails the AI part.
+ */
+export function resolveOralWsTurnMaxMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.UNIPUS_ORAL_WS_TURN_MAX_MS);
+  return Number.isFinite(n) && n >= 5000 ? n : 240_000;
+}
+
 /** Reply timeout / socket closed / socket error → worth reopening the WS (#72). */
 export function isRetryableWsError(e: unknown): boolean {
   const m = e instanceof Error ? e.message : String(e);
@@ -120,16 +130,21 @@ export function openOralDialogSocket(o: {
   const url = o.url ??
     `wss://oral.unipus.cn/oral_api/ws//${encodeURIComponent(o.conversationId)}` +
     `?scene_id=${encodeURIComponent(o.sceneId)}&language=en-uspeak&tts_gender=female&tts_speed=normal&token=${encodeURIComponent(o.token)}`;
-  const ws = new WebSocket(url, { headers: { origin: "https://uadaptive.unipus.cn" } });
+  const ws = new WebSocket(url, {
+    headers: { origin: "https://uadaptive.unipus.cn" },
+    handshakeTimeout: timeoutMs,
+  });
   const parser = createReplyParser();
   const queue: DialogReply[] = [];
-  const waiters: Array<{ ok: (r: DialogReply) => void; fail: (e: Error) => void }> = [];
+  const waiters: Array<{ ok: (r: DialogReply) => void; fail: (e: Error) => void; touch: () => void }> = [];
   let failed: Error | null = null;
   const fail = (e: Error) => {
     failed = e;
     while (waiters.length) waiters.shift()!.fail(e);
   };
   ws.on("message", (data, isBinary) => {
+    // Inactivity timeout: any frame (text chunk or TTS audio) proves the reply is streaming.
+    for (const w of waiters) w.touch();
     if (isBinary) return;
     const r = parser.push(String(data));
     if (r == null) return;
@@ -150,11 +165,23 @@ export function openOralDialogSocket(o: {
       if (q) return Promise.resolve(q);
       if (failed) return Promise.reject(failed);
       return new Promise((ok, rej) => {
-        const t = setTimeout(() => rej(new Error("oral WS reply timeout")), timeoutMs);
-        waiters.push({
-          ok: (r) => { clearTimeout(t); ok(r); },
-          fail: (e) => { clearTimeout(t); rej(e); },
-        });
+        // No-data timeout on the wall clock: a monotonic setTimeout fired 713s+
+        // late across VM suspend (#88). Reset by every incoming frame.
+        let cancel = () => {};
+        const w = {
+          ok: (r: DialogReply) => { cancel(); ok(r); },
+          fail: (e: Error) => { cancel(); rej(e); },
+          touch: () => {
+            cancel();
+            cancel = wallClockTimer(timeoutMs, () => {
+              const i = waiters.indexOf(w);
+              if (i >= 0) waiters.splice(i, 1);
+              rej(new Error("oral WS reply timeout"));
+            });
+          },
+        };
+        waiters.push(w);
+        w.touch();
       });
     },
     sendAudio(wav) {
@@ -162,6 +189,8 @@ export function openOralDialogSocket(o: {
       opened.then(() => ws.send(wav)).catch(() => {});
     },
     close() {
+      // Pending nextReply() must fail now, not wait out its timeout.
+      fail(new Error("oral WS closed"));
       ws.removeAllListeners("close");
       ws.on("error", () => {});
       ws.close();
@@ -420,16 +449,24 @@ export async function runAiDialogFlow(
     sceneId: String(created.scene_id ?? ""),
     token: String(created.token ?? ""),
   };
-  const openSock = () => (ports.openDialogSocket ?? openOralDialogSocket)(sockArgs);
+  const openSock = () => ports.openDialogSocket
+    ? ports.openDialogSocket(sockArgs)
+    : openOralDialogSocket(sockArgs, resolveOralWsTimeoutMs(ports.env));
+  const turnMaxMs = resolveOralWsTurnMaxMs(ports.env);
   let ws = openSock();
   const wsRetries = Math.max(0, Number(ports.env?.UNIPUS_ORAL_WS_RETRIES ?? 4) || 0);
   /** Await one bot reply; on timeout/close reopen WS (same cid/token) and resend `wav`. */
   const replyWithRetry = async (label: string, wav: Buffer | null): Promise<DialogReply> => {
+    const turnStart = Date.now();
     for (let attempt = 0; ; attempt++) {
       const t0 = Date.now();
+      const remaining = turnMaxMs - (t0 - turnStart);
+      if (remaining <= 0) {
+        throw new Error(`oral WS ${label} 超过每轮总时长上限 ${turnMaxMs}ms（attempt=${attempt}）`);
+      }
       try {
         if (wav != null) ws.sendAudio(wav);
-        const r = await ws.nextReply();
+        const r = await withWallTimeout(ws.nextReply(), remaining, `oral WS ${label} 每轮总时长上限`);
         console.error(`[oral-ws] ${label} ok ${Date.now() - t0}ms${wav ? ` wav=${wav.length}B` : ""}${attempt ? ` retry=${attempt}` : ""}`);
         return r;
       } catch (e) {

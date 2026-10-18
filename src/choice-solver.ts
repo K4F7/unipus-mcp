@@ -9,6 +9,7 @@
  * the caller must not submit (Sein: 没答案不要交).
  */
 import { stripHtml } from "./grind-paper.js";
+import { wallClockSignal } from "./watchdog.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
@@ -30,7 +31,7 @@ export class AnswerRefusedError extends Error {
   }
 }
 
-const LLM_ENV_VARS = ["UNIPUS_LLM_BASE_URL", "UNIPUS_LLM_MODEL", "UNIPUS_LLM_API_KEY"] as const;
+export const LLM_ENV_VARS = ["UNIPUS_LLM_BASE_URL", "UNIPUS_LLM_MODEL", "UNIPUS_LLM_API_KEY"] as const;
 
 /** Only UNIPUS_LLM_BASE_URL / UNIPUS_LLM_MODEL / UNIPUS_LLM_API_KEY; any missing → throws. */
 export function resolveChoiceSolverConfig(env: NodeJS.ProcessEnv = process.env): ChoiceSolverConfig {
@@ -66,30 +67,40 @@ export async function probeLlm(ask: LlmAsk, attempts = 2): Promise<void> {
 
 export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch = globalThis.fetch): LlmAsk {
   return async (prompt) => {
-    const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: 0,
-        max_tokens: 300,
-        messages: [
-          { role: "system", content: "You are an expert English listening exam solver." },
-          { role: "user", content: prompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
-    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    return body.choices?.[0]?.message?.content ?? "";
+    const deadline = wallClockSignal(60_000);
+    try {
+      const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: config.model,
+          temperature: 0,
+          max_tokens: 300,
+          messages: [
+            { role: "system", content: "You are an expert English listening exam solver." },
+            { role: "user", content: prompt },
+          ],
+        }),
+        signal: deadline.signal,
+      });
+      if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      return body.choices?.[0]?.message?.content ?? "";
+    } finally {
+      deadline.clear();
+    }
   };
 }
 
 export const defaultFetchText: FetchText = async (url) => {
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`subtitle HTTP ${res.status}`);
-  return res.text();
+  const deadline = wallClockSignal(20_000);
+  try {
+    const res = await fetch(url, { signal: deadline.signal });
+    if (!res.ok) throw new Error(`subtitle HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    deadline.clear();
+  }
 };
 
 function asRecord(v: unknown): Record<string, unknown> {

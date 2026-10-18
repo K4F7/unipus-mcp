@@ -105,6 +105,66 @@ test("oral WS handshake 500 rejects nextReply without crashing the process (#80)
   }
 });
 
+test("oral WS reply timeout fires on wall clock; late reply is not lost to a dead waiter (#88)", async () => {
+  const { WebSocketServer } = await import("ws");
+  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((r) => wss.on("listening", () => r()));
+  const port = (wss.address() as { port: number }).port;
+  const conns: Array<{ send: (s: string) => void }> = [];
+  wss.on("connection", (c) => conns.push(c));
+  try {
+    const s = openOralDialogSocket({ conversationId: "c", sceneId: "s", token: "t", url: `ws://127.0.0.1:${port}/x` }, 150);
+    const t0 = Date.now();
+    await assert.rejects(s.nextReply(), /oral WS reply timeout/);
+    assert.ok(Date.now() - t0 < 1500);
+    conns[0]!.send("late reply");
+    conns[0]!.send("[end]");
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await s.nextReply()).text, "late reply");
+    s.close();
+  } finally {
+    wss.close();
+  }
+});
+
+test("oral WS: streaming frames reset the no-data timeout; close() fails a pending reply at once (#88)", async () => {
+  const { WebSocketServer } = await import("ws");
+  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((r) => wss.on("listening", () => r()));
+  const port = (wss.address() as { port: number }).port;
+  const conns: Array<{ send: (s: string | Buffer) => void }> = [];
+  wss.on("connection", (c) => conns.push(c));
+  try {
+    const s = openOralDialogSocket({ conversationId: "c", sceneId: "s", token: "t", url: `ws://127.0.0.1:${port}/x` }, 200);
+    const reply = s.nextReply();
+    await new Promise((r) => setTimeout(r, 50));
+    // 5 × 100ms of streaming (500ms total) stays under a 200ms no-data timeout.
+    for (let i = 0; i < 5; i++) {
+      conns[0]!.send(i % 2 ? Buffer.from([1, 2]) : `chunk${i} `);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    conns[0]!.send("[end]");
+    assert.equal((await reply).text, "chunk0 chunk2 chunk4");
+
+    const pending = s.nextReply();
+    const t0 = Date.now();
+    s.close();
+    await assert.rejects(pending, /oral WS closed/);
+    assert.ok(Date.now() - t0 < 100);
+  } finally {
+    wss.close();
+  }
+});
+
+test("oral WS turn cap env + error is not retryable (#88)", async () => {
+  const { resolveOralWsTurnMaxMs, isRetryableWsError } = await import("../src/ai-dialog-flow.js");
+  assert.equal(resolveOralWsTurnMaxMs({}), 240_000);
+  assert.equal(resolveOralWsTurnMaxMs({ UNIPUS_ORAL_WS_TURN_MAX_MS: "90000" }), 90_000);
+  assert.equal(resolveOralWsTurnMaxMs({ UNIPUS_ORAL_WS_TURN_MAX_MS: "1" }), 240_000);
+  assert.equal(isRetryableWsError(new Error("oral WS turn1 每轮总时长上限 timed out (5000ms)")), false);
+  assert.equal(isRetryableWsError(new Error("oral WS turn1 超过每轮总时长上限 5000ms（attempt=2）")), false);
+});
+
 // ---- no template submit: user turns come only from the LLM ----
 import { runAiDialogFlow as runFlow } from "../src/ai-dialog-flow.js";
 import { mockHttp as mockHttpAi } from "./mock-http.js";
