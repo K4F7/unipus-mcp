@@ -18,6 +18,16 @@ export function budgetFromTries(tries: number, pollMs: number): PollBudget {
   return { pollMs, maxMs: (Math.max(1, tries) - 1) * pollMs };
 }
 
+/** One LLM request (wall clock). Reasoning models (grok-4.5) think ~60s on a free-talk script. */
+export function resolveLlmTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_LLM_TIMEOUT_MS", 180_000, 5_000);
+}
+
+/** max_tokens per LLM request; 300 truncated 200–230-word scripts on non-reasoning models. */
+export function resolveLlmMaxTokens(env: NodeJS.ProcessEnv = process.env): number {
+  return Math.round(envNumber(env, "UNIPUS_LLM_MAX_TOKENS", 1024, 64));
+}
+
 export function resolveScorePoll(env: NodeJS.ProcessEnv = process.env): PollBudget {
   return {
     pollMs: envNumber(env, "UNIPUS_SCORE_POLL_MS", 5_000, 500),
@@ -70,7 +80,8 @@ export function describeLimits(env: NodeJS.ProcessEnv = process.env): string {
   return (
     `App 分轮询 ${s.pollMs}ms/上限 ${s.maxMs}ms；part-report 轮询 ${r.pollMs}ms/上限 ${r.maxMs}ms；` +
     `TTS 重试总 ${resolveTtsRetryMaxMs(env)}ms；单 part ${resolvePartMaxMs(env)}ms；整卷 ${resolvePaperMaxMs(env)}ms；` +
-    `AI 每轮 ≥${resolveAiTurnMinMs(env)}ms；自由表达 ≥${resolveFreeTalkMinSec(env)}s 语速 ${resolveFreeTalkTtsSpeed(env)}`
+    `AI 每轮 ≥${resolveAiTurnMinMs(env)}ms；自由表达 ≥${resolveFreeTalkMinSec(env)}s 语速 ${resolveFreeTalkTtsSpeed(env)}；` +
+    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}`
   );
 }
 

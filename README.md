@@ -101,6 +101,7 @@ Speak/listen budgets (#92, all wall clock; `npx tsx scripts/doctor.ts` prints th
 | `UNIPUS_PAPER_MAX_MS` | 2400000 | one whole paper; past it no further part is submitted |
 | `UNIPUS_AI_TURN_MIN_MS` | 55000 | AI dialogue pacing: minimum time between saves, like a human turn |
 | `UNIPUS_FREE_TALK_MIN_SEC` | 90 | 自由表达 recording floor; shorter after regeneration → paper refused |
+| `UNIPUS_LLM_TIMEOUT_MS` / `UNIPUS_LLM_MAX_TOKENS` | 180000 / 1024 | one LLM request (reasoning models need ~60s for a free-talk script) |
 | `UNIPUS_FREE_TALK_TTS_SPEED` | 0.85 | 自由表达 TTS speed (0.5–1.5); sentence pauses are stretched up to 1.2s if needed |
 
 自由表达 text: the LLM is asked for 200–230 words; lead-ins ("Sure, here's…"), titles, quotes, markdown and word counts are stripped, meta replies are rejected, and up to 3 generations are tried — a template or the prompt text is never submitted. Local Clio score is informational only. AI dialogue follows the App: one save per turn with user+bot (opener + 3 turns = 4 saves), real elapsed `duration`, server bot audio, then ebcp/speakers → stop → WS close and a single AI part submit.

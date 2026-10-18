@@ -135,3 +135,34 @@ describe("choice-solver", () => {
     await assert.rejects(buildSolvedFillblankAnswer(data, async () => "garbage"), AnswerRefusedError);
   });
 });
+
+describe("LLM request budget (#92: reasoning models think ~60s, a 230-word script needs >300 tokens)", () => {
+  test("defaults: 180s wall timeout, 1024 max_tokens; env overrides", async () => {
+    const { resolveLlmAsk } = await import("../src/choice-solver.js");
+    const { resolveLlmTimeoutMs, resolveLlmMaxTokens } = await import("../src/limits.js");
+    assert.equal(resolveLlmTimeoutMs({}), 180_000);
+    assert.equal(resolveLlmMaxTokens({}), 1024);
+    assert.equal(resolveLlmTimeoutMs({ UNIPUS_LLM_TIMEOUT_MS: "90000" }), 90_000);
+    assert.equal(resolveLlmMaxTokens({ UNIPUS_LLM_MAX_TOKENS: "2048" }), 2048);
+    const seen: Array<Record<string, unknown>> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: string, init: { body: string }) => {
+      seen.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+    }) as never;
+    try {
+      assert.equal(await resolveLlmAsk({ ...LLM_ENV, UNIPUS_LLM_MAX_TOKENS: "777" })("hi"), "ok");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    assert.equal(seen[0]!.max_tokens, 777);
+  });
+
+  test("a call slower than UNIPUS_LLM_TIMEOUT_MS is aborted", async () => {
+    const { createLlmAsk } = await import("../src/choice-solver.js");
+    const hang = ((_u: string, init: { signal: AbortSignal }) =>
+      new Promise((_r, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)))) as never;
+    const ask = createLlmAsk({ baseUrl: "https://x/v1", model: "m", apiKey: "k", timeoutMs: 50 }, hang);
+    await assert.rejects(ask("hi"), /timeout/i);
+  });
+});
