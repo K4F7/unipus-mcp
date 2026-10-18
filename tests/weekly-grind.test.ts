@@ -788,6 +788,39 @@ describe("grind side policy", () => {
     assert.equal(grindCalls, 0);
   });
 
+  test("a zero-quota side is never auto-placed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-place-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "zp", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.zp" },
+      { home, env },
+    );
+    await setAccountUsage("zp", { ...selfUsage(), listen_per_week: 0, speak_per_week: 3 }, { home, env });
+    const statusFlows: string[] = [];
+    let submits = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      skipPlacement: false,
+      listProgress: async () => ({ error: "NEEDS_PLACEMENT: 听力仍在定级", code: "NEEDS_PLACEMENT" }),
+      http: mockHttp(async (call) => {
+        if (call.url.includes("getUserStatus")) {
+          statusFlows.push(call.url.includes("flowType=listen") ? "listen" : "speak");
+          return {
+            statusCode: 200,
+            body: JSON.stringify({ code: 1, value: { type: "train", taskId: "t1", ansVersion: 1, status: 1 } }),
+          };
+        }
+        if (call.url.includes("submitAnswer")) submits += 1;
+        return { statusCode: 404, body: "{}" };
+      }),
+    });
+    assert.deepEqual(statusFlows, ["speak"]);
+    assert.equal(submits, 0);
+    assert.equal(result.status, "needs_placement");
+  });
+
   test("assist with a future --from skips before progress", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-future-"));
     const env = {};

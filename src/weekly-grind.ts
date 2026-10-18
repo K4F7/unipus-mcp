@@ -538,10 +538,15 @@ export async function grindOneAccount(
       };
     }
 
+    // usage 配额为 0 的一侧不自动定级（不交那一侧的定级卷）。
+    const placeFlows = (["listen", "speak"] as const).filter((flow) =>
+      flow === "listen" ? usage.listen_per_week !== 0 : usage.speak_per_week !== 0,
+    );
     const placePorts: GrindPlacementPorts = {
       credentials,
       http,
       env: ports.env,
+      flows: placeFlows,
     };
     const placed = await runAutoPlacement(placePorts);
     if (!placed.attempted) {
