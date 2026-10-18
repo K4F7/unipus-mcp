@@ -53,6 +53,7 @@ import {
   type ScoreEnSentPorts,
 } from "./clio-speech.js";
 import { z } from "zod";
+import { registerAgentTools } from "./register-agent-tools.js";
 
 const LIST_ACCOUNTS_DESCRIPTION = [
   "List local Unipus account archives under ~/.config/unipus-mcp/accounts/.",
@@ -171,6 +172,8 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       now: authPorts.now,
     };
   }
+
+  registerAgentTools(server, { env: ports?.env, authPortsFor });
 
   server.registerTool(
     "auth_status",
@@ -574,7 +577,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   );
 
   const SPEAK_AND_SUBMIT_DESCRIPTION = [
-    "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
+    "One-shot silent oral: configured TTS → upload_answer_audio → submit_answer.",
     "Requires paperToken from start_listening_training / loadPaper.",
     "Args: text, taskId, paperToken, instanceId; optional voice / ansVersion / durationSec / openId.",
     "Needs ffmpeg on PATH. Does not accept credentials.",

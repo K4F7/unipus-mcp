@@ -31,13 +31,13 @@ import {
 import {
   buildSolvedFillblankAnswer,
   buildSolvedObjectiveAnswer,
-  createLlmAsk,
-  resolveChoiceSolverConfig,
+  resolveConfiguredAsk,
   type FetchText,
   type LlmAsk,
   type SolvedAnswer,
 } from "./choice-solver.js";
-import { toError } from "./retry.js";
+import { classifyError, toError, type ErrorClass } from "./retry.js";
+import { AgentAnswerRequiredError, type AgentAnswerAction } from "./agent-answers.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -61,7 +61,7 @@ export type GrindListenPorts = AuthPorts & {
 
 export type GrindListenRoundResult =
   | { ok: true; taskId: string; warnings: string[] }
-  | { ok: false; taskId: string | null; detail: string };
+  | { ok: false; taskId: string | null; detail: string; nextAction?: AgentAnswerAction };
 
 async function adaptiveGet(
   ports: GrindListenPorts,
@@ -107,8 +107,7 @@ async function adaptivePost(
 
 function resolveAsk(ports: GrindListenPorts): LlmAsk | null {
   if (ports.llmAsk !== undefined) return ports.llmAsk;
-  const config = resolveChoiceSolverConfig(ports.env ?? process.env);
-  return config ? createLlmAsk(config) : null;
+  return resolveConfiguredAsk(ports.env ?? process.env);
 }
 
 /** Leaf answer + warning when the solver left questions unanswered. */
@@ -292,7 +291,10 @@ export async function completeOneListen(
     }
   } catch (error) {
     // LLM / TTS / Clio failure: do not submit a half-guessed paper.
-    return { ok: false, taskId, detail: `answer build failed, not submitted: ${toError(error).message}` };
+    return {
+      ok: false, taskId, detail: `answer build failed, not submitted: ${toError(error).message}`,
+      ...(error instanceof AgentAnswerRequiredError ? { nextAction: error.action } : {}),
+    };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {
@@ -323,6 +325,8 @@ export type GrindListenGapsResult = {
   stoppedReason?: string;
   /** Non-fatal: missing LLM config, per-question unanswered counts. */
   warnings?: string[];
+  nextAction?: AgentAnswerAction;
+  errorClass?: ErrorClass;
 };
 
 /**
@@ -333,7 +337,7 @@ export type GrindListenGapsResult = {
 export async function grindListenGaps(
   ports: GrindListenPorts,
   need: number,
-  maxRounds = 8,
+  maxRounds = Math.max(8, need),
 ): Promise<GrindListenGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
@@ -344,47 +348,58 @@ export async function grindListenGaps(
   }
   const withWarnings = <T extends object>(r: T) => (warnings.length ? { ...r, warnings } : r);
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
-    const before = statusValue(
-      await (async () => {
-        const jwt = await requireJwt(ports);
-        if (!jwt) return null;
-        return adaptiveGet(
-          ports,
-          "/api/uls/user/getUserStatus?flowType=listen",
-          jwt,
-        );
-      })(),
-    );
-    const beforeTask = before?.taskId != null ? String(before.taskId) : null;
-    const beforeStatus = before?.status;
+    try {
+      const before = statusValue(
+        await (async () => {
+          const jwt = await requireJwt(ports);
+          if (!jwt) return null;
+          return adaptiveGet(
+            ports,
+            "/api/uls/user/getUserStatus?flowType=listen",
+            jwt,
+          );
+        })(),
+      );
+      const beforeTask = before?.taskId != null ? String(before.taskId) : null;
+      const beforeStatus = before?.status;
 
-    const result = await completeOneListen(ports);
-    if (!result.ok) {
+      const result = await completeOneListen(ports);
+      if (!result.ok) {
+        return withWarnings({
+          completed: taskIds.length,
+          taskIds,
+          stoppedReason: result.detail,
+          nextAction: result.nextAction,
+        });
+      }
+      taskIds.push(result.taskId);
+      warnings.push(...result.warnings);
+
+      const jwt = await requireJwt(ports);
+      if (!jwt) break;
+      // Brief wait so post-submit train_profile can flip before same-task check.
+      const afterWait = await waitForListenTrain(ports, jwt);
+      const after = afterWait.status;
+      const afterTask = after?.taskId != null ? String(after.taskId) : null;
+      if (
+        afterTask &&
+        beforeTask &&
+        afterTask === beforeTask &&
+        after?.status === beforeStatus
+      ) {
+        return withWarnings({
+          completed: taskIds.length,
+          taskIds,
+          stoppedReason: "same taskId+status after submit",
+        });
+      }
+    } catch (error) {
+      const err = toError(error);
       return withWarnings({
         completed: taskIds.length,
         taskIds,
-        stoppedReason: result.detail,
-      });
-    }
-    taskIds.push(result.taskId);
-    warnings.push(...result.warnings);
-
-    const jwt = await requireJwt(ports);
-    if (!jwt) break;
-    // Brief wait so post-submit train_profile can flip before same-task check.
-    const afterWait = await waitForListenTrain(ports, jwt);
-    const after = afterWait.ok ? afterWait.status : afterWait.status;
-    const afterTask = after?.taskId != null ? String(after.taskId) : null;
-    if (
-      afterTask &&
-      beforeTask &&
-      afterTask === beforeTask &&
-      after?.status === beforeStatus
-    ) {
-      return withWarnings({
-        completed: taskIds.length,
-        taskIds,
-        stoppedReason: "same taskId+status after submit",
+        stoppedReason: err.message,
+        errorClass: classifyError(err),
       });
     }
   }

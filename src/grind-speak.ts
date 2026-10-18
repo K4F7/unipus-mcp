@@ -10,7 +10,7 @@
  * do NOT count. scoreIsOut=true ↔ report/checkStatus===3 ↔ all parts
  * submitted+completed (incl. AI口语对话). submitAnswer alone leaves App 评分中 (#61).
  *
- * No speakers/afplay; no /oral/train; WS oral.unipus.cn not driven.
+ * AI dialogue uses oral.unipus.cn WS. No speakers/afplay; no /oral/train.
  */
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
@@ -42,8 +42,9 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
-
-let speechEnv: NodeJS.ProcessEnv | undefined;
+import type { LlmAsk } from "./choice-solver.js";
+import { AgentAnswerRequiredError } from "./agent-answers.js";
+import type { NextAction } from "./result.js";
 
 /** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
 function resolveAdaptivePartSubmitUrl(env?: NodeJS.ProcessEnv): string {
@@ -60,12 +61,14 @@ export type GrindSpeakPorts = AuthPorts & {
   /** Minimum App history score counted as success (default 80). */
   minAppScore?: number;
   env?: NodeJS.ProcessEnv;
+  /** Same answer source for free talk and AI dialogue; default env LLM / agent queue. */
+  llmAsk?: LlmAsk | null;
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
   speechRecord?: SpeechRecordBuilder;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
-  /** History scoreIsOut poll after submit (default 2000ms × 10 ≈ 20s). */
+  /** History scoreIsOut poll after submit (default 3000ms × 20 ≈ 60s). */
   appReadyPollMs?: number;
   appReadyPollTries?: number;
   /** Override getHistoryTrainingTasks URL (tests). */
@@ -80,8 +83,8 @@ export type GrindSpeakPorts = AuthPorts & {
 };
 
 export type GrindSpeakRoundResult =
-  | { ok: true; taskId: string; appScore?: number }
-  | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
+  | { ok: true; taskId: string; appScore: number }
+  | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass; nextAction?: NextAction };
 
 type SpeakPart = {
   partId: string;
@@ -225,6 +228,7 @@ async function partSubmittedOnServer(
 async function buildAiOrFree(
   leaf: GrindLeaf,
   speech: SpeechRecordBuilder,
+  ports: GrindSpeakPorts,
 ): Promise<string> {
   const type = `${leaf.template} ${leaf.type}`.includes("oral-personal-state")
     ? "EN_PRED_SCORE"
@@ -232,7 +236,7 @@ async function buildAiOrFree(
   // #63: free talk must address the task points (server grades appropriateness).
   const text =
     type === "EN_PRED_SCORE"
-      ? await generateFreeTalk(leafTaskText(leaf), { env: speechEnv })
+      ? await generateFreeTalk(leafTaskText(leaf), { env: ports.env, ask: ports.llmAsk })
       : DEFAULT_AI_SPEAK_SCRIPT;
   const record = await speech(
     text,
@@ -245,6 +249,7 @@ async function buildAiOrFree(
 async function buildLeafAnswer(
   leaf: GrindLeaf,
   speech: SpeechRecordBuilder,
+  ports: GrindSpeakPorts,
 ): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   // App 2.8.7: 视频学习 (video-point-read, no children) submits an empty answer.
@@ -269,7 +274,7 @@ async function buildLeafAnswer(
     const scoop = t.includes("scoop") || t.includes("basic-oral");
     return buildVoicedAnswer(leaf, speech, scoop ? "EN_SENT_REC" : "EN_SENT_SCORE");
   }
-  return buildAiOrFree(leaf, speech);
+  return buildAiOrFree(leaf, speech, ports);
 }
 
 /** Complete one speak train paper via part/submit (App 历史训练 path). */
@@ -362,12 +367,19 @@ export async function completeOneSpeak(
     };
   }
 
-  speechEnv = ports.env;
   const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
   const answers = new Map<string, string>();
+  // Submitted parts and AI dialogue have their own saved answers. Resume should
+  // not need TTS/LLM again for them, nor synthesize an unused AI placeholder.
+  const answerIds = new Set(
+    parts.filter((p) => !p.submitted && !isAiDialogPartName(p.partName))
+      .flatMap((p) => p.questionInstanceIds),
+  );
   try {
     for (const leaf of leaves) {
-      answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech));
+      if (answerIds.has(leaf.instanceId)) {
+        answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech, ports));
+      }
     }
   } catch (error) {
     const err = toError(error);
@@ -377,6 +389,7 @@ export async function completeOneSpeak(
       taskId,
       detail: `tts/upload ${errorClass}: ${err.message}`,
       errorClass,
+      ...(error instanceof AgentAnswerRequiredError ? { nextAction: error.action } : {}),
     };
   }
 
@@ -416,6 +429,7 @@ export async function completeOneSpeak(
           ok: false,
           taskId,
           detail: `AI对话 ${part.partName}: ${flow.code} ${flow.message}${doneSuffix()}`,
+          nextAction: flow.next_action,
         };
       }
       answers.set(qi, flow.answer);
@@ -503,9 +517,13 @@ export async function completeOneSpeak(
 
   const sleep =
     ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  // Each paper waits ~20s here (default 2000ms × 10) for App history scoreIsOut.
-  const pollMs = ports.appReadyPollMs ?? 3000;
-  const tries = Math.max(1, ports.appReadyPollTries ?? 20);
+  // Wait for App history scoreIsOut and report readiness; an accepted submit is not a score.
+  const positiveInt = (raw: string | undefined, fallback: number) => {
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+  };
+  const pollMs = ports.appReadyPollMs ?? positiveInt(ports.env?.UNIPUS_SPEAK_READY_POLL_MS, 3000);
+  const tries = Math.max(1, ports.appReadyPollTries ?? positiveInt(ports.env?.UNIPUS_SPEAK_READY_POLL_TRIES, 20));
   const requireCheck = ports.requireCheckStatusOut !== false;
   // #63: App 显示分 <80 视为失败（UNIPUS_SPEAK_MIN_SCORE 可调，0 关闭）。
   const minAppScore = ports.minAppScore ?? Number(ports.env?.UNIPUS_SPEAK_MIN_SCORE ?? 80);
@@ -552,7 +570,11 @@ export async function completeOneSpeak(
         continue;
       }
     }
-    const appScore = task.score ?? 0;
+    if (task.score == null) {
+      lastHint = "scoreIsOut=true 但平台分数缺失";
+      continue;
+    }
+    const appScore = task.score;
     if (appScore < minAppScore) {
       return {
         ok: false,
@@ -567,6 +589,7 @@ export async function completeOneSpeak(
     ok: false,
     taskId,
     detail: `已交但 App 评分中：part/submit 全部成功，但 getHistoryTrainingTasks 轮询后 scoreIsOut≠true（${lastHint}）${doneSuffix()}`,
+    nextAction: { type: "check_training_result", task_id: taskId, flow_type: "speak", ans_version: ansVersion },
   };
 }
 
@@ -577,17 +600,19 @@ export type GrindSpeakGapsResult = {
   appScores?: number[];
   stoppedReason?: string;
   errorClass?: ErrorClass;
+  nextAction?: NextAction;
 };
 
 export async function grindSpeakGaps(
   ports: GrindSpeakPorts,
   need: number,
-  maxRounds = 5,
+  maxRounds = Math.max(5, need),
 ): Promise<GrindSpeakGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
+  const appScores: number[] = [];
   try {
-    return await grindSpeakLoop(ports, need, maxRounds, taskIds);
+    return await grindSpeakLoop(ports, need, maxRounds, taskIds, appScores);
   } catch (error) {
     // Keep already-submitted tasks in the count even if a later call throws.
     const err = toError(error);
@@ -595,6 +620,7 @@ export async function grindSpeakGaps(
     return {
       completed: taskIds.length,
       taskIds,
+      appScores,
       stoppedReason: `${errorClass}: ${err.message}`,
       errorClass,
     };
@@ -606,8 +632,8 @@ async function grindSpeakLoop(
   need: number,
   maxRounds: number,
   taskIds: string[],
+  appScores: number[],
 ): Promise<GrindSpeakGapsResult> {
-  const appScores: number[] = [];
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
     const jwt = await ports.credentials.getJwt();
     if (!jwt) {
@@ -628,12 +654,13 @@ async function grindSpeakLoop(
       return {
         completed: taskIds.length, appScores,
         taskIds,
-        stoppedReason: result.detail,
+        stoppedReason: `task ${result.taskId ?? "unknown"}: ${result.detail}`,
         errorClass: result.errorClass,
+        nextAction: result.nextAction,
       };
     }
     taskIds.push(result.taskId);
-    appScores.push(result.appScore ?? 0);
+    appScores.push(result.appScore);
 
     const afterBody = (await adaptiveGet(
       ports,

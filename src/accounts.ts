@@ -1,6 +1,6 @@
 /**
  * Multi-account JWT/RT store under ~/.config/unipus-mcp/.
- * Passwords never land on disk; logs never print jwt/rt.
+ * Password files are opt-in (0600); logs never print passwords/jwt/rt.
  */
 import {
   chmod,
@@ -490,7 +490,7 @@ export async function resolveAccountPassword(
   }
   const path = accountPasswordPath(id, p.env, p.home);
   try {
-    const raw = (await p.readFile(path, "utf8")).trim();
+    const raw = (await p.readFile(path, "utf8")).replace(/\r?\n$/, "");
     if (raw.length > 0) return raw;
   } catch (error) {
     if (!isNotFound(error)) throw error;
@@ -517,7 +517,7 @@ export async function accountHasPassword(
   }
   const path = accountPasswordPath(id, p.env, p.home);
   try {
-    const raw = (await p.readFile(path, "utf8")).trim();
+    const raw = (await p.readFile(path, "utf8")).replace(/\r?\n$/, "");
     return raw.length > 0;
   } catch (error) {
     if (!isNotFound(error)) throw error;

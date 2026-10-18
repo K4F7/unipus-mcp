@@ -104,3 +104,37 @@ test("oral WS handshake 500 rejects nextReply without crashing the process (#80)
     srv.close();
   }
 });
+
+test("oral reply timeout measures inactivity and removes expired waiters", async () => {
+  const { WebSocketServer } = await import("ws");
+  const srv = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((resolve) => srv.once("listening", resolve));
+  const port = (srv.address() as { port: number }).port;
+  srv.on("connection", (peer) => {
+    const frames = ["Hello", Buffer.from([1, 2]), " there", "[end]"];
+    const interval = setInterval(() => {
+      const frame = frames.shift();
+      if (frame !== undefined) peer.send(frame);
+      if (!frames.length) clearInterval(interval);
+    }, 80);
+    peer.on("close", () => clearInterval(interval));
+  });
+  const socket = openOralDialogSocket({
+    conversationId: "c", sceneId: "s", token: "t",
+    url: `ws://127.0.0.1:${port}`,
+  }, 150);
+  try {
+    assert.deepEqual(await socket.nextReply(), { asr: "", text: "Hello there" });
+    await assert.rejects(socket.nextReply(), /reply timeout/);
+    const next = socket.nextReply();
+    for (const peer of srv.clients) {
+      peer.send("Recovered");
+      peer.send("[end]");
+    }
+    assert.deepEqual(await next, { asr: "", text: "Recovered" });
+  } finally {
+    socket.close();
+    for (const peer of srv.clients) peer.terminate();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});

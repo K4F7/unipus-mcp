@@ -26,9 +26,17 @@ test("generateFreeTalk falls back to on-topic template without LLM", async () =>
   assert.equal(out, templateFreeTalk("Talk in 60 seconds about the type of music you like."));
 });
 
-test("generateDialogReply retries short LLM answers then falls back", async () => {
+test("configured answer source failure aborts instead of silently submitting a template", async () => {
   let n = 0;
-  const out = await generateDialogReply("Talk about music", "What music?", 0, { ask: async () => { n++; return "ok"; } });
+  await assert.rejects(
+    generateDialogReply("Talk about music", "What music?", 0, {
+      ask: async () => { n++; return "ok"; },
+    }),
+    /SPEAK_CONTENT_FAILED/,
+  );
   assert.equal(n, 3);
-  assert.ok(out.length > 10);
+  await assert.rejects(
+    generateFreeTalk("Talk about music", { ask: async () => { throw new Error("HTTP 503"); } }),
+    /HTTP 503/,
+  );
 });

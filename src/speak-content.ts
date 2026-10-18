@@ -3,9 +3,11 @@
  * App history score for a speak paper follows the server's grading of the free
  * talk (open-speak: appropriateness/coherence/content vs the task points), so a
  * generic off-topic script caps the paper around 40–67. Uses the same
- * OpenAI-compatible LLM config as the listening solver; template fallback.
+ * answer source as the listening solver (agent queue / OpenAI-compatible LLM).
+ * Legacy template is only used when no answer source is configured.
  */
-import { createLlmAsk, resolveChoiceSolverConfig, type LlmAsk } from "./choice-solver.js";
+import { resolveConfiguredAsk, type LlmAsk } from "./choice-solver.js";
+import { AgentAnswerRequiredError } from "./agent-answers.js";
 import { stripHtml, type GrindLeaf } from "./grind-paper.js";
 
 export function leafTaskText(leaf: GrindLeaf): string {
@@ -46,22 +48,22 @@ export type SpeakContentPorts = { env?: NodeJS.ProcessEnv; ask?: LlmAsk | null }
 
 function resolveAsk(ports: SpeakContentPorts): LlmAsk | null {
   if (ports.ask !== undefined) return ports.ask;
-  const cfg = resolveChoiceSolverConfig(ports.env ?? process.env);
-  if (!cfg) return null;
-  const base = createLlmAsk(cfg);
-  return base;
+  return resolveConfiguredAsk(ports.env ?? process.env);
 }
 
-async function askWithRetry(ask: LlmAsk, prompt: string, minWords: number): Promise<string | null> {
+async function askWithRetry(ask: LlmAsk, prompt: string, minWords: number): Promise<string> {
+  let last = "";
   for (let i = 0; i < 3; i++) {
     try {
       const out = cleanSpoken(await ask(prompt));
       if (out.split(/\s+/).length >= minWords) return out;
-    } catch {
-      /* retry */
+      last = `answer needs at least ${minWords} words`;
+    } catch (error) {
+      if (error instanceof AgentAnswerRequiredError) throw error;
+      last = error instanceof Error ? error.message : String(error);
     }
   }
-  return null;
+  throw new Error(`SPEAK_CONTENT_FAILED: ${last}`);
 }
 
 /** ~60 s monologue (≈130–160 words) covering every bullet of the task. */
@@ -76,7 +78,7 @@ export async function generateFreeTalk(task: string, ports: SpeakContentPorts = 
         `Use simple, correct, natural English. Output only the spoken text, no title, no bullet points, no quotes.`,
       90,
     );
-    if (out) return out;
+    return out;
   }
   return templateFreeTalk(task);
 }
@@ -98,7 +100,7 @@ export async function generateDialogReply(
         `${turn === 0 ? "" : " not yet mentioned"}. Output only the spoken reply.`,
       15,
     );
-    if (out) return out;
+    return out;
   }
   return templateFreeTalk(task).split(/(?<=[.!?])\s+/).slice(turn * 2, turn * 2 + 2).join(" ") ||
     "That's a good question. I think it is really important to me, and I enjoy it a lot.";

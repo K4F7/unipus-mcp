@@ -248,6 +248,12 @@ describe("account grind policy", () => {
 });
 
 describe("per-account password", () => {
+  test("file passwords preserve literal punctuation and surrounding spaces", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-pw-literal-"));
+    await writeAccountPassword("literal", "  SamplePassword. ", { home, env: {} });
+    assert.equal(await resolveAccountPassword("literal", { home, env: {} }), "  SamplePassword. ");
+  });
+
   test("writeAccountPassword 0600; resolve prefers UNIPUS_PASSWORD_<id> then file then global", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-pw-"));
     const env: NodeJS.ProcessEnv = {};

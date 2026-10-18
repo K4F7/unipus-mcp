@@ -25,11 +25,15 @@ export type SynthesizeSpeechPorts = {
   synthesizeFallbackWav?: (text: string, wavPath: string) => Promise<void>;
   env?: NodeJS.ProcessEnv;
   sleep?: (ms: number) => Promise<void>;
-  /** Local neural TTS (Kokoro/Piper) writing a 16k wav; injected in tests. */
+  /** Local TTS (Kokoro/Piper/macOS say) writing a 16k wav; injected in tests. */
   synthesizeLocalWav?: (text: string, wavPath: string) => Promise<void>;
 };
 
-export type LocalTtsEngine = "kokoro" | "piper";
+export type LocalTtsEngine = "kokoro" | "piper" | "say";
+
+export function resolveFfmpegPath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.UNIPUS_FFMPEG_BIN?.trim() || env.UNIPUS_FFMPEG?.trim() || "ffmpeg";
+}
 
 /**
  * #66: default engine is local Kokoro (no cloud, no flite fallback). Legacy
@@ -41,7 +45,7 @@ export function resolveLocalTtsEngine(
   legacyInjected = false,
 ): LocalTtsEngine | null {
   const v = env.UNIPUS_TTS_ENGINE?.trim().toLowerCase();
-  if (v === "kokoro" || v === "piper") return v;
+  if (v === "kokoro" || v === "piper" || v === "say") return v;
   if (v === "edge" || v === "flite" || v === "auto") return null;
   return legacyInjected ? null : "kokoro";
 }
@@ -53,6 +57,7 @@ export function resolveLocalTtsScript(env: NodeJS.ProcessEnv = process.env): str
 }
 
 function defaultVoice(engine: LocalTtsEngine, env: NodeJS.ProcessEnv): string {
+  if (engine === "say") return env.UNIPUS_SAY_VOICE?.trim() || "Samantha";
   return engine === "kokoro"
     ? env.UNIPUS_KOKORO_VOICE?.trim() || "af_heart"
     : env.UNIPUS_PIPER_VOICE?.trim() || "en_US-lessac-high";
@@ -62,7 +67,9 @@ function defaultVoice(engine: LocalTtsEngine, env: NodeJS.ProcessEnv): string {
 export function localSynthesizeWav(
   engine: LocalTtsEngine,
   env: NodeJS.ProcessEnv,
+  ffmpegPath = resolveFfmpegPath(env),
 ): (text: string, wavPath: string) => Promise<void> {
+  if (engine === "say") return (text, wavPath) => synthesizeWithSay(text, wavPath, env, ffmpegPath);
   const script = resolveLocalTtsScript(env);
   const voice = defaultVoice(engine, env);
   return (text, wavPath) =>
@@ -76,6 +83,7 @@ export function localSynthesizeWav(
       const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
       child.stderr.on("data", (c: Buffer) => (err += c.toString("utf8")));
       child.on("error", (e) => { clearTimeout(timer); reject(e); });
+      child.stdin.on("error", reject);
       child.on("close", (code) => {
         clearTimeout(timer);
         if (code === 0 && existsSync(wavPath)) resolve();
@@ -96,7 +104,7 @@ export function resetEdgeTtsBreaker(): void {
 }
 
 /**
- * UNIPUS_TTS_ENGINE: auto (default: Edge, fall back to local flite on failure),
+ * Legacy engine selection: auto (Edge, fall back to local flite on failure),
  * edge (Edge only), flite (local only, no network).
  */
 export function resolveTtsEngine(env: NodeJS.ProcessEnv = process.env): "auto" | "edge" | "flite" {
@@ -105,7 +113,7 @@ export function resolveTtsEngine(env: NodeJS.ProcessEnv = process.env): "auto" |
 }
 
 /**
- * TTS via node-edge-tts → ffmpeg 16 kHz mono PCM WAV (matches U听力 mic format).
+ * Selected TTS → 16 kHz mono PCM WAV (matches U听力 mic format).
  */
 export async function synthesizeSpeechWav(
   input: SynthesizeSpeechInput,
@@ -124,7 +132,7 @@ export async function synthesizeSpeechWav(
   const legacyInjected = !!(ports.synthesizeMp3 || ports.synthesizeFallbackWav);
   const local = resolveLocalTtsEngine(ports.env ?? process.env, legacyInjected);
   if (local) {
-    const run = ports.synthesizeLocalWav ?? localSynthesizeWav(local, ports.env ?? process.env);
+    const run = ports.synthesizeLocalWav ?? localSynthesizeWav(local, ports.env ?? process.env, ports.ffmpegPath);
     try {
       // No silent fallback (#66): a failed synthesis aborts the paper.
       await run(text, wavPath);
@@ -146,7 +154,7 @@ export async function synthesizeSpeechWav(
       ? (t: string, v: string, out: string) => edgeCliSynthesizeMp3(cli, t, v, out)
       : (t: string, v: string, out: string) => edgeSynthesizeMp3(t, v, out));
 
-  const ffmpeg = ports.ffmpegPath ?? "ffmpeg";
+  const ffmpeg = ports.ffmpegPath ?? resolveFfmpegPath(ports.env);
   const fallback =
     ports.synthesizeFallbackWav ?? ((t: string, out: string) => runFlite(ffmpeg, t, out));
   const engine = resolveTtsEngine(ports.env);
@@ -203,15 +211,45 @@ function spawnFfmpeg(ffmpegPath: string, args: string[], label: string): Promise
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
     child.stderr.on("data", (chunk: Buffer) => {
-      err += chunk.toString("utf8");
+      err = (err + chunk.toString("utf8")).slice(-4000);
     });
-    child.on("error", (error) => reject(error));
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`${label} (code=${code}): ${err.slice(-400)}`));
     });
   });
+}
+
+/** macOS built-in voice: no Python/model download, still a silent 16k mono WAV. */
+async function synthesizeWithSay(text: string, wavPath: string, env: NodeJS.ProcessEnv, ffmpegPath: string): Promise<void> {
+  if (process.platform !== "darwin") throw new Error("UNIPUS_TTS_ENGINE=say requires macOS");
+  const dir = await mkdtemp(join(tmpdir(), "unipus-say-"));
+  const aiff = join(dir, "speech.aiff");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("/usr/bin/say", ["-v", defaultVoice("say", env), "-o", aiff], {
+        stdio: ["pipe", "ignore", "pipe"],
+      });
+      let err = "";
+      const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+      child.stderr.on("data", (chunk: Buffer) => { err = (err + chunk.toString("utf8")).slice(-4000); });
+      child.stdin.on("error", reject);
+      child.on("error", (error) => { clearTimeout(timer); reject(error); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`macOS say failed (code=${code}): ${err.slice(-400)}`));
+      });
+      child.stdin.end(text);
+    });
+    await runFfmpeg(ffmpegPath, aiff, wavPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /**

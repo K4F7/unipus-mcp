@@ -10,12 +10,38 @@ import {
   checkReportStatus,
   findHistoryTrainingTask,
   getHistoryTrainingTasks,
+  getTrainingResult,
   parseHistoryTrainingPage,
 } from "../src/history-training-tasks.js";
 import { mockHttp } from "./mock-http.js";
 
 const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t";
 const creds = { getJwt: async () => JWT };
+
+test("training verification requires both platform readiness flags and a numeric score", async () => {
+  for (const [scoreIsOut, checkStatus, score, state] of [
+    [false, 3, 95, "scoring"],
+    [true, 2, 95, "scoring"],
+    [true, 3, undefined, "scoring"],
+    [true, 3, 0, "ready"],
+    [true, 3, 95, "ready"],
+  ] as const) {
+    const http = mockHttp(async (call) => ({
+      statusCode: 200,
+      body: JSON.stringify({ code: 1, value: call.url.includes("checkStatus") ? checkStatus : {
+        list: [{ taskId: "1985995334422880257", ansVersion: 2, scoreIsOut, score }],
+        page: 1, totalPages: 1, total: 1,
+      } }),
+    }));
+    const result = await getTrainingResult(
+      { credentials: creds, http, env: {} }, { taskId: "1985995334422880257" },
+    );
+    assert.equal(result.state, state);
+    assert.equal(result.score, state === "ready" ? score : null);
+    assert.equal(http.calls.some((c) => /submit|loadPaper/.test(c.url)), false);
+    assert.equal(JSON.parse(http.calls[1]!.body!).ansVersion, 2);
+  }
+});
 
 describe("parseHistoryTrainingPage", () => {
   test("reads scoreIsOut and large taskId strings", () => {

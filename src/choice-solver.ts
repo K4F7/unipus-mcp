@@ -8,6 +8,7 @@
  * and the grind summary warns. With the LLM on, failures throw (no silent fallback).
  */
 import { pickSingleChoice, stripHtml } from "./grind-paper.js";
+import { AgentAnswerRequiredError, createAgentAsk, resolveAgentAnswerDir } from "./agent-answers.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
@@ -34,6 +35,17 @@ export function resolveChoiceSolverConfig(
     baseUrl: (env.UNIPUS_LLM_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, ""),
     model: env.UNIPUS_LLM_MODEL?.trim() || DEFAULT_MODEL,
   };
+}
+
+/** The driving agent can supply answers directly, without configuring a second LLM. */
+export function resolveConfiguredAsk(env: NodeJS.ProcessEnv = process.env): LlmAsk | null {
+  const dir = resolveAgentAnswerDir(env);
+  if (dir) {
+    const raw = env.UNIPUS_AGENT_ANSWER_WAIT_MS;
+    return createAgentAsk(dir, { waitMs: raw == null ? undefined : Number(raw) });
+  }
+  const config = resolveChoiceSolverConfig(env);
+  return config ? createLlmAsk(config) : null;
 }
 
 export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch = globalThis.fetch): LlmAsk {
@@ -166,6 +178,7 @@ async function askAnswers(ask: LlmAsk, prompt: string, n: number, attempts = LLM
       if (parsed) return parsed;
       last = "unparsable JSON";
     } catch (error) {
+      if (error instanceof AgentAnswerRequiredError) throw error;
       last = error instanceof Error ? error.message : String(error);
     }
   }

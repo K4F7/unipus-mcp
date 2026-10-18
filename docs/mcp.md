@@ -1,5 +1,7 @@
 # unipus-mcp（stdio）
 
+训练执行与恢复从 [agent-workflow.md](agent-workflow.md) 进入。Agent 工具：`runtime_status` 检查本地依赖；`list_answer_requests` / `answer_request` 交接题面与答案；`get_training_result` 查询已交任务是否真正出分。密码仍仅由 CLI/文件处理。
+
 本仓库根目录就是给 Grok Bot / Cursor 用的本机 stdio MCP。体验对齐 [K4F7/chaoxing-mcp](https://github.com/K4F7/chaoxing-mcp) / [K4F7/icourse163-mcp](https://github.com/K4F7/icourse163-mcp)：一个进程、stdio、凭据不进工具参数。
 
 目标产品：手机 App **U听力 / U听说**（包名 `cn.unipus.cloud`），**不是**网页课「261英语视听说」。
@@ -253,10 +255,10 @@ Headless U口语 start (same `loadPaper` as listening):
 
 ## `speak_and_submit`
 
-One-shot silent oral path: Edge TTS → 16 kHz mono WAV → `upload_answer_audio` → `submit_answer`.
+One-shot silent oral path: configured TTS → 16 kHz mono WAV → `upload_answer_audio` → `submit_answer`. Engine configuration is shared with the harness; see [local-tts.md](local-tts.md).
 
 - Args: `text`, `taskId`, `paperToken`, `instanceId`; optional `voice` (default `en-US-JennyNeural`), `ansVersion`, `durationSec`, `openId`.
-- Needs `ffmpeg` on PATH and network for Edge TTS + Qiniu.
+- Needs local TTS dependencies (or explicitly selected Edge), `ffmpeg`, and network for Qiniu.
 - Prefer this over speaker/mic inject.
 
 ## `grade_question`

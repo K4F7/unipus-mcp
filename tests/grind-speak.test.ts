@@ -67,6 +67,22 @@ describe("partsAppHistoryReady", () => {
 });
 
 describe("completeOneSpeak", () => {
+  test("resume of submitted parts verifies scores without regenerating audio or answers", async () => {
+    const http = scenario({
+      parts: () => twoParts().map((p) => ({ ...p, submitted: true, reportStatus: "completed" })),
+    });
+    const result = await completeOneSpeak({
+      credentials: { getJwt: async () => JWT },
+      http,
+      env: {},
+      speechRecord: async () => { throw new Error("already submitted audio must not be regenerated"); },
+      sleep: async () => {},
+      appReadyPollTries: 1,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(http.calls.filter((c) => c.url.includes("part/submit")).length, 0);
+  });
+
   test("uses part/submit snapshot→submit, not submitAnswer", async () => {
     let partGetAfterSubmit = false;
     const http = mockHttp(async (call) => {
@@ -449,7 +465,12 @@ describe("completeOneSpeak review (#62)", () => {
     });
     const r = await run(http);
     assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+    if (!r.ok) {
+      assert.match(r.detail, /已交但 App 评分中/);
+      assert.deepEqual(r.nextAction, {
+        type: "check_training_result", task_id: "555", flow_type: "speak", ans_version: 1,
+      });
+    }
     assert.ok(http.calls.some((c) => c.url.includes("getHistoryTrainingTasks")));
   });
 
@@ -473,6 +494,16 @@ describe("completeOneSpeak review (#62)", () => {
     const r = await run(http);
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+  });
+
+  test("a missing platform score stays pending instead of being invented as zero", async () => {
+    const http = scenario({ history: () => ({ taskId: "555", scoreIsOut: true, ansVersion: 1 }) });
+    const result = await run(http);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.nextAction?.type, "check_training_result");
+      assert.match(result.detail, /分数缺失/);
+    }
   });
 
   test("paginates history until taskId found with scoreIsOut", async () => {

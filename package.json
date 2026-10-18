@@ -16,6 +16,8 @@
     "clio-score-smoke": "tsx scripts/clio-score-smoke.ts",
     "refresh-jwt": "tsx scripts/refresh-jwt.ts",
     "accounts": "tsx scripts/accounts.ts",
+    "answers": "tsx scripts/answers.ts",
+    "doctor": "tsx scripts/doctor.ts",
     "weekly-grind": "tsx scripts/weekly-grind.ts",
     "import-tokens": "tsx scripts/import-tokens.ts"
   },

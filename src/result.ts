@@ -15,6 +15,11 @@ export type ToolResult = {
   message: string;
 };
 
+/** Actionable handoffs returned to the driving agent. */
+export type NextAction =
+  | { type: "answer_request"; request_id: string; queue_dir: string }
+  | { type: "check_training_result"; task_id: string; flow_type: "speak" | "listen"; ans_version: number };
+
 export type AuthStatusResult = ToolResult & {
   authenticated: boolean;
   expired?: boolean | null;

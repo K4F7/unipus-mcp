@@ -5,6 +5,7 @@ import { resolveLocalTtsEngine, synthesizeSpeechWav } from "../src/tts.js";
 test("default engine is local kokoro; legacy only when asked", () => {
   assert.equal(resolveLocalTtsEngine({}), "kokoro");
   assert.equal(resolveLocalTtsEngine({ UNIPUS_TTS_ENGINE: "piper" }), "piper");
+  assert.equal(resolveLocalTtsEngine({ UNIPUS_TTS_ENGINE: "say" }), "say");
   assert.equal(resolveLocalTtsEngine({ UNIPUS_TTS_ENGINE: "edge" }), null);
   assert.equal(resolveLocalTtsEngine({}, true), null);
 });

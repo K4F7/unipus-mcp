@@ -20,9 +20,10 @@ import {
   createStaticJwtStore,
   type JwtCredentialStore,
 } from "./credentials.js";
-import { grindListenGaps, type GrindListenPorts } from "./grind-listen.js";
+import { grindListenGaps, type GrindListenPorts, type GrindListenGapsResult } from "./grind-listen.js";
 import { runAutoPlacement, type GrindPlacementPorts } from "./grind-placement.js";
-import { grindSpeakGaps, type GrindSpeakPorts } from "./grind-speak.js";
+import { grindSpeakGaps, type GrindSpeakPorts, type GrindSpeakGapsResult } from "./grind-speak.js";
+import type { NextAction } from "./result.js";
 import {
   loginWithPassword,
   refreshWithRt,
@@ -53,6 +54,8 @@ export type AccountGrindSummary = {
     | "skipped_done"
     | "skipped_captcha"
     | "needs_placement"
+    | "needs_answer"
+    | "grading_pending"
     | "error";
   before: ProgressSnap | null;
   after: ProgressSnap | null;
@@ -67,6 +70,11 @@ export type AccountGrindSummary = {
   warnings?: string[];
   /** Set when the account run threw unexpectedly (TIMEOUT/NETWORK/FORBIDDEN/…). */
   error_class?: ErrorClass;
+  listen_task_ids?: string[];
+  speak_task_ids?: string[];
+  /** Actual platform scores, aligned with speak_task_ids. */
+  speak_scores?: number[];
+  next_actions?: NextAction[];
 };
 
 export type WeeklyGrindSummary = {
@@ -92,11 +100,11 @@ export type WeeklyGrindPorts = AccountFs & {
   grindListen?: (
     ports: GrindListenPorts,
     need: number,
-  ) => Promise<{ completed: number; taskIds: string[]; stoppedReason?: string }>;
+  ) => Promise<GrindListenGapsResult>;
   grindSpeak?: (
     ports: GrindSpeakPorts,
     need: number,
-  ) => Promise<{ completed: number; taskIds: string[]; stoppedReason?: string }>;
+  ) => Promise<GrindSpeakGapsResult>;
   refreshRt?: typeof refreshWithRt;
   loginPassword?: typeof loginWithPassword;
   /** When false (default), never call makeActive/syncLegacy on token save. */
@@ -120,7 +128,7 @@ export type ParsedWeeklyGrindArgs = {
   grindOverride: GrindMode | null;
   /** CLI --skip-placement: never auto-run 定级. */
   skipPlacement: boolean;
-  /** Set when --listen-only and --speak-only both present. */
+  /** Unknown/missing flags or mutually exclusive arguments. */
   error?: string;
 };
 
@@ -132,6 +140,7 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
   let speakOnly = false;
   let skipPlacement = false;
   const ids: string[] = [];
+  let argumentError: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--help" || a === "-h") help = true;
@@ -140,11 +149,15 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
     else if (a === "--speak-only") speakOnly = true;
     else if (a === "--skip-placement") skipPlacement = true;
     else if (a === "--account" || a === "-a") {
-      const id = argv[++i]?.trim();
-      if (id) ids.push(id);
+      const id = argv[i + 1]?.trim();
+      if (!id || id.startsWith("-")) argumentError = `${a} requires an account id`;
+      else { ids.push(id); i++; }
     } else if (a.startsWith("--account=")) {
       const id = a.slice("--account=".length).trim();
       if (id) ids.push(id);
+      else argumentError = "--account requires an account id";
+    } else {
+      argumentError = `Unknown argument: ${a}`;
     }
   }
   if (listenOnly && speakOnly) {
@@ -154,6 +167,12 @@ export function parseWeeklyGrindArgs(argv: string[]): ParsedWeeklyGrindArgs {
       grindOverride: null,
       skipPlacement,
       error: "--listen-only 与 --speak-only 互斥",
+    };
+  }
+  if (argumentError || (all && ids.length)) {
+    return {
+      mode: { kind: "active" }, help, grindOverride: null, skipPlacement,
+      error: argumentError ?? "--all and --account cannot be combined",
     };
   }
   const grindOverride: GrindMode | null = listenOnly
@@ -201,11 +220,11 @@ export async function resolveTargetAccounts(
   options: AccountFs = {},
 ): Promise<ListedAccount[]> {
   const listed = await listAccounts(options);
-  const withCreds = listed.filter((a) => a.has_jwt || a.has_rt);
+  const withCreds = listed.filter((a) => a.has_jwt || a.has_rt || a.has_password);
   if (mode.kind === "all") return withCreds;
   if (mode.kind === "ids") {
     const out: ListedAccount[] = [];
-    for (const id of mode.ids) {
+    for (const id of new Set(mode.ids)) {
       const row = listed.find((a) => a.account_id === id);
       if (row) out.push(row);
       else {
@@ -555,11 +574,17 @@ export async function grindOneAccount(
   // Each side isolated: a throw on one side keeps the other side's completions.
   const runSide = async (
     side: "listen" | "speak",
-    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass; warnings?: string[] }>,
+    run: () => Promise<{
+      completed: number; taskIds: string[]; stoppedReason?: string;
+      warnings?: string[]; errorClass?: ErrorClass; appScores?: number[]; nextAction?: NextAction;
+    }>,
   ) => {
     try {
       const r = await run();
       base[`${side}_completed`] = r.completed;
+      base[`${side}_task_ids`] = r.taskIds;
+      if (side === "speak" && r.appScores) base.speak_scores = r.appScores;
+      if (r.nextAction) base.next_actions = [...(base.next_actions ?? []), r.nextAction];
       if (r.warnings?.length) base.warnings = [...(base.warnings ?? []), ...r.warnings.map((w) => `${side}: ${w}`)];
       if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
       if (r.errorClass) base.error_class ??= r.errorClass;
@@ -577,7 +602,9 @@ export async function grindOneAccount(
     errors.push(`progress_after: ${afterRaw.error}`);
     return {
       ...base,
-      status: errors.length && base.listen_completed + base.speak_completed === 0
+      status: base.next_actions?.some((a) => a.type === "answer_request") ? "needs_answer"
+        : base.next_actions?.length ? "grading_pending"
+        : errors.length && base.listen_completed + base.speak_completed === 0
         ? "error"
         : "ground",
       errors,
@@ -585,7 +612,11 @@ export async function grindOneAccount(
   }
   base.after = afterRaw;
 
-  if (isAlreadyDone(afterRaw, sides)) {
+  if (base.next_actions?.some((a) => a.type === "answer_request")) {
+    base.status = "needs_answer";
+  } else if (base.next_actions?.length) {
+    base.status = "grading_pending";
+  } else if (isAlreadyDone(afterRaw, sides)) {
     base.status = base.listen_completed + base.speak_completed > 0 ? "done" : "skipped_done";
   } else if (base.listen_completed + base.speak_completed > 0) {
     base.status = "ground";
@@ -605,7 +636,7 @@ export async function runWeeklyGrind(
   const targets = await resolveTargetAccounts(mode, ports);
   const accounts: AccountGrindSummary[] = [];
   for (const account of targets) {
-    if (!account.has_jwt && !account.has_rt) {
+    if (!account.has_jwt && !account.has_rt && !account.has_password) {
       accounts.push({
         account_id: account.account_id,
         alias: account.alias,
@@ -618,7 +649,7 @@ export async function runWeeklyGrind(
         speak_completed: 0,
         listen_skipped: null,
         speak_skipped: null,
-        errors: ["账户不存在或缺少 jwt|rt"],
+        errors: ["账户不存在或缺少 jwt|rt|password"],
       });
       continue;
     }
@@ -656,18 +687,7 @@ export async function runWeeklyGrind(
 
 /** Redact any accidental secret-looking fields before stdout. */
 export function sanitizeSummaryForStdout(summary: WeeklyGrindSummary): WeeklyGrindSummary {
-  const json = JSON.stringify(summary);
-  // Soft guard: never echo jwt-shaped tokens in summary strings
-  if (/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(json)) {
-    return {
-      ...summary,
-      accounts: summary.accounts.map((a) => ({
-        ...a,
-        errors: a.errors.map((e) =>
-          e.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted-jwt]"),
-        ),
-      })),
-    };
-  }
-  return summary;
+  return JSON.parse(JSON.stringify(summary).replace(
+    /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted-jwt]",
+  )) as WeeklyGrindSummary;
 }

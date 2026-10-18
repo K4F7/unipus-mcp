@@ -9,6 +9,10 @@ import { createUnipusMcpServer } from "../src/server.js";
 import type { UnipusHttp } from "../src/http.js";
 
 const EXPECTED_TOOLS = [
+  "runtime_status",
+  "list_answer_requests",
+  "answer_request",
+  "get_training_result",
   "auth_status",
   "list_accounts",
   "list_accounts_progress",
@@ -80,6 +84,11 @@ describe("unipus MCP server", () => {
       assert.equal(authPayload.code, "AUTH_REQUIRED");
       assert.equal(authPayload.isError, true);
       assert.match(String(authPayload.message), /需登录|登录/);
+
+      const result = await client.callTool({
+        name: "get_training_result", arguments: { taskId: "1985995334422880257" },
+      });
+      assert.equal(structuredPayload(result).code, "AUTH_REQUIRED");
 
       const progress = await client.callTool({ name: "list_week_progress", arguments: {} });
       assert.equal("isError" in progress && progress.isError, true);

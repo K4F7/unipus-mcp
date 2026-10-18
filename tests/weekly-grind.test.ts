@@ -8,6 +8,7 @@ import {
   saveAccountTokens,
   setAccountGrind,
   setActiveAccountId,
+  writeAccountPassword,
 } from "../src/accounts.js";
 import {
   buildObjectiveAnswer,
@@ -41,6 +42,12 @@ describe("parseWeeklyGrindArgs", () => {
     const bad = parseWeeklyGrindArgs(["--listen-only", "--speak-only"]);
     assert.ok(bad.error);
     assert.match(bad.error!, /互斥/);
+  });
+
+  test("rejects misspelled flags, missing account ids and conflicting target selectors", () => {
+    for (const args of [["--speek-only"], ["--account"], ["--account", "--all"], ["--account="], ["--all", "--account", "a"]]) {
+      assert.ok(parseWeeklyGrindArgs(args).error, args.join(" "));
+    }
   });
 });
 
@@ -80,6 +87,46 @@ describe("resolveTargetAccounts", () => {
     assert.equal(ids[1]!.account_id, "ghost");
     assert.equal(ids[1]!.has_jwt, false);
   });
+
+  test("targeted password-only account is eligible for password login", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-password-"));
+    const env = {};
+    await writeAccountPassword("pw-only", "secret", { home, env });
+
+    const summary = await runWeeklyGrind(
+      { kind: "ids", ids: ["pw-only"] },
+      {
+        home,
+        env,
+        loginPassword: async () => ({
+          ok: true,
+          jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.pw",
+          refreshToken: "rt-pw",
+        }) as never,
+        listProgress: async () => ({
+          listen_done: 5,
+          listen_total: 5,
+          speak_done: 3,
+          speak_total: 3,
+        }),
+      },
+    );
+
+    assert.equal(summary.accounts[0]!.status, "skipped_done");
+    assert.equal(summary.accounts[0]!.errors.length, 0);
+  });
+
+  test("--all includes password-only accounts and deduplicates explicit targets", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-password-all-"));
+    const options = { home, env: {} };
+    await writeAccountPassword("new-account", "sample.", options);
+    const all = await resolveTargetAccounts({ kind: "all" }, options);
+    assert.deepEqual(all.map((a) => a.account_id), ["new-account"]);
+    const explicit = await resolveTargetAccounts(
+      { kind: "ids", ids: ["new-account", "new-account"] }, options,
+    );
+    assert.equal(explicit.length, 1);
+  });
 });
 
 describe("grind-paper helpers", () => {
@@ -114,6 +161,30 @@ describe("grind-paper helpers", () => {
 });
 
 describe("ensureAccountAuth + grind orchestration (mocked)", () => {
+  test("agent handoffs and grading remain actionable even if weekly counts have advanced", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-actions-"));
+    const env = {};
+    await saveAccountTokens({ accountId: "pending", jwt: "test-jwt" }, { home, env });
+    const [account] = await resolveTargetAccounts({ kind: "all" }, { home, env });
+    for (const action of [
+      { type: "answer_request" as const, request_id: "a".repeat(64), queue_dir: "/tmp/answers" },
+      { type: "check_training_result" as const, task_id: "555", flow_type: "speak" as const, ans_version: 1 },
+    ]) {
+      let checks = 0;
+      const result = await grindOneAccount(account!, {
+        home, env, grindOverride: "speak",
+        listProgress: async () => ({
+          listen_done: 5, listen_total: 5, speak_done: checks++ === 0 ? 2 : 3, speak_total: 3,
+        }),
+        grindSpeak: async () => ({
+          completed: 0, taskIds: [], stoppedReason: "waiting", nextAction: action,
+        }),
+      });
+      assert.equal(result.status, action.type === "answer_request" ? "needs_answer" : "grading_pending");
+      assert.deepEqual(result.next_actions, [action]);
+    }
+  });
+
   test("CAPTCHA_REQUIRED skips and continues others", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-cap-"));
     // No password env: refresh captcha ⇒ skip cap; ok uses existing jwt only
@@ -246,13 +317,16 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       },
       grindSpeak: async (_p, need) => {
         assert.equal(need, 2);
-        return { completed: 2, taskIds: ["s1", "s2"] };
+        return { completed: 2, taskIds: ["s1", "s2"], appScores: [95, 96] };
       },
     });
     assert.equal(result.status, "done");
     assert.equal(result.listen_completed, 2);
     assert.equal(result.speak_completed, 2);
     assert.equal(result.after?.listen_done, 5);
+    assert.deepEqual(result.listen_task_ids, ["l1", "l2"]);
+    assert.deepEqual(result.speak_task_ids, ["s1", "s2"]);
+    assert.deepEqual(result.speak_scores, [95, 96]);
   });
 
   test("sanitizeSummaryForStdout redacts jwt-shaped error text", () => {
@@ -273,11 +347,13 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
           listen_skipped: null,
           speak_skipped: null,
           errors: ["boom eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig end"],
+          warnings: ["eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig"],
         },
       ],
     });
     assert.match(cleaned.accounts[0]!.errors[0]!, /\[redacted-jwt\]/);
     assert.equal(cleaned.accounts[0]!.errors[0]!.includes("eyJ"), false);
+    assert.equal(JSON.stringify(cleaned).includes("eyJ"), false);
   });
 
   test("completeOneListen happy path with mock HTTP", async () => {

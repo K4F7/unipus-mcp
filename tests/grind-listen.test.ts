@@ -33,6 +33,37 @@ function http() {
 const submits = (h: ReturnType<typeof http>) => h.calls.filter((c) => c.url.includes("submitAnswer"));
 
 describe("grind-listen solver paths", () => {
+  test("default round budget fills a twelve-paper target", async () => {
+    const h = http();
+    const result = await grindListenGaps({
+      credentials: { getJwt: async () => "jwt" }, http: h, env: {},
+      llmAsk: async () => '{"answers":["B"]}',
+      sleep: async () => {},
+    }, 12);
+    assert.equal(result.completed, 12);
+    assert.equal(submits(h).length, 12);
+  });
+
+  test("network failure after a submission retains task ids and completion count", async () => {
+    const h = http();
+    const result = await grindListenGaps({
+      credentials: { getJwt: async () => "jwt" },
+      http: {
+        request: async (call) => {
+          if (submits(h).length > 0 && call.url.includes("getUserStatus")) throw new Error("ECONNRESET");
+          return h.request(call);
+        },
+      },
+      env: {}, llmAsk: async () => '{"answers":["B"]}',
+      sleep: async () => {},
+    }, 2);
+    assert.equal(result.completed, 1);
+    assert.equal(result.taskIds.length, 1);
+    assert.match(result.stoppedReason!, /ECONNRESET/);
+    assert.equal(result.errorClass, "NETWORK");
+    assert.equal(submits(h).length, 1);
+  });
+
   test("LLM failure after retries → paper not submitted", async () => {
     const h = http();
     const r = await completeOneListen({
