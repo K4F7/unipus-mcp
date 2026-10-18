@@ -86,6 +86,8 @@ export function createLlmAsk(
           model: config.model,
           temperature: 0,
           max_tokens: config.maxTokens ?? resolveLlmMaxTokens({}),
+          // Streamed so gateways with a ~60s idle cut (grok, #92) keep the connection open.
+          stream: true,
           messages: [
             { role: "system", content: "You are an expert English listening exam solver." },
             { role: "user", content: prompt },
@@ -94,12 +96,27 @@ export function createLlmAsk(
         signal: deadline.signal,
       });
       if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
-      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      return body.choices?.[0]?.message?.content ?? "";
+      if (!/event-stream/.test(res.headers.get("content-type") ?? "")) {
+        const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        return body.choices?.[0]?.message?.content ?? "";
+      }
+      return await readSseContent(res);
     } finally {
       deadline.clear();
     }
   };
+}
+
+/** Join `choices[0].delta.content` of an OpenAI-style SSE body. */
+async function readSseContent(res: Response): Promise<string> {
+  let out = "";
+  for (const line of (await res.text()).split("\n")) {
+    const data = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (!data || data === "[DONE]") continue;
+    const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+    out += chunk.choices?.[0]?.delta?.content ?? "";
+  }
+  return out;
 }
 
 export const defaultFetchText: FetchText = async (url) => {

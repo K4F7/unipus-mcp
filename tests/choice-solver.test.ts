@@ -166,3 +166,34 @@ describe("LLM request budget (#92: reasoning models think ~60s, a 230-word scrip
     await assert.rejects(ask("hi"), /timeout/i);
   });
 });
+
+describe("LLM streaming (#92: the grok gateway 504s a non-streamed reply after 60s)", () => {
+  const capture = async (respond: () => Response) => {
+    const { createLlmAsk } = await import("../src/choice-solver.js");
+    const bodies: Array<Record<string, unknown>> = [];
+    const f = (async (_u: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body));
+      return respond();
+    }) as never;
+    return { ask: createLlmAsk({ baseUrl: "https://x/v1", model: "m", apiKey: "k" }, f), bodies };
+  };
+
+  test("requests a stream and joins SSE deltas (split across chunks)", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\ndata: {"choi',
+      'ces":[{"delta":{"content":" world"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const { ask, bodies } = await capture(() => new Response(new ReadableStream({
+      start(c) { for (const s of sse) c.enqueue(new TextEncoder().encode(s)); c.close(); },
+    }), { headers: { "content-type": "text/event-stream" } }));
+    assert.equal(await ask("hi"), "Hello world");
+    assert.equal(bodies[0]!.stream, true);
+  });
+
+  test("a provider that ignores stream and returns JSON still works", async () => {
+    const { ask } = await capture(() => new Response(JSON.stringify({ choices: [{ message: { content: "B" } }] }), { headers: { "content-type": "application/json" } }));
+    assert.equal(await ask("hi"), "B");
+  });
+});
