@@ -394,3 +394,40 @@ function structuredPayload(result: unknown): {
     paper_token?: string | null;
   };
 }
+
+describe("list_accounts usage", () => {
+  test("returns redacted usage for each archive", async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { saveAccountTokens, setAccountUsage } = await import("../src/accounts.js");
+    const { assistUntil } = await import("../src/account-usage.js");
+    const xdg = await mkdtemp(join(tmpdir(), "unipus-srv-usage-"));
+    const env: NodeJS.ProcessEnv = { XDG_CONFIG_HOME: xdg };
+    await saveAccountTokens({ accountId: "u1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.u", makeActive: false, syncLegacy: false }, { env });
+    await setAccountUsage("u1", { ...assistUntil("2026-12-31", "2026-10-19"), listen_per_week: 5, speak_per_week: 3 }, { env });
+    const server = createUnipusMcpServer({
+      env,
+      credentials: { getJwt: async () => null },
+      http: { async request() { throw new Error("no http"); } },
+    });
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+      const res = await client.callTool({ name: "list_accounts", arguments: {} });
+      const text = (res.content as Array<{ type: string; text: string }>)[0]!.text;
+      const body = JSON.parse(text) as { accounts: Array<{ account_id: string; usage: Record<string, unknown> }> };
+      const row = body.accounts.find((a) => a.account_id === "u1");
+      assert.ok(row);
+      assert.equal(row!.usage.mode, "assist");
+      assert.equal(row!.usage.expires_at, "2026-12-31");
+      assert.equal(row!.usage.listen_per_week, 5);
+      assert.equal(row!.usage.speak_per_week, 3);
+      assert.equal(text.includes("eyJ"), false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
