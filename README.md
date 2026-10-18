@@ -2,7 +2,7 @@
 
 U校园AI / **U听说**（U听力 + U口语）本机 stdio MCP。
 
-Agent 执行训练与排错入口：[docs/agent-workflow.md](docs/agent-workflow.md)。支持本地文件交接答案（无需另配 LLM）、环境自检、断点续做与平台出分核验。
+Agent 执行训练与排错入口：[docs/agent-workflow.md](docs/agent-workflow.md)。答案只通过本地文件交给正在跑的 agent，另有环境自检、断点续做与平台出分核验。
 
 ## 范围
 
@@ -75,10 +75,10 @@ Private use for Sein / K4F7 unless stated otherwise.
 
 ## Weekly grind (harness)
 
-`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — stateless multi-account listen/speak gap fill for AI harness routines. Per-account `meta.grind` (`both`|`listen`|`speak`, default both) plus CLI override; set via `accounts.ts grind <id> …`. MCP still has no scheduler.
+`npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — stateless multi-account listen/speak gap fill for AI harness routines. Per-account `meta.grind` (`both`|`listen`|`speak`, default both) plus CLI override; set via `accounts.ts grind <id> …`. `meta.usage` is `self` (no expiry) or `assist` with a persisted `expires_at`; expired assist accounts return `skipped_expired` and are not submitted. Both modes store `listen_per_week` and `speak_per_week` (`--listen` / `--speak`, 0–30, or `platform`). Unset follows `weekFrequency`; a number caps that side at `min(configured, weekFrequency)`. MCP still has no scheduler.
 
-Speak grind defaults to local Kokoro. Select `UNIPUS_TTS_ENGINE=kokoro|piper|say|edge|flite|auto`; `say` uses macOS built-in speech, while explicit `auto` uses Edge with flite fallback. Run `npm run --silent doctor -- --speech` before training. See [docs/local-tts.md](docs/local-tts.md).
+Speak grind uses macOS `say` when `UNIPUS_TTS_ENGINE` is unset, and Kokoro on Windows and Linux. Explicit `kokoro|piper|say|flite` still overrides. `edge` and `auto` are deprecated. Run `npm run --silent doctor -- --speech` before training. See [docs/local-tts.md](docs/local-tts.md).
 
-Set `UNIPUS_AGENT_ANSWER_DIR` to an absolute directory to let the driving agent answer listening/free-talk/dialogue prompts via files or MCP, without an external LLM key. The harness waits for each answer and emits `answer_required` JSON events on stderr. See [the handoff workflow](docs/agent-workflow.md).
+Set `UNIPUS_AGENT_ANSWER_DIR` to an absolute directory. The driving agent answers listening, free-talk, and dialogue prompts via files or MCP. One paper emits one `answer_batch` on stderr: each `group_id` is one question for one new agent, and that agent answers every `request_id` in the group. Later turns of the same AI dialog reuse that `group_id`. Accounts run together up to `UNIPUS_GRIND_CONCURRENCY` (default 3); one account finishes listening before speaking. See [the handoff workflow](docs/agent-workflow.md).
 
 Once accounts are resolved, stdout carries a JSON summary with per-account status, progress, task IDs, actual speaking scores and `next_actions`. Exit 0 = some success/partial completion/policy skip, 1 = all targets errored, 2 = usage/no targets, 3 = agent answer required, 4 = submitted task still grading. Inspect every account row before declaring completion.

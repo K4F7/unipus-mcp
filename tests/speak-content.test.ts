@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { generateDialogReply, generateFreeTalk, leafTaskText, templateFreeTalk } from "../src/speak-content.js";
+import { generateDialogReply, generateFreeTalk, leafTaskText } from "../src/speak-content.js";
 
 const leaf = {
   instanceId: "1",
@@ -20,10 +20,15 @@ test("generateFreeTalk uses LLM output when long enough", async () => {
   assert.equal(out, words);
 });
 
-test("generateFreeTalk falls back to on-topic template without LLM", async () => {
-  const out = await generateFreeTalk("Talk in 60 seconds about the type of music you like.", { ask: null });
-  assert.match(out, /the type of music you like/);
-  assert.equal(out, templateFreeTalk("Talk in 60 seconds about the type of music you like."));
+test("generateFreeTalk refuses a generic template when no answer source is configured", async () => {
+  await assert.rejects(
+    generateFreeTalk("Talk in 60 seconds about the type of music you like.", { ask: null }),
+    /LOW_SCORE_REFUSED/,
+  );
+  await assert.rejects(
+    generateDialogReply("Talk about music", "What music?", 0, { ask: null }),
+    /LOW_SCORE_REFUSED/,
+  );
 });
 
 test("configured answer source failure aborts instead of silently submitting a template", async () => {

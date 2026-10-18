@@ -9,11 +9,11 @@ test("preflight returns actionable missing TTS/ffmpeg checks without reading sec
   const dir = await mkdtemp(join(tmpdir(), "unipus-doctor-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const result = await runDoctor({ env: {
-    PATH: dir, UNIPUS_LOCAL_TTS_BIN: join(dir, "missing"),
+    PATH: dir, UNIPUS_TTS_ENGINE: "kokoro", UNIPUS_LOCAL_TTS_BIN: join(dir, "missing"),
     UNIPUS_LLM_API_KEY: "must-never-appear", UNIPUS_PASSWORD: "private-password",
   } });
   assert.equal(result.code, "PREFLIGHT_FAILED");
-  assert.equal(result.answer_source, "llm");
+  assert.equal(result.answer_source, "none");
   assert.equal(result.checks.find((c) => c.id === "ffmpeg")?.status, "error");
   assert.equal(result.checks.find((c) => c.id === "tts")?.status, "error");
   assert.ok(result.checks.find((c) => c.id === "tts")?.next_action);
@@ -28,6 +28,7 @@ test("preflight detects the Linux-only Python shebang copied to another machine"
   await writeFile(script, "#!/nonexistent-unipus-python/bin/python\n");
   await chmod(script, 0o700);
   const result = await runDoctor({ env: {
+    UNIPUS_TTS_ENGINE: "kokoro",
     UNIPUS_LOCAL_TTS_BIN: script,
     UNIPUS_AGENT_ANSWER_DIR: join(dir, "answers"),
   } });
@@ -40,7 +41,7 @@ test("preflight reports invalid queue configuration and warns about legacy answe
   const invalid = await runDoctor({ env: { UNIPUS_AGENT_ANSWER_DIR: "relative" } });
   assert.equal(invalid.checks.find((c) => c.id === "answers")?.status, "error");
   const legacy = await runDoctor({ env: {} });
-  assert.equal(legacy.answer_source, "legacy");
+  assert.equal(legacy.answer_source, "none");
   assert.equal(legacy.checks.find((c) => c.id === "answers")?.status, "warning");
 });
 
@@ -65,6 +66,7 @@ test("speech probe checks the format of a real custom TTS process output", async
     await writeFile(script, `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.argv[4],Buffer.from('${wav.toString("base64")}','base64'));\n`);
     await chmod(script, 0o700);
     const result = await runDoctor({ speechProbe: true, env: {
+      UNIPUS_TTS_ENGINE: "kokoro",
       UNIPUS_LOCAL_TTS_BIN: script, UNIPUS_FFMPEG_BIN: process.execPath,
       UNIPUS_AGENT_ANSWER_DIR: join(dir, "answers"),
     } });

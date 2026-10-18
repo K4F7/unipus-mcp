@@ -15,7 +15,6 @@ import {
   type ConversationPorts,
 } from "./conversation.js";
 import { ebcpAuth, ebcpSpeakers, type EbcpPorts } from "./ebcp.js";
-import { DEFAULT_AI_SPEAK_SCRIPT } from "./grind-paper.js";
 import { generateDialogReply } from "./speak-content.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { synthesizeSpeechWav, type SynthesizeSpeechPorts } from "./tts.js";
@@ -24,8 +23,8 @@ import {
   type UploadAnswerAudioPorts,
 } from "./upload-answer-audio.js";
 import { toolError, type ToolResult } from "./result.js";
-import type { LlmAsk } from "./choice-solver.js";
-import { AgentAnswerRequiredError, type AgentAnswerAction } from "./agent-answers.js";
+import type { AnswerAsk } from "./choice-solver.js";
+import { AgentAnswerRequiredError, answerGroupId, type AgentAnswerAction } from "./agent-answers.js";
 
 const BOT_AVATAR =
   "https://unicloud-1313083974.cos.ap-beijing.myqcloud.com/ai-icon/ai-spoken-avatar.png";
@@ -52,7 +51,7 @@ export type AiDialogFlowPorts = AuthPorts &
   EbcpPorts &
   UploadAnswerAudioPorts &
   SynthesizeSpeechPorts & {
-    llmAsk?: LlmAsk | null;
+    answerAsk?: AnswerAsk | null;
     /** Injected for tests; default opens wss://oral.unipus.cn/oral_api/ws//{cid}. */
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
   };
@@ -224,17 +223,6 @@ function nowCurTime(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-function splitUserScripts(turns: number): string[] {
-  const parts = DEFAULT_AI_SPEAK_SCRIPT.split(/(?<=[.!?])\s+/).filter(
-    (s) => s.trim().length > 0,
-  );
-  const out: string[] = [];
-  for (let i = 0; i < turns; i++) {
-    out.push(parts[i % parts.length] ?? DEFAULT_AI_SPEAK_SCRIPT);
-  }
-  return out;
-}
-
 async function ttsUpload(
   ports: AiDialogFlowPorts,
   text: string,
@@ -388,7 +376,9 @@ export async function runAiDialogFlow(
   if (!reusePrior && priorUser > 0) {
     userTurns = Math.max(1, Math.min(userTurns, 10 - priorUser));
   }
-  const userScripts = splitUserScripts(userTurns);
+  if (!reusePrior && !input.taskText?.trim()) {
+    return toolError("LOW_SCORE_REFUSED", "AI 对话没有题目文本，拒绝通用稿");
+  }
   const turns: AiDialogTurn[] = reusePrior ? [...prior] : [];
   const cur = nowCurTime();
   let duration = reusePrior ? prior.reduce((a, t) => a + t.audioDuration, 0) : 0;
@@ -480,9 +470,11 @@ export async function runAiDialogFlow(
     await saveTurn("bot", opener, await ttsUpload(ports, opener, `${Date.now()}-b0`, openId));
     let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
-      const userText = input.taskText
-        ? await generateDialogReply(input.taskText, lastBot, i, { env: ports.env, ask: ports.llmAsk })
-        : userScripts[i]!;
+      const userText = await generateDialogReply(input.taskText ?? "", lastBot, i, {
+        env: ports.env,
+        ask: ports.answerAsk,
+        groupId: answerGroupId(input.taskId, input.questionId),
+      });
       const spoken = await synthesizeSpeechWav({ text: userText }, ports);
       let reply: DialogReply;
       let media: { url: string; dur: number };

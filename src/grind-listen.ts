@@ -1,7 +1,8 @@
 /**
  * Headless listen weekly grind: getUserStatus → loadPaper → full submitAnswer.
  * No part/submit; no speakers. Objective / gap-fill items are answered from the
- * paper transcript (or video subtitles) via an optional LLM (choice-solver.ts);
+ * paper transcript (or video subtitles). A missing answer source, an invalid
+ * choice, or an empty blank throws and the paper is not submitted.
  * 单词跟读 / 视频配音 get Clio-scored voiced records (scored-speech.ts).
  *
  * After each submitAnswer the server briefly returns type=train_profile (taskId
@@ -13,7 +14,6 @@ import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
   buildLearnDoneAnswer,
-  buildObjectiveAnswer,
   finalizeUserData,
   isOkApiCode,
   walkPaperLeaves,
@@ -31,13 +31,24 @@ import {
 import {
   buildSolvedFillblankAnswer,
   buildSolvedObjectiveAnswer,
+  fillblankAnswerFromRaw,
+  objectiveAnswerFromRaw,
+  prepareFillblankSolve,
+  prepareObjectiveSolve,
   resolveConfiguredAsk,
   type FetchText,
-  type LlmAsk,
+  type AnswerAsk,
   type SolvedAnswer,
 } from "./choice-solver.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
-import { AgentAnswerRequiredError, type AgentAnswerAction } from "./agent-answers.js";
+import {
+  AgentAnswerRequiredError,
+  agentAnswerWait,
+  answerGroupId,
+  publishAndWaitAnswers,
+  resolveAgentAnswerDir,
+  type AgentAnswerAction,
+} from "./agent-answers.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -47,8 +58,8 @@ export type GrindListenPorts = AuthPorts & {
   loadPaperUrl?: string;
   /** Voiced record builder (单词跟读 / 视频配音); default TTS → Clio score → upload. */
   speechRecord?: SpeechRecordBuilder;
-  /** LLM for objective items; default when UNIPUS_LLM_API_KEY/SILICONFLOW_API_KEY set. null = heuristic only. */
-  llmAsk?: LlmAsk | null;
+  /** Agent answer callback. Default is UNIPUS_AGENT_ANSWER_DIR. null refuses scored text items. */
+  answerAsk?: AnswerAsk | null;
   /** Subtitle (WebVTT) fetch for video items; default public fetch. */
   fetchText?: FetchText;
   /** Test seam between getUserStatus polls while waiting out train_profile. */
@@ -105,42 +116,58 @@ async function adaptivePost(
   }
 }
 
-function resolveAsk(ports: GrindListenPorts): LlmAsk | null {
-  if (ports.llmAsk !== undefined) return ports.llmAsk;
+function resolveAsk(ports: GrindListenPorts): AnswerAsk | null {
+  if (ports.answerAsk !== undefined) return ports.answerAsk;
   return resolveConfiguredAsk(ports.env ?? process.env);
+}
+
+/** Text leaves share one batch. Voiced / learn leaves stay in this process. */
+function listenTextKind(leaf: GrindLeaf): "fillblank" | "objective" | null {
+  const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
+  if (t.includes("video-dub") || t.includes("follow") || t.includes("oral")) return null;
+  if (t.includes("fillblank")) return "fillblank";
+  return leaf.isObjective || t.includes("single-choice") || t.includes("singlechoice") || t.includes("objective")
+    ? "objective"
+    : null;
+}
+
+function missingAnswerSource(kind: "fillblank" | "objective"): Error {
+  return new Error(kind === "fillblank"
+    ? "LOW_SCORE_REFUSED: 未设置 UNIPUS_AGENT_ANSWER_DIR，听力填空拒绝留空交卷"
+    : "LOW_SCORE_REFUSED: 未设置 UNIPUS_AGENT_ANSWER_DIR，听力单选拒绝交卷");
 }
 
 /** Leaf answer + warning when the solver left questions unanswered. */
 async function buildLeafAnswer(
   leaf: GrindLeaf,
   ports: GrindListenPorts,
-  ask: LlmAsk | null,
+  ask: AnswerAsk | null,
 ): Promise<{ answer: string; warning?: string }> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   const speech = () => ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
-  const solved = (r: SolvedAnswer, what: string) => ({
-    answer: r.answer,
-    ...(r.unanswered > 0 ? { warning: `${leaf.name || leaf.instanceId}: ${r.unanswered} 道${what}无有效 LLM 答案` } : {}),
-  });
+  const solved = (r: SolvedAnswer) => {
+    if (r.unanswered > 0) {
+      throw new Error(`LOW_SCORE_REFUSED: ${leaf.name || leaf.instanceId} 有 ${r.unanswered} 题没有有效答案`);
+    }
+    return { answer: r.answer };
+  };
   // Spoken items first: oral-fillblank must be read aloud, not gap-filled.
   if (t.includes("video-dub") || t.includes("follow") || t.includes("oral")) {
     return { answer: await buildVoicedAnswer(leaf, speech()) };
   }
   if (t.includes("fillblank")) {
-    return solved(await buildSolvedFillblankAnswer(leaf.data, ask, ports.fetchText), "填空");
+    if (!ask) throw new Error("LOW_SCORE_REFUSED: 未设置 UNIPUS_AGENT_ANSWER_DIR，听力填空拒绝留空交卷");
+    return solved(await buildSolvedFillblankAnswer(leaf.data, ask, ports.fetchText));
   }
   if (leaf.isObjective || t.includes("single-choice") || t.includes("singlechoice") || t.includes("objective")) {
-    if (!ask) return { answer: buildObjectiveAnswer(leaf) };
-    return solved(await buildSolvedObjectiveAnswer(leaf.data, ask, ports.fetchText), "单选（已用启发式补）");
+    if (!ask) throw new Error("LOW_SCORE_REFUSED: 未设置 UNIPUS_AGENT_ANSWER_DIR，听力单选拒绝交卷");
+    return solved(await buildSolvedObjectiveAnswer(leaf.data, ask, ports.fetchText));
   }
   if (t.includes("vocabulary")) {
     return { answer: await buildVocabAnswer(leaf, speech()) };
   }
   return { answer: buildLearnDoneAnswer(leaf.expectedChildren) };
 }
-
-export const NO_LLM_WARNING =
-  "未配置 LLM（UNIPUS_LLM_API_KEY / SILICONFLOW_API_KEY）或 UNIPUS_LLM_SOLVER=off：听力单选走旧启发式、填空留空，分数会明显偏低";
 
 async function requireJwt(ports: GrindListenPorts): Promise<string | null> {
   return ports.credentials.getJwt();
@@ -284,13 +311,53 @@ export async function completeOneListen(
   const answers: string[] = [];
   const warnings: string[] = [];
   try {
+    const byId = new Map<string, { answer: string; warning?: string }>();
+    const queued = leaves.filter((leaf) => listenTextKind(leaf) != null);
+    if (queued.length > 0) {
+      if (ports.answerAsk !== undefined) {
+        if (ask == null) throw missingAnswerSource(listenTextKind(queued[0]!)!);
+        const built = await Promise.all(queued.map(async (leaf) => {
+          const row = await buildLeafAnswer(leaf, ports, ask);
+          return [leaf.instanceId, row] as const;
+        }));
+        for (const [id, row] of built) byId.set(id, row);
+      } else {
+        const dir = resolveAgentAnswerDir(ports.env ?? process.env);
+        if (!dir) throw missingAnswerSource(listenTextKind(queued[0]!)!);
+        const prepared = await Promise.all(queued.map(async (leaf) => {
+          if (listenTextKind(leaf) === "fillblank") {
+            const spec = await prepareFillblankSolve(leaf.data, ports.fetchText);
+            return { kind: "fillblank" as const, leaf, ...spec };
+          }
+          const spec = await prepareObjectiveSolve(leaf.data, ports.fetchText);
+          return { kind: "objective" as const, leaf, prompt: spec.prompt, questions: spec.questions };
+        }));
+        const raws = await publishAndWaitAnswers(
+          dir,
+          prepared.map((item) => ({
+            prompt: item.prompt,
+            groupId: answerGroupId(taskId, item.leaf.instanceId),
+          })),
+          agentAnswerWait(ports.env ?? process.env),
+        );
+        prepared.forEach((item, index) => {
+          const solved = item.kind === "objective"
+            ? objectiveAnswerFromRaw(raws[index]!, item.questions)
+            : fillblankAnswerFromRaw(raws[index]!, item.blanks);
+          if (solved.unanswered > 0) {
+            throw new Error(`LOW_SCORE_REFUSED: ${item.leaf.name || item.leaf.instanceId} 有 ${solved.unanswered} 题没有有效答案`);
+          }
+          byId.set(item.leaf.instanceId, { answer: solved.answer });
+        });
+      }
+    }
     for (const leaf of leaves) {
-      const built = await buildLeafAnswer(leaf, ports, ask);
+      const built = byId.get(leaf.instanceId) ?? await buildLeafAnswer(leaf, ports, null);
       answers.push(built.answer);
       if (built.warning) warnings.push(built.warning);
     }
   } catch (error) {
-    // LLM / TTS / Clio failure: do not submit a half-guessed paper.
+    // Answer / TTS / Clio failure: do not submit a half-built paper.
     return {
       ok: false, taskId, detail: `answer build failed, not submitted: ${toError(error).message}`,
       ...(error instanceof AgentAnswerRequiredError ? { nextAction: error.action } : {}),
@@ -323,7 +390,7 @@ export type GrindListenGapsResult = {
   completed: number;
   taskIds: string[];
   stoppedReason?: string;
-  /** Non-fatal: missing LLM config, per-question unanswered counts. */
+  /** Non-fatal notes from a completed paper. */
   warnings?: string[];
   nextAction?: AgentAnswerAction;
   errorClass?: ErrorClass;
@@ -342,10 +409,6 @@ export async function grindListenGaps(
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
   const warnings: string[] = [];
-  if (resolveAsk(ports) == null) {
-    warnings.push(NO_LLM_WARNING);
-    console.error(`[listen] ${NO_LLM_WARNING}`);
-  }
   const withWarnings = <T extends object>(r: T) => (warnings.length ? { ...r, warnings } : r);
   for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
     try {

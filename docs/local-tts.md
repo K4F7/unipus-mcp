@@ -1,6 +1,8 @@
 # 本地 TTS（#66）
 
-口语交卷默认用本地 **Kokoro**（82M，ONNX，CPU）；也可显式选择 macOS 系统语音。合成失败直接报错，保留任务供恢复。
+未设置 `UNIPUS_TTS_ENGINE` 时，macOS 固定用系统语音 `say`，Windows 和 Linux 固定用本地 **Kokoro**（82M，ONNX，CPU）。合成失败直接报错，保留任务供恢复。
+
+Edge TTS（`UNIPUS_TTS_ENGINE=edge` 或 `auto`）即将弃用，只保留给还显式指定它的环境。新的训练不要再用。
 
 ## macOS 系统语音
 
@@ -24,7 +26,7 @@ cp <repo>/scripts/local-tts.py ~/tts-local/synth.py && chmod +x ~/tts-local/synt
 ```
 
 ## 环境变量
-- `UNIPUS_TTS_ENGINE`：`kokoro`（默认）| `piper` | `say`（macOS）| 旧 `edge`/`flite`/`auto`（仅显式指定时）
+- `UNIPUS_TTS_ENGINE`：不设时 macOS 为 `say`，Windows/Linux 为 `kokoro`。显式值：`kokoro` | `piper` | `say`（仅 macOS）| `flite`。`edge` 与 `auto` 即将弃用。
 - `UNIPUS_LOCAL_TTS_BIN`：脚本路径，默认 `~/tts-local/synth.py`
 - `UNIPUS_KOKORO_VOICE`（默认 `af_heart`）/ `UNIPUS_PIPER_VOICE`
 - `UNIPUS_SAY_VOICE`：系统声音，默认 `Samantha`

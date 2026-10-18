@@ -1,11 +1,11 @@
 /**
  * File handoff for the agent already running the harness. No HTTP bridge,
- * second LLM key, credentials, or live WebSocket state in the queue.
+ * credentials, or live WebSocket state in the queue.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { LlmAsk } from "./choice-solver.js";
+import type { AnswerAsk } from "./choice-solver.js";
 import type { NextAction } from "./result.js";
 
 export type AgentAnswerRequest = {
@@ -13,14 +13,27 @@ export type AgentAnswerRequest = {
   request_id: string;
   created_at: string;
   prompt: string;
+  /** Same question shares one agent. Absent on requests written before grouping. */
+  group_id?: string;
 };
 
-export type AgentAnswerAction = Extract<NextAction, { type: "answer_request" }>;
+export type AgentAnswerAction = Extract<NextAction, { type: "answer_request" | "answer_batch" }>;
+
+const GROUP_ID = /^[^\s/\\]{1,200}$/;
+
+export function answerGroupId(taskId: string, instanceId: string): string {
+  const groupId = `${taskId}:${instanceId}`;
+  if (!GROUP_ID.test(groupId)) throw new Error("Invalid answer group_id");
+  return groupId;
+}
 
 export class AgentAnswerRequiredError extends Error {
   readonly code = "AGENT_ANSWER_REQUIRED";
   constructor(readonly action: AgentAnswerAction) {
-    super(`AGENT_ANSWER_REQUIRED: answer request ${action.request_id} in ${action.queue_dir}, then resume`);
+    const what = action.type === "answer_batch"
+      ? `${action.groups.length} answer groups`
+      : `answer request ${action.request_id}`;
+    super(`AGENT_ANSWER_REQUIRED: ${what} in ${action.queue_dir}, then resume`);
   }
 }
 
@@ -60,6 +73,14 @@ async function atomicJson(dir: string, name: string, data: unknown): Promise<voi
   }
 }
 
+function optionalGroupId(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "string" || !GROUP_ID.test(value)) {
+    throw new Error("Invalid answer group_id");
+  }
+  return value;
+}
+
 async function readRequest(dir: string, id: string): Promise<AgentAnswerRequest> {
   validateId(id);
   const raw = await readJson(join(dir, `${id}.request.json`)) as Partial<AgentAnswerRequest> | null;
@@ -67,7 +88,62 @@ async function readRequest(dir: string, id: string): Promise<AgentAnswerRequest>
     || answerRequestId(raw.prompt) !== id || typeof raw.created_at !== "string") {
     throw new Error(`Answer request missing or invalid: ${id}`);
   }
-  return raw as AgentAnswerRequest;
+  let groupId: string | undefined;
+  try {
+    groupId = optionalGroupId(raw.group_id);
+  } catch {
+    throw new Error(`Answer request missing or invalid: ${id}`);
+  }
+  return {
+    version: 1,
+    request_id: id,
+    created_at: raw.created_at,
+    prompt: raw.prompt,
+    ...(groupId ? { group_id: groupId } : {}),
+  };
+}
+
+async function ensureRequest(dir: string, prompt: string, groupId?: string): Promise<string> {
+  const id = answerRequestId(prompt);
+  const path = join(dir, `${id}.request.json`);
+  if (await readJson(path) == null) {
+    const group_id = optionalGroupId(groupId);
+    await atomicJson(dir, `${id}.request.json`, {
+      version: 1,
+      request_id: id,
+      created_at: new Date().toISOString(),
+      prompt,
+      ...(group_id ? { group_id } : {}),
+    } satisfies AgentAnswerRequest);
+  }
+  await readRequest(dir, id);
+  return id;
+}
+
+function groupPending(
+  jobs: Array<{ groupId: string }>,
+  ids: string[],
+  pending: number[],
+): Array<{ group_id: string; request_ids: string[] }> {
+  const order: string[] = [];
+  const grouped = new Map<string, string[]>();
+  for (const index of pending) {
+    const groupId = jobs[index]!.groupId;
+    const list = grouped.get(groupId);
+    if (list) list.push(ids[index]!);
+    else {
+      grouped.set(groupId, [ids[index]!]);
+      order.push(groupId);
+    }
+  }
+  return order.map((group_id) => ({ group_id, request_ids: grouped.get(group_id)! }));
+}
+
+/** Wait settings from UNIPUS_AGENT_ANSWER_WAIT_MS. Omitted env keeps the 10 minute default. */
+export function agentAnswerWait(env?: NodeJS.ProcessEnv): { waitMs?: number } {
+  const raw = env?.UNIPUS_AGENT_ANSWER_WAIT_MS;
+  if (raw == null || raw.trim() === "") return {};
+  return { waitMs: Number(raw) };
 }
 
 async function readResponse(dir: string, id: string): Promise<string | null> {
@@ -117,40 +193,112 @@ export async function replyToAgentAnswerRequest(dir: string, id: string, respons
   });
 }
 
-/** Same prompt → same id. Replies can be reused after an interrupted run. */
+function assertWait(waitMs: number, pollMs: number): void {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || !Number.isSafeInteger(pollMs) || pollMs <= 0) {
+    throw new Error("Agent answer wait/poll milliseconds must be non-negative/positive integers");
+  }
+}
+
+async function pollResponses(
+  dir: string,
+  ids: string[],
+  pending: number[],
+  responses: Array<string | null>,
+  waitMs: number,
+  pollMs: number,
+): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  await Promise.all(pending.map(async (index) => {
+    let response = responses[index] ?? null;
+    while (response == null && Date.now() < deadline) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, left)));
+      response = await readResponse(dir, ids[index]!);
+    }
+    responses[index] = response;
+  }));
+}
+
+/**
+ * Write every request, then emit one answer_batch for the groups that still
+ * need an answer, then poll those requests together. Already-answered prompts
+ * replay and are left out of the event.
+ */
+export async function publishAndWaitAnswers(
+  dir: string,
+  jobs: Array<{ prompt: string; groupId: string }>,
+  options: {
+    waitMs?: number;
+    pollMs?: number;
+    onBatch?: (action: Extract<AgentAnswerAction, { type: "answer_batch" }>) => void | Promise<void>;
+  } = {},
+): Promise<string[]> {
+  const waitMs = options.waitMs ?? 600_000;
+  const pollMs = options.pollMs ?? 250;
+  if (!isAbsolute(dir)) throw new Error("Agent answer directory must be absolute");
+  assertWait(waitMs, pollMs);
+  if (jobs.length === 0) return [];
+  for (const job of jobs) optionalGroupId(job.groupId);
+  const ids: string[] = [];
+  for (const job of jobs) ids.push(await ensureRequest(dir, job.prompt, job.groupId));
+  const responses: Array<string | null> = [];
+  const pending: number[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const response = await readResponse(dir, ids[i]!);
+    responses.push(response);
+    if (response == null) pending.push(i);
+  }
+  if (pending.length === 0) return responses as string[];
+  const action = {
+    type: "answer_batch" as const,
+    queue_dir: dir,
+    groups: groupPending(jobs, ids, pending),
+  };
+  if (options.onBatch) await options.onBatch(action);
+  else console.error(JSON.stringify({ event: "answer_batch", ...action }));
+  if (waitMs === 0) throw new AgentAnswerRequiredError(action);
+  await pollResponses(dir, ids, pending, responses, waitMs, pollMs);
+  if (responses.some((response) => response == null)) {
+    throw new AgentAnswerRequiredError({
+      type: "answer_batch",
+      queue_dir: dir,
+      groups: groupPending(jobs, ids, pending.filter((index) => responses[index] == null)),
+    });
+  }
+  return responses as string[];
+}
+
+/** Same prompt → same id. One prompt emits answer_required. Replies replay after an interrupted run. */
 export function createAgentAsk(
   dir: string,
   options: {
     waitMs?: number;
     pollMs?: number;
-    onRequest?: (action: AgentAnswerAction) => void;
+    onRequest?: (action: Extract<AgentAnswerAction, { type: "answer_request" }>) => void;
   } = {},
-): LlmAsk {
+): AnswerAsk {
   const waitMs = options.waitMs ?? 600_000;
   const pollMs = options.pollMs ?? 250;
   if (!isAbsolute(dir)) throw new Error("Agent answer directory must be absolute");
-  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || !Number.isSafeInteger(pollMs) || pollMs <= 0) {
-    throw new Error("Agent answer wait/poll milliseconds must be non-negative/positive integers");
-  }
-  return async (prompt) => {
-    const id = answerRequestId(prompt);
-    const path = join(dir, `${id}.request.json`);
-    if (await readJson(path) == null) {
-      await atomicJson(dir, `${id}.request.json`, {
-        version: 1, request_id: id, created_at: new Date().toISOString(), prompt,
-      } satisfies AgentAnswerRequest);
-    }
-    await readRequest(dir, id);
-    const action: AgentAnswerAction = { type: "answer_request", request_id: id, queue_dir: dir };
+  assertWait(waitMs, pollMs);
+  return async (prompt, context) => {
+    const groupId = optionalGroupId(context?.groupId);
+    const id = await ensureRequest(dir, prompt, groupId);
+    const action = {
+      type: "answer_request" as const,
+      request_id: id,
+      queue_dir: dir,
+      ...(groupId ? { group_id: groupId } : {}),
+    };
     let response = await readResponse(dir, id);
     if (response != null) return response;
     if (options.onRequest) options.onRequest(action);
     else console.error(JSON.stringify({ event: "answer_required", ...action }));
-    const deadline = Date.now() + waitMs;
-    while (response == null && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, deadline - Date.now())));
-      response = await readResponse(dir, id);
-    }
+    const responses = [response];
+    if (waitMs === 0) throw new AgentAnswerRequiredError(action);
+    await pollResponses(dir, [id], [0], responses, waitMs, pollMs);
+    response = responses[0] ?? null;
     if (response == null) throw new AgentAnswerRequiredError(action);
     return response;
   };

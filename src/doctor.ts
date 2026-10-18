@@ -5,7 +5,6 @@ import { execFile } from "node:child_process";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { resolveAgentAnswerDir } from "./agent-answers.js";
-import { resolveChoiceSolverConfig } from "./choice-solver.js";
 import { resolveFfmpegPath, resolveLocalTtsEngine, resolveLocalTtsScript, resolveTtsEngine, synthesizeSpeechWav } from "./tts.js";
 import type { ToolResult } from "./result.js";
 
@@ -19,7 +18,7 @@ type Check = {
 export type DoctorResult = ToolResult & {
   node_path: string;
   platform: string;
-  answer_source: "agent_queue" | "llm" | "legacy";
+  answer_source: "agent_queue" | "none";
   tts_engine: string;
   checks: Check[];
 };
@@ -67,7 +66,7 @@ export async function runDoctor(
     message: `Node ${process.versions.node}; ${process.execPath}`,
     ...(major < 20 ? { next_action: "Use Node >=20" } : {}),
   });
-  let answerSource: DoctorResult["answer_source"] = "legacy";
+  let answerSource: DoctorResult["answer_source"] = "none";
   try {
     const dir = resolveAgentAnswerDir(env);
     if (dir) {
@@ -77,14 +76,11 @@ export async function runDoctor(
         throw new Error("UNIPUS_AGENT_ANSWER_WAIT_MS must be a non-negative integer");
       }
       checks.push({ id: "answers", status: "ok", message: `Agent answer queue: ${dir}` });
-    } else if (resolveChoiceSolverConfig(env)) {
-      answerSource = "llm";
-      checks.push({ id: "answers", status: "ok", message: "OpenAI-compatible LLM configured (network not probed)" });
     } else {
       checks.push({
         id: "answers", status: "warning",
-        message: "No answer source: listening uses heuristics/empty blanks; speaking uses a generic template",
-        next_action: "Set UNIPUS_AGENT_ANSWER_DIR to an absolute directory, or configure UNIPUS_LLM_API_KEY",
+        message: "No agent answer queue: scored listening, placement, and speaking answers are refused and not submitted",
+        next_action: "Set UNIPUS_AGENT_ANSWER_DIR to an absolute directory",
       });
     }
   } catch (error) {
@@ -113,9 +109,7 @@ export async function runDoctor(
     checks.push({
       id: "tts", status: found ? "ok" : "error",
       message: found ? `Local ${local} script: ${script} (model checked by --speech)` : `Local TTS script missing or not executable: ${script}`,
-      ...(!found ? { next_action: process.platform === "darwin"
-        ? "Set UNIPUS_TTS_ENGINE=say, or install local TTS following docs/local-tts.md"
-        : "Install local TTS following docs/local-tts.md" } : {}),
+      ...(!found ? { next_action: "Install local TTS following docs/local-tts.md" } : {}),
     });
     if (found) {
       const firstLine = (await readFile(script, "utf8")).split(/\r?\n/, 1)[0] ?? "";
@@ -130,7 +124,9 @@ export async function runDoctor(
     }
   } else {
     checks.push({ id: "tts", status: engine === "edge" || engine === "auto" ? "warning" : "ok",
-      message: engine === "flite" ? "Local ffmpeg flite selected" : "Edge depends on network; upstream 403 is possible" });
+      message: engine === "flite"
+        ? "Local ffmpeg flite selected"
+        : "Edge TTS 即将弃用。未设置引擎时 macOS 用 say，Windows/Linux 用 Kokoro" });
     if ((engine === "flite" || engine === "auto") && ffmpeg) {
       try {
         const { stdout } = await promisify(execFile)(ffmpeg, ["-hide_banner", "-filters"], { timeout: 5000, maxBuffer: 1024 * 1024 });

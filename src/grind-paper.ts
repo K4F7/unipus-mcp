@@ -256,10 +256,3 @@ export function finalizeUserData(
 export function isOkApiCode(code: unknown): boolean {
   return code === 1 || code === 0 || code === 200;
 }
-
-export const DEFAULT_AI_SPEAK_SCRIPT = [
-  "Last term, I had some trouble with math.",
-  "After class, I went to the teacher's office and asked for help.",
-  "She explained the formula again with a simple example and showed me how to use it step by step.",
-  "That experience made me realize how much a patient and caring teacher can help.",
-].join(" ");

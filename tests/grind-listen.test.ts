@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { NO_LLM_WARNING, completeOneListen, grindListenGaps } from "../src/grind-listen.js";
+import { completeOneListen, grindListenGaps } from "../src/grind-listen.js";
 import { mockHttp } from "./mock-http.js";
 
 const paper = [{
@@ -37,7 +37,7 @@ describe("grind-listen solver paths", () => {
     const h = http();
     const result = await grindListenGaps({
       credentials: { getJwt: async () => "jwt" }, http: h, env: {},
-      llmAsk: async () => '{"answers":["B"]}',
+      answerAsk: async () => '{"answers":["B"]}',
       sleep: async () => {},
     }, 12);
     assert.equal(result.completed, 12);
@@ -54,7 +54,7 @@ describe("grind-listen solver paths", () => {
           return h.request(call);
         },
       },
-      env: {}, llmAsk: async () => '{"answers":["B"]}',
+      env: {}, answerAsk: async () => '{"answers":["B"]}',
       sleep: async () => {},
     }, 2);
     assert.equal(result.completed, 1);
@@ -68,34 +68,33 @@ describe("grind-listen solver paths", () => {
     const h = http();
     const r = await completeOneListen({
       credentials: { getJwt: async () => "jwt" }, http: h, env: {},
-      llmAsk: async () => { throw new Error("HTTP 503"); },
+      answerAsk: async () => { throw new Error("HTTP 503"); },
     } as never);
     assert.equal(r.ok, false);
     assert.match((r as { detail: string }).detail, /not submitted[\s\S]*HTTP 503/);
     assert.equal(submits(h).length, 0);
   });
 
-  test("UNIPUS_LLM_SOLVER=off → explicit heuristic submit + summary warning", async () => {
+  test("no agent queue → objective paper is not submitted", async () => {
     const h = http();
     const r = await grindListenGaps({
       credentials: { getJwt: async () => "jwt" }, http: h,
-      env: { SILICONFLOW_API_KEY: "k", UNIPUS_LLM_SOLVER: "off" },
+      env: { UNIPUS_LLM_API_KEY: "ignored", SILICONFLOW_API_KEY: "ignored" },
       sleep: async () => {}, trainProfileMaxPolls: 1,
     } as never, 1, 1);
-    assert.equal(r.completed, 1);
-    assert.deepEqual(r.warnings, [NO_LLM_WARNING]);
-    const body = JSON.parse(submits(h)[0]!.body!);
-    assert.match(JSON.stringify(body), /\\"B\\"/);
+    assert.equal(r.completed, 0);
+    assert.match(r.stoppedReason ?? "", /LOW_SCORE_REFUSED/);
+    assert.equal(submits(h).length, 0);
   });
 
-  test("invalid LLM letter → submitted with per-question warning", async () => {
+  test("invalid LLM letter → paper not submitted", async () => {
     const h = http();
     const r = await completeOneListen({
       credentials: { getJwt: async () => "jwt" }, http: h, env: {},
-      llmAsk: async () => '{"answers":["Z"]}',
+      answerAsk: async () => '{"answers":["Z"]}',
     } as never);
-    assert.equal(r.ok, true);
-    assert.deepEqual((r as { warnings: string[] }).warnings, ["听力_单选_客观题: 1 道单选（已用启发式补）无有效 LLM 答案"]);
-    assert.equal(submits(h).length, 1);
+    assert.equal(r.ok, false);
+    assert.match((r as { detail: string }).detail, /not submitted[\s\S]*LOW_SCORE_REFUSED/);
+    assert.equal(submits(h).length, 0);
   });
 });

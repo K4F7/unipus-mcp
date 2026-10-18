@@ -6,8 +6,19 @@
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
+  objectiveAnswerFromRaw,
+  prepareObjectiveSolve,
+} from "./choice-solver.js";
+import {
+  AgentAnswerRequiredError,
+  agentAnswerWait,
+  answerGroupId,
+  publishAndWaitAnswers,
+  resolveAgentAnswerDir,
+  type AgentAnswerAction,
+} from "./agent-answers.js";
+import {
   buildLearnDoneAnswer,
-  buildObjectiveAnswer,
   finalizeUserData,
   isOkApiCode,
   walkPaperLeaves,
@@ -29,7 +40,7 @@ export type PlacementFlow = "listen" | "speak";
 
 export type PlacementRoundResult =
   | { ok: true; flow: PlacementFlow; taskId: string }
-  | { ok: false; flow: PlacementFlow; detail: string };
+  | { ok: false; flow: PlacementFlow; detail: string; nextAction?: AgentAnswerAction };
 
 const GRADE_TYPES = new Set(["grade", "grade_profile", "train_plan"]);
 
@@ -88,17 +99,14 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function buildLeafAnswer(leaf: GrindLeaf): Promise<string> {
+function isPlacementObjective(leaf: GrindLeaf): boolean {
   const t = leaf.template || leaf.type || leaf.replyType;
-  if (
+  return (
     leaf.isObjective ||
     leaf.replyType === "singlechoice" ||
     t.includes("single-choice") ||
     t.includes("objective")
-  ) {
-    return buildObjectiveAnswer(leaf);
-  }
-  return buildLearnDoneAnswer();
+  );
 }
 
 /** Complete one grade paper for listen or speak (if currently type=grade + taskId). */
@@ -196,8 +204,46 @@ async function completeGradeSubmit(
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
-  for (const leaf of leaves) {
-    answers.push(await buildLeafAnswer(leaf));
+  try {
+    const objective = leaves.filter(isPlacementObjective);
+    const prepared = await Promise.all(objective.map(async (leaf) => ({
+      leaf,
+      ...(await prepareObjectiveSolve(leaf.data)),
+    })));
+    const rawById = new Map<string, { raw: string; questions: typeof prepared[number]["questions"] }>();
+    if (prepared.length > 0) {
+      const dir = resolveAgentAnswerDir(ports.env ?? process.env);
+      if (!dir) throw new Error("LOW_SCORE_REFUSED: 未设置 UNIPUS_AGENT_ANSWER_DIR，定级客观题拒绝交卷");
+      const raws = await publishAndWaitAnswers(
+        dir,
+        prepared.map((item) => ({
+          prompt: item.prompt,
+          groupId: answerGroupId(taskId, item.leaf.instanceId),
+        })),
+        agentAnswerWait(ports.env ?? process.env),
+      );
+      prepared.forEach((item, index) => {
+        rawById.set(item.leaf.instanceId, { raw: raws[index]!, questions: item.questions });
+      });
+    }
+    for (const leaf of leaves) {
+      const hit = rawById.get(leaf.instanceId);
+      if (!hit) {
+        answers.push(buildLearnDoneAnswer());
+        continue;
+      }
+      const solved = objectiveAnswerFromRaw(hit.raw, hit.questions);
+      if (solved.unanswered > 0) throw new Error("LOW_SCORE_REFUSED: 定级客观题没有完整答案");
+      answers.push(solved.answer);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      flow,
+      detail: `answer build failed, not submitted: ${detail}`,
+      ...(error instanceof AgentAnswerRequiredError ? { nextAction: error.action } : {}),
+    };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {
@@ -319,6 +365,8 @@ export async function runAutoPlacement(
     const result = await completeOnePlacement(ports, flow);
     if (flow === "listen") out.listen = result;
     else out.speak = result;
+    // Finish the listen grade paper before opening a speak grade paper.
+    if (!result.ok && result.nextAction) break;
   }
 
   return out;

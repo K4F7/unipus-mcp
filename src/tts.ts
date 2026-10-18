@@ -36,18 +36,23 @@ export function resolveFfmpegPath(env: NodeJS.ProcessEnv = process.env): string 
 }
 
 /**
- * #66: default engine is local Kokoro (no cloud, no flite fallback). Legacy
- * edge/flite/auto only when UNIPUS_TTS_ENGINE asks for them (or tests inject
- * the old mp3/fallback seams).
+ * Unset UNIPUS_TTS_ENGINE: macOS uses say, Windows and Linux use Kokoro.
+ * Explicit kokoro|piper|say still wins. edge|flite|auto stay on the legacy
+ * path; Edge is deprecated and will be removed.
  */
+export function defaultLocalTtsEngine(platform: NodeJS.Platform = process.platform): LocalTtsEngine {
+  return platform === "darwin" ? "say" : "kokoro";
+}
+
 export function resolveLocalTtsEngine(
   env: NodeJS.ProcessEnv = process.env,
   legacyInjected = false,
+  platform: NodeJS.Platform = process.platform,
 ): LocalTtsEngine | null {
   const v = env.UNIPUS_TTS_ENGINE?.trim().toLowerCase();
   if (v === "kokoro" || v === "piper" || v === "say") return v;
   if (v === "edge" || v === "flite" || v === "auto") return null;
-  return legacyInjected ? null : "kokoro";
+  return legacyInjected ? null : defaultLocalTtsEngine(platform);
 }
 
 export function resolveLocalTtsScript(env: NodeJS.ProcessEnv = process.env): string {
@@ -106,6 +111,7 @@ export function resetEdgeTtsBreaker(): void {
 /**
  * Legacy engine selection: auto (Edge, fall back to local flite on failure),
  * edge (Edge only), flite (local only, no network).
+ * Edge and auto are deprecated. Prefer say on macOS and Kokoro elsewhere.
  */
 export function resolveTtsEngine(env: NodeJS.ProcessEnv = process.env): "auto" | "edge" | "flite" {
   const v = env.UNIPUS_TTS_ENGINE?.trim().toLowerCase();
