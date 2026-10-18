@@ -15,7 +15,6 @@
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
-  DEFAULT_AI_SPEAK_SCRIPT,
   buildLearnDoneAnswer,
   finalizeUserData,
   isOkApiCode,
@@ -42,8 +41,7 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
-
-let speechEnv: NodeJS.ProcessEnv | undefined;
+import { AnswerRefusedError, resolveLlmAsk, type LlmAsk } from "./choice-solver.js";
 
 /** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
 function resolveAdaptivePartSubmitUrl(env?: NodeJS.ProcessEnv): string {
@@ -60,6 +58,8 @@ export type GrindSpeakPorts = AuthPorts & {
   /** Minimum App history score counted as success (default 80). */
   minAppScore?: number;
   env?: NodeJS.ProcessEnv;
+  /** LLM for 自由表达 / AI对话; default from UNIPUS_LLM_* (required — no template). */
+  llmAsk?: LlmAsk;
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
   speechRecord?: SpeechRecordBuilder;
@@ -81,7 +81,14 @@ export type GrindSpeakPorts = AuthPorts & {
 
 export type GrindSpeakRoundResult =
   | { ok: true; taskId: string; appScore?: number }
-  | { ok: false; taskId: string | null; detail: string; errorClass?: ErrorClass };
+  | {
+      ok: false;
+      taskId: string | null;
+      detail: string;
+      errorClass?: ErrorClass;
+      /** No LLM answer for a part → that part (and everything not yet submitted) refused. */
+      refused?: boolean;
+    };
 
 type SpeakPart = {
   partId: string;
@@ -221,30 +228,22 @@ async function partSubmittedOnServer(
   }
 }
 
-/** AI对话 / 自由表达: one scripted answer; 自由表达 uses EN_PRED_SCORE. */
-async function buildAiOrFree(
-  leaf: GrindLeaf,
-  speech: SpeechRecordBuilder,
-): Promise<string> {
-  const type = `${leaf.template} ${leaf.type}`.includes("oral-personal-state")
-    ? "EN_PRED_SCORE"
-    : "EN_SENT_SCORE";
+/** 自由表达: LLM monologue on the task (EN_PRED_SCORE). Anything else here has no answer source → refuse. */
+async function buildFreeTalk(leaf: GrindLeaf, speech: SpeechRecordBuilder, ask: LlmAsk): Promise<string> {
+  if (!`${leaf.template} ${leaf.type}`.includes("oral-personal-state")) {
+    throw new AnswerRefusedError(`口语题型 ${leaf.template || leaf.type || "?"}（${leaf.name || leaf.instanceId}）无 LLM 作答路径，拒绝用固定稿交卷`);
+  }
+  const task = leafTaskText(leaf);
+  if (!task) throw new AnswerRefusedError(`自由表达 ${leaf.name || leaf.instanceId} 缺题目文本，拒绝交卷`);
   // #63: free talk must address the task points (server grades appropriateness).
-  const text =
-    type === "EN_PRED_SCORE"
-      ? await generateFreeTalk(leafTaskText(leaf), { env: speechEnv })
-      : DEFAULT_AI_SPEAK_SCRIPT;
-  const record = await speech(
-    text,
-    `speak-${leaf.instanceId}-main`,
-    type,
-  );
+  const record = await speech(await generateFreeTalk(task, { ask }), `speak-${leaf.instanceId}-main`, "EN_PRED_SCORE");
   return JSON.stringify({ value: [], children: [voicedChild(record)] });
 }
 
 async function buildLeafAnswer(
   leaf: GrindLeaf,
   speech: SpeechRecordBuilder,
+  ask: LlmAsk,
 ): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   // App 2.8.7: 视频学习 (video-point-read, no children) submits an empty answer.
@@ -269,7 +268,7 @@ async function buildLeafAnswer(
     const scoop = t.includes("scoop") || t.includes("basic-oral");
     return buildVoicedAnswer(leaf, speech, scoop ? "EN_SENT_REC" : "EN_SENT_SCORE");
   }
-  return buildAiOrFree(leaf, speech);
+  return buildFreeTalk(leaf, speech, ask);
 }
 
 /** Complete one speak train paper via part/submit (App 历史训练 path). */
@@ -362,15 +361,22 @@ export async function completeOneSpeak(
     };
   }
 
-  speechEnv = ports.env;
-  const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+  // AI对话 answers come from runAiDialogFlow in the part loop; never pre-voice a script for them.
+  const aiIds = new Set(parts.filter((p) => isAiDialogPartName(p.partName)).flatMap((p) => p.questionInstanceIds));
   const answers = new Map<string, string>();
+  let ask: LlmAsk;
   try {
+    ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
+    const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
     for (const leaf of leaves) {
-      answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech));
+      if (aiIds.has(leaf.instanceId)) continue;
+      answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech, ask));
     }
   } catch (error) {
     const err = toError(error);
+    if (err instanceof AnswerRefusedError) {
+      return { ok: false, taskId, detail: `答案生成失败，未交任何 part：${err.message}`, refused: true };
+    }
     const errorClass = classifyError(err);
     return {
       ok: false,
@@ -403,7 +409,7 @@ export async function completeOneSpeak(
       if (qi == null) {
         return { ok: false, taskId, detail: `AI part ${part.partId} 无 questionInstanceId${doneSuffix()}` };
       }
-      const flow = await runAiDialogFlow(ports, {
+      const flow = await runAiDialogFlow({ ...ports, llmAsk: ask }, {
         taskId,
         questionId: qi,
         partId: part.partId,
@@ -416,6 +422,7 @@ export async function completeOneSpeak(
           ok: false,
           taskId,
           detail: `AI对话 ${part.partName}: ${flow.code} ${flow.message}${doneSuffix()}`,
+          refused: flow.code === "ANSWER_REFUSED",
         };
       }
       answers.set(qi, flow.answer);
@@ -577,6 +584,8 @@ export type GrindSpeakGapsResult = {
   appScores?: number[];
   stoppedReason?: string;
   errorClass?: ErrorClass;
+  /** A paper was refused for lack of a valid LLM answer; the account must stop. */
+  refused?: boolean;
 };
 
 export async function grindSpeakGaps(
@@ -586,6 +595,12 @@ export async function grindSpeakGaps(
 ): Promise<GrindSpeakGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
   const taskIds: string[] = [];
+  try {
+    if (!ports.llmAsk) resolveLlmAsk(ports.env ?? process.env);
+  } catch (error) {
+    // No LLM config: refuse before loading any paper.
+    return { completed: 0, taskIds, stoppedReason: toError(error).message, refused: true };
+  }
   try {
     return await grindSpeakLoop(ports, need, maxRounds, taskIds);
   } catch (error) {
@@ -630,6 +645,7 @@ async function grindSpeakLoop(
         taskIds,
         stoppedReason: result.detail,
         errorClass: result.errorClass,
+        refused: result.refused,
       };
     }
     taskIds.push(result.taskId);

@@ -74,4 +74,14 @@ Private use for Sein / K4F7 unless stated otherwise.
 
 `npx tsx scripts/weekly-grind.ts [--account <id>]… | --all [--listen-only|--speak-only]` — stateless multi-account listen/speak gap fill for AI harness routines. Per-account `meta.grind` (`both`|`listen`|`speak`, default both) plus CLI override; set via `accounts.ts grind <id> …`. `meta.usage` is `self` (no expiry) or `assist` with a persisted `expires_at`; expired assist accounts return `skipped_expired` and are not submitted. Both modes store `listen_per_week` and `speak_per_week` (`--listen` / `--speak`, 0–30, or `platform`). Unset follows `weekFrequency`; a number caps that side at `min(configured, weekFrequency)`. MCP still has no scheduler.
 
+**Answers come only from the LLM — no template, no heuristic, no empty blank.** Set all three (no defaults, `SILICONFLOW_API_KEY` is not read):
+
+```bash
+export UNIPUS_LLM_BASE_URL=https://…/v1   # OpenAI-compatible
+export UNIPUS_LLM_MODEL=…
+export UNIPUS_LLM_API_KEY=…               # via env / SecretSpec, never in chat or logs
+```
+
+Any missing, or a one-request probe of the LLM fails → the account is `status=error` with `ANSWER_REFUSED` before login, placement or any submit. If the LLM fails (3 attempts) or returns an invalid option / empty blank / too-short speech, that paper (speak: that part and every later part) is not submitted and the account stops for this run (`ANSWER_REFUSED` in `errors`, status `error`, no next paper). 跟读 / 单词跟读 items without source text are refused the same way (no placeholder sentence).
+
 Speak grind synthesises answer audio with Edge TTS (`speech.platform.bing.com`). Each attempt has a 20s budget and is retried with exponential backoff on timeout/network/5xx; a 403 is retried once (fresh `Sec-MS-GEC`) and then the process falls back to local ffmpeg `flite` for the rest of the run. Override with `UNIPUS_TTS_ENGINE=auto|edge|flite`. Once accounts are resolved, stdout always carries a JSON summary (usage errors / `--help` print help text instead), with per-account `status`, `errors`, `error_class`, plus `totals`; exit 0 = any account succeeded/skipped, 1 = all targeted accounts errored, 2 = usage / no targets.

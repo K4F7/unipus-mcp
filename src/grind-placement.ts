@@ -2,12 +2,13 @@
  * Optional headless placement (定级) completion before weekly grind.
  * Same loadPaper + full submitAnswer path as train; accepts type=grade.
  * No skip/bypass API — server flips grade→train after successful submit.
+ * Objective / gap-fill items are answered by the LLM only; learn-only items are
+ * marked done; any other item, or no valid LLM answer → refused, nothing submitted.
  */
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
   buildLearnDoneAnswer,
-  buildObjectiveAnswer,
   finalizeUserData,
   isOkApiCode,
   walkPaperLeaves,
@@ -16,6 +17,15 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import {
+  AnswerRefusedError,
+  buildSolvedFillblankAnswer,
+  buildSolvedObjectiveAnswer,
+  resolveLlmAsk,
+  type FetchText,
+  type LlmAsk,
+} from "./choice-solver.js";
+import { toError } from "./retry.js";
 
 export type GrindPlacementPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
@@ -25,13 +35,16 @@ export type GrindPlacementPorts = AuthPorts & {
   pollMs?: number;
   /** Flows allowed to auto-place. Default both. A flow left out is never checked or submitted. */
   flows?: readonly PlacementFlow[];
+  /** LLM for objective / gap-fill items; default from UNIPUS_LLM_* (required). */
+  llmAsk?: LlmAsk;
+  fetchText?: FetchText;
 };
 
 export type PlacementFlow = "listen" | "speak";
 
 export type PlacementRoundResult =
   | { ok: true; flow: PlacementFlow; taskId: string }
-  | { ok: false; flow: PlacementFlow; detail: string };
+  | { ok: false; flow: PlacementFlow; detail: string; /** No LLM answer → not submitted. */ refused?: boolean };
 
 const GRADE_TYPES = new Set(["grade", "grade_profile", "train_plan"]);
 
@@ -90,17 +103,18 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function buildLeafAnswer(leaf: GrindLeaf): Promise<string> {
-  const t = leaf.template || leaf.type || leaf.replyType;
-  if (
-    leaf.isObjective ||
-    leaf.replyType === "singlechoice" ||
-    t.includes("single-choice") ||
-    t.includes("objective")
-  ) {
-    return buildObjectiveAnswer(leaf);
+const LEARN_ONLY = ["audio-learn", "outline", "content-learn", "video-point-read"];
+
+async function buildLeafAnswer(leaf: GrindLeaf, ask: LlmAsk, ports: GrindPlacementPorts): Promise<string> {
+  const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
+  if (t.includes("fillblank") && !t.includes("oral")) {
+    return buildSolvedFillblankAnswer(leaf.data, ask, ports.fetchText);
   }
-  return buildLearnDoneAnswer();
+  if (leaf.isObjective || t.includes("singlechoice") || t.includes("single-choice") || t.includes("objective")) {
+    return buildSolvedObjectiveAnswer(leaf.data, ask, ports.fetchText);
+  }
+  if (LEARN_ONLY.some((k) => t.includes(k))) return buildLearnDoneAnswer();
+  throw new AnswerRefusedError(`定级卷题型 ${leaf.template || leaf.type || leaf.replyType || "?"}（${leaf.name || leaf.instanceId}）无 LLM 作答路径，拒绝交卷`);
 }
 
 /** Complete one grade paper for listen or speak (if currently type=grade + taskId). */
@@ -198,8 +212,18 @@ async function completeGradeSubmit(
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
-  for (const leaf of leaves) {
-    answers.push(await buildLeafAnswer(leaf));
+  try {
+    const ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
+    for (const leaf of leaves) {
+      answers.push(await buildLeafAnswer(leaf, ask, ports));
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      flow,
+      detail: `answer build failed, not submitted: ${toError(error).message}`,
+      refused: error instanceof AnswerRefusedError,
+    };
   }
   const finalized = finalizeUserData(leaves, answers);
   if (!finalized.ok) {
@@ -322,6 +346,8 @@ export async function runAutoPlacement(
     const result = await completeOnePlacement(ports, flow);
     if (flow === "listen") out.listen = result;
     else out.speak = result;
+    // No LLM answer: stop this account, don't open the next placement paper.
+    if (!result.ok && result.refused) break;
   }
 
   return out;

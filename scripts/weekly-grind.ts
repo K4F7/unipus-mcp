@@ -50,6 +50,9 @@ Exit codes (stdout always carries the JSON summary when accounts were resolved):
      启用侧配置篇数全为 0 → skipped_done（不登录、不定级）
   1  every targeted account ended in status=error (see errors / error_class)
   2  usage error or no target accounts
+LLM (required, answers only from it — no template / heuristic / empty blank):
+  UNIPUS_LLM_BASE_URL  UNIPUS_LLM_MODEL  UNIPUS_LLM_API_KEY   (no defaults; SILICONFLOW_API_KEY ignored)
+  missing or failed probe → status=error ANSWER_REFUSED before login; no valid answer → paper not submitted, account stops
 TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
 
 CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);

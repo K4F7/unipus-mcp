@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { NO_LLM_WARNING, completeOneListen, grindListenGaps } from "../src/grind-listen.js";
+import { completeOneListen, grindListenGaps } from "../src/grind-listen.js";
 import { mockHttp } from "./mock-http.js";
 
 const paper = [{
@@ -44,27 +44,41 @@ describe("grind-listen solver paths", () => {
     assert.equal(submits(h).length, 0);
   });
 
-  test("UNIPUS_LLM_SOLVER=off → explicit heuristic submit + summary warning", async () => {
+  test("no UNIPUS_LLM_* config (SiliconFlow key only) → refused, nothing submitted, loop stops", async () => {
     const h = http();
     const r = await grindListenGaps({
       credentials: { getJwt: async () => "jwt" }, http: h,
-      env: { SILICONFLOW_API_KEY: "k", UNIPUS_LLM_SOLVER: "off" },
+      env: { SILICONFLOW_API_KEY: "k" },
       sleep: async () => {}, trainProfileMaxPolls: 1,
-    } as never, 1, 1);
-    assert.equal(r.completed, 1);
-    assert.deepEqual(r.warnings, [NO_LLM_WARNING]);
-    const body = JSON.parse(submits(h)[0]!.body!);
-    assert.match(JSON.stringify(body), /\\"B\\"/);
+    } as never, 3, 3);
+    assert.equal(r.completed, 0);
+    assert.equal(r.refused, true);
+    assert.match(r.stoppedReason!, /ANSWER_REFUSED[\s\S]*UNIPUS_LLM_BASE_URL/);
+    assert.equal(submits(h).length, 0);
+    assert.equal(h.calls.filter((c) => c.url.includes("loadPaper")).length, 0);
   });
 
-  test("invalid LLM letter → submitted with per-question warning", async () => {
+  test("invalid LLM letter → refused, nothing submitted, no heuristic", async () => {
+    const h = http();
+    const r = await grindListenGaps({
+      credentials: { getJwt: async () => "jwt" }, http: h, env: {},
+      llmAsk: async () => '{"answers":["Z"]}',
+      sleep: async () => {}, trainProfileMaxPolls: 1,
+    } as never, 3, 3);
+    assert.equal(r.completed, 0);
+    assert.equal(r.refused, true);
+    assert.match(r.stoppedReason!, /not submitted[\s\S]*ANSWER_REFUSED/);
+    assert.equal(submits(h).length, 0);
+  });
+
+  test("valid LLM letter → submitted with that letter", async () => {
     const h = http();
     const r = await completeOneListen({
       credentials: { getJwt: async () => "jwt" }, http: h, env: {},
-      llmAsk: async () => '{"answers":["Z"]}',
+      llmAsk: async () => '{"answers":["A"]}',
     } as never);
     assert.equal(r.ok, true);
-    assert.deepEqual((r as { warnings: string[] }).warnings, ["听力_单选_客观题: 1 道单选（已用启发式补）无有效 LLM 答案"]);
     assert.equal(submits(h).length, 1);
+    assert.match(submits(h)[0]!.body!, /\\"A\\"/);
   });
 });

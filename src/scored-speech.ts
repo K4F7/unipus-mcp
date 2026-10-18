@@ -7,6 +7,7 @@ import { statSync } from "node:fs";
 import { mapClioResultToReviewScores, scoreEnSent } from "./clio-speech.js";
 import { buildEnSentScoreRecord } from "./grade-question.js";
 import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
+import { AnswerRefusedError } from "./choice-solver.js";
 import { synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 import { spawn } from "node:child_process";
@@ -131,7 +132,8 @@ export async function buildVoicedAnswer(
   const children = Array.isArray(leaf.data.children) ? leaf.data.children : [];
   const built = [];
   for (let i = 0; i < Math.max(children.length, 1); i++) {
-    const text = segmentSpeakText(children[i] || {}, `Speaking practice sentence ${i + 1}.`);
+    const text = segmentSpeakText(children[i] || {}, "");
+    if (!text) throw new AnswerRefusedError(`跟读题 ${leaf.name || leaf.instanceId} 第 ${i + 1} 句缺原文，拒绝用占位句交卷`);
     built.push(voicedChild(await speech(text, `speak-${leaf.instanceId}-${i}`, type)));
   }
   return JSON.stringify({ value: [], children: built });
@@ -146,7 +148,8 @@ export async function buildVocabAnswer(leaf: GrindLeaf, speech: SpeechRecordBuil
     : [Array.isArray(leaf.data.contents) ? leaf.data.contents : []];
   const children = [];
   for (const [i, cards] of groups.entries()) {
-    const word = cards.map(cardWord).filter(Boolean).join(" ") || "hello";
+    const word = cards.map(cardWord).filter(Boolean).join(" ");
+    if (!word) throw new AnswerRefusedError(`单词跟读 ${leaf.name || leaf.instanceId} 第 ${i + 1} 组缺单词，拒绝用占位词交卷`);
     children.push(voicedChild(await speech(word, `vocab-${leaf.instanceId}-${i}`, "EN_SENT_SCORE")));
   }
   return JSON.stringify({ value: [], children });

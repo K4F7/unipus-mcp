@@ -2,12 +2,13 @@
  * Listening objective solver. loadPaper carries no answer key (`answers: []`;
  * paperReport's standardAnswer only appears after submit), but the paper ships the
  * transcript (contents[].text) or WebVTT subtitles for video items, so an
- * OpenAI-compatible LLM can answer from the transcript. Off unless an API key is
- * configured. Off mode (no key, or UNIPUS_LLM_SOLVER=off) is the explicit legacy
- * path: single-choice uses the bold/literal heuristic, gap-fill blanks stay empty,
- * and the grind summary warns. With the LLM on, failures throw (no silent fallback).
+ * OpenAI-compatible LLM answers from the transcript.
+ *
+ * LLM answers only: no heuristic guess, no empty blank, no template. Missing
+ * UNIPUS_LLM_* config, or no valid answer after retries, throws AnswerRefusedError and
+ * the caller must not submit (Sein: 没答案不要交).
  */
-import { pickSingleChoice, stripHtml } from "./grind-paper.js";
+import { stripHtml } from "./grind-paper.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
@@ -21,19 +22,46 @@ export type ChoiceQuestion = {
 /** Fetch subtitle text (public birdflock CDN, outside the UnipusHttp allowlist). */
 export type FetchText = (url: string) => Promise<string>;
 
-const DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1";
-const DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3";
+/** No usable LLM answer (config missing, LLM failed, invalid/empty answer): do not submit. */
+export class AnswerRefusedError extends Error {
+  constructor(message: string) {
+    super(message.startsWith("ANSWER_REFUSED") ? message : `ANSWER_REFUSED: ${message}`);
+    this.name = "AnswerRefusedError";
+  }
+}
 
-export function resolveChoiceSolverConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): ChoiceSolverConfig | null {
-  const apiKey = env.UNIPUS_LLM_API_KEY?.trim() || env.SILICONFLOW_API_KEY?.trim();
-  if (!apiKey || env.UNIPUS_LLM_SOLVER === "off") return null;
+const LLM_ENV_VARS = ["UNIPUS_LLM_BASE_URL", "UNIPUS_LLM_MODEL", "UNIPUS_LLM_API_KEY"] as const;
+
+/** Only UNIPUS_LLM_BASE_URL / UNIPUS_LLM_MODEL / UNIPUS_LLM_API_KEY; any missing → throws. */
+export function resolveChoiceSolverConfig(env: NodeJS.ProcessEnv = process.env): ChoiceSolverConfig {
+  const missing = LLM_ENV_VARS.filter((k) => !env[k]?.trim());
+  if (missing.length > 0) {
+    throw new AnswerRefusedError(`未配置 LLM（缺 ${missing.join(" / ")}），拒绝交卷`);
+  }
   return {
-    apiKey,
-    baseUrl: (env.UNIPUS_LLM_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, ""),
-    model: env.UNIPUS_LLM_MODEL?.trim() || DEFAULT_MODEL,
+    baseUrl: env.UNIPUS_LLM_BASE_URL!.trim().replace(/\/+$/, ""),
+    model: env.UNIPUS_LLM_MODEL!.trim(),
+    apiKey: env.UNIPUS_LLM_API_KEY!.trim(),
   };
+}
+
+/** Configured LLM ask, or throws AnswerRefusedError. */
+export function resolveLlmAsk(env: NodeJS.ProcessEnv = process.env): LlmAsk {
+  return createLlmAsk(resolveChoiceSolverConfig(env));
+}
+
+/** One tiny request before any paper is touched: an unreachable / misconfigured LLM refuses the account up front. */
+export async function probeLlm(ask: LlmAsk, attempts = 2): Promise<void> {
+  let last = "empty reply";
+  for (let i = 0; i < attempts; i++) {
+    try {
+      if ((await ask("Reply with the single word OK.")).trim()) return;
+      last = "empty reply";
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new AnswerRefusedError(`LLM 探活失败（${attempts} 次），本账号不登录、不交卷：${last}`);
 }
 
 export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch = globalThis.fetch): LlmAsk {
@@ -153,23 +181,32 @@ function parseAnswers(raw: string, n: number): string[] | null {
   }
 }
 
-export class LlmSolveError extends Error {}
-
-/** Default 3 attempts (1 + 2 retries) on HTTP error / timeout / unparsable JSON, then throw. */
+/** Default 3 attempts (1 + 2 retries) on HTTP error / timeout / unparsable or invalid answer, then throw. */
 export const LLM_SOLVE_ATTEMPTS = 3;
 
-async function askAnswers(ask: LlmAsk, prompt: string, n: number, attempts = LLM_SOLVE_ATTEMPTS): Promise<string[]> {
+/**
+ * Ask until `accept` maps the parsed answers to a full valid result (null = some
+ * answer invalid/empty). Never fills a gap itself; throws after `attempts`.
+ */
+async function askAnswers<T>(
+  ask: LlmAsk,
+  prompt: string,
+  n: number,
+  accept: (answers: string[]) => T | null,
+  attempts = LLM_SOLVE_ATTEMPTS,
+): Promise<T> {
   let last = "no attempt";
   for (let i = 0; i < attempts; i++) {
     try {
       const parsed = parseAnswers(await ask(prompt), n);
-      if (parsed) return parsed;
-      last = "unparsable JSON";
+      const accepted = parsed && accept(parsed);
+      if (accepted) return accepted;
+      last = parsed ? "部分题无合法答案（invalid/empty）" : "unparsable JSON";
     } catch (error) {
       last = error instanceof Error ? error.message : String(error);
     }
   }
-  throw new LlmSolveError(`LLM 作答失败（${attempts} 次）：${last}`);
+  throw new AnswerRefusedError(`LLM 作答失败（${attempts} 次），无合法答案，拒绝交卷：${last}`);
 }
 
 export function parseChoiceAnswers(raw: string, questions: ChoiceQuestion[]): Array<string | null> {
@@ -182,59 +219,47 @@ function toChoiceValue(a: string, q: ChoiceQuestion): string | null {
   return q.options.some((o) => o.value === v) ? v : null;
 }
 
-/** Answer JSON plus how many questions the LLM left without a usable answer. */
-export type SolvedAnswer = { answer: string; unanswered: number };
+function childrenAnswer(values: string[]): string {
+  return JSON.stringify({ value: [], children: values.map((v) => ({ value: [v], isDone: true })) });
+}
 
 /**
- * Objective single-choice answer (same shape as buildObjectiveAnswer).
- * LLM/transport/JSON failure after retries throws LlmSolveError — the caller must
- * not submit the paper. Per-question invalid letters fall back to the heuristic
- * and are counted in `unanswered` so the run summary can warn.
+ * Objective single-choice answer JSON. Every question must get a valid option
+ * letter from the LLM; otherwise retry, then throw AnswerRefusedError (caller must not submit).
  */
 export async function buildSolvedObjectiveAnswer(
   data: Record<string, unknown>,
   ask: LlmAsk,
   fetchText: FetchText = defaultFetchText,
-): Promise<SolvedAnswer> {
-  const parentContents = asArray(data.contents);
+): Promise<string> {
   const kids = asArray(data.children).map(asRecord);
   const nodes = kids.length > 0 ? kids : [data];
   const questions = nodes.map((n) => (n === data ? { ...toChoiceQuestion(n), question: "" } : toChoiceQuestion(n)));
-  const context = await contentsContext(parentContents, fetchText);
-  const raw = await askAnswers(ask, buildChoicePrompt(context, questions), questions.length);
-  const picks = raw.map((a, i) => toChoiceValue(a, questions[i]!));
-  const children = nodes.map((n, i) => {
-    const ctx = n === data ? parentContents : [...parentContents, ...asArray(n.contents)];
-    return { value: [picks[i] ?? pickSingleChoice(n, ctx)], isDone: true };
+  const context = await contentsContext(asArray(data.contents), fetchText);
+  const picks = await askAnswers(ask, buildChoicePrompt(context, questions), questions.length, (raw) => {
+    const vals = raw.map((a, i) => toChoiceValue(a, questions[i]!));
+    return vals.every((v): v is string => v != null) ? vals : null;
   });
-  return {
-    answer: JSON.stringify({ value: [], children }),
-    unanswered: picks.filter((p) => p == null).length,
-  };
+  return childrenAnswer(picks);
 }
 
 /**
- * fillblank-scoop: passage in children[0].quesText, one child per blank.
- * `ask === null` (LLM off) is the explicit legacy path: blanks submitted empty and
- * all counted as unanswered. LLM failure after retries throws LlmSolveError.
+ * fillblank-scoop: passage in children[0].quesText, one child per blank. Every
+ * blank must be non-empty; otherwise retry, then throw AnswerRefusedError.
  */
 export async function buildSolvedFillblankAnswer(
   data: Record<string, unknown>,
-  ask: LlmAsk | null,
+  ask: LlmAsk,
   fetchText: FetchText = defaultFetchText,
-): Promise<SolvedAnswer> {
+): Promise<string> {
   const kids = asArray(data.children).map(asRecord);
   const n = Math.max(kids.length, 1);
-  let words: string[] = Array.from({ length: n }, () => "");
-  if (ask) {
-    const contents = [data, ...kids].flatMap((k) => asArray(k.contents));
-    const context = await contentsContext(contents, fetchText);
-    const passage = kids.map((k) => stripHtml(String(k.quesText || ""))).filter(Boolean).join(" ")
-      || stripHtml(String(data.quesText || ""));
-    words = await askAnswers(ask, buildFillblankPrompt(context, passage, n), n);
-  }
-  return {
-    answer: JSON.stringify({ value: [], children: words.map((w) => ({ value: [w], isDone: true })) }),
-    unanswered: words.filter((w) => !w).length,
-  };
+  const contents = [data, ...kids].flatMap((k) => asArray(k.contents));
+  const context = await contentsContext(contents, fetchText);
+  const passage = kids.map((k) => stripHtml(String(k.quesText || ""))).filter(Boolean).join(" ")
+    || stripHtml(String(data.quesText || ""));
+  const words = await askAnswers(ask, buildFillblankPrompt(context, passage, n), n, (raw) =>
+    raw.every(Boolean) ? raw : null,
+  );
+  return childrenAnswer(words);
 }
