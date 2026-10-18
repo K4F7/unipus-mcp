@@ -10,10 +10,13 @@
  */
 import { stripHtml } from "./grind-paper.js";
 import { wallClockSignal } from "./watchdog.js";
+import { resolveLlmMaxTokens, resolveLlmTimeoutMs } from "./limits.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
 export type ChoiceSolverConfig = { baseUrl: string; apiKey: string; model: string };
+/** Per-request budget; defaults from UNIPUS_LLM_TIMEOUT_MS / UNIPUS_LLM_MAX_TOKENS. */
+export type LlmRequestLimits = { timeoutMs?: number; maxTokens?: number };
 
 export type ChoiceQuestion = {
   question: string;
@@ -48,7 +51,11 @@ export function resolveChoiceSolverConfig(env: NodeJS.ProcessEnv = process.env):
 
 /** Configured LLM ask, or throws AnswerRefusedError. */
 export function resolveLlmAsk(env: NodeJS.ProcessEnv = process.env): LlmAsk {
-  return createLlmAsk(resolveChoiceSolverConfig(env));
+  return createLlmAsk({
+    ...resolveChoiceSolverConfig(env),
+    timeoutMs: resolveLlmTimeoutMs(env),
+    maxTokens: resolveLlmMaxTokens(env),
+  });
 }
 
 /** One tiny request before any paper is touched: an unreachable / misconfigured LLM refuses the account up front. */
@@ -65,9 +72,12 @@ export async function probeLlm(ask: LlmAsk, attempts = 2): Promise<void> {
   throw new AnswerRefusedError(`LLM 探活失败（${attempts} 次），本账号不登录、不交卷：${last}`);
 }
 
-export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch = globalThis.fetch): LlmAsk {
+export function createLlmAsk(
+  config: ChoiceSolverConfig & LlmRequestLimits,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): LlmAsk {
   return async (prompt) => {
-    const deadline = wallClockSignal(60_000);
+    const deadline = wallClockSignal(config.timeoutMs ?? resolveLlmTimeoutMs({}));
     try {
       const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
         method: "POST",
@@ -75,7 +85,9 @@ export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch
         body: JSON.stringify({
           model: config.model,
           temperature: 0,
-          max_tokens: 300,
+          max_tokens: config.maxTokens ?? resolveLlmMaxTokens({}),
+          // Streamed so gateways with a ~60s idle cut (grok, #92) keep the connection open.
+          stream: true,
           messages: [
             { role: "system", content: "You are an expert English listening exam solver." },
             { role: "user", content: prompt },
@@ -84,12 +96,27 @@ export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch
         signal: deadline.signal,
       });
       if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
-      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      return body.choices?.[0]?.message?.content ?? "";
+      if (!/event-stream/.test(res.headers.get("content-type") ?? "")) {
+        const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        return body.choices?.[0]?.message?.content ?? "";
+      }
+      return await readSseContent(res);
     } finally {
       deadline.clear();
     }
   };
+}
+
+/** Join `choices[0].delta.content` of an OpenAI-style SSE body. */
+async function readSseContent(res: Response): Promise<string> {
+  let out = "";
+  for (const line of (await res.text()).split("\n")) {
+    const data = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (!data || data === "[DONE]") continue;
+    const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+    out += chunk.choices?.[0]?.delta?.content ?? "";
+  }
+  return out;
 }
 
 export const defaultFetchText: FetchText = async (url) => {

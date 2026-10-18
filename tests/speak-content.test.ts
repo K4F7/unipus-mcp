@@ -21,10 +21,44 @@ test("no template script is exported", () => {
   assert.equal("templateFreeTalk" in speakContent, false);
 });
 
-test("generateFreeTalk uses LLM output when long enough", async () => {
-  const words = Array.from({ length: 120 }, () => "music").join(" ");
-  const out = await generateFreeTalk("Talk about music", { ask: async () => `"${words}"` });
-  assert.equal(out, words);
+const words = (n: number) => Array.from({ length: n }, (_, i) => (i % 12 === 11 ? "music." : "music")).join(" ");
+
+test("generateFreeTalk uses LLM output of 200-230 words and asks for >=90s", async () => {
+  const prompts: string[] = [];
+  const out = await generateFreeTalk("Talk about music", { ask: async (p) => { prompts.push(p); return `"${words(215)}"`; } });
+  assert.equal(out, words(215));
+  assert.match(prompts[0]!, /200-230 words/);
+  assert.match(prompts[0]!, /90 seconds/);
+});
+
+test("generateFreeTalk strips LLM lead-ins, titles, markdown and word-count notes (#92)", async () => {
+  const body = words(215);
+  for (const raw of [
+    `Sure, here's your spoken response:\n\n${body}`,
+    `Sure! Here is a natural spoken answer of about 215 words.\n\n**My Favourite Music**\n\n${body}\n\n(215 words)`,
+    `# Talking About Music\n"${body}"\nWord count: 215`,
+    `Sure, here's your spoken response. ${body}`,
+    `Certainly! ${body}`,
+  ]) {
+    const out = await generateFreeTalk("Talk about music", { ask: async () => raw });
+    assert.equal(out, body, raw.slice(0, 40));
+  }
+});
+
+test("generateFreeTalk: too short / too long replies are regenerated, then refused (#92)", async () => {
+  const replies = [words(140), words(300), words(212)];
+  let n = 0;
+  assert.equal(await generateFreeTalk("Talk about music", { ask: async () => replies[n++]! }), words(212));
+  assert.equal(n, 3);
+  await assert.rejects(
+    generateFreeTalk("Talk about music", { ask: async () => words(140) }),
+    (e: unknown) => e instanceof AnswerRefusedError && /140/.test((e as Error).message),
+  );
+});
+
+test("generateFreeTalk: a reply that is still meta talk after cleaning is refused, never voiced", async () => {
+  const meta = `Here is a spoken response you can use. ${words(210)} As an AI language model, I hope this helps.`;
+  await assert.rejects(generateFreeTalk("Talk about music", { ask: async () => meta }), AnswerRefusedError);
 });
 
 test("generateFreeTalk without LLM config → AnswerRefusedError, no template", async () => {
@@ -50,7 +84,24 @@ test("generateDialogReply: short LLM answers retried then AnswerRefusedError (no
   assert.equal(n, 3);
 });
 
+test("generateDialogReply strips a lead-in too", async () => {
+  const reply = "I really like pop music because the songs are catchy and they help me relax after a long day of classes.";
+  assert.equal(await generateDialogReply("Talk about music", "What music?", 0, { ask: async () => `Sure, here's my reply: "${reply}"` }), reply);
+});
+
 test("generateDialogReply returns the LLM reply", async () => {
   const reply = "I really like pop music because the songs are catchy and they help me relax after a long day of classes.";
   assert.equal(await generateDialogReply("Talk about music", "What music?", 0, { ask: async () => reply }), reply);
+});
+
+test("cleanSpoken keeps a real first sentence that merely starts with 'Here is'", () => {
+  const s = "Here is what happened when I got sick last winter. I had a high fever.";
+  assert.equal(speakContent.cleanSpoken(s), s);
+});
+
+test("cleanSpoken keeps the answer that follows an inline title/label (review #93)", async () => {
+  const { cleanSpoken } = await import("../src/speak-content.js");
+  assert.equal(cleanSpoken("**My answer:** First, I love jazz. It relaxes me."), "First, I love jazz. It relaxes me.");
+  assert.equal(cleanSpoken("Title: Music I Like. First, I love jazz."), "First, I love jazz.");
+  assert.equal(cleanSpoken("**Music I Like**\nFirst, I love jazz."), "First, I love jazz.");
 });

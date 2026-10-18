@@ -77,3 +77,64 @@ test("voiced / vocab items without source text → refused, never a placeholder 
   await assert.rejects(buildVocabAnswer(leaf({ contents: [] }), speech as never), AnswerRefusedError);
   assert.deepEqual(spoken, []);
 });
+
+describe("free-talk duration gate (#92)", () => {
+  const wavOf = async (sec: number) => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const p = join(await mkdtemp(join(tmpdir(), "ss-")), "a.wav");
+    await writeFile(p, Buffer.alloc(44 + Math.round(sec * 32000)));
+    return p;
+  };
+  /** Synth mock: 80 s of speech + (sentences-1) × pause. */
+  const synth = (calls: Array<{ speed?: number; pauseSec?: number }>, speechSec = 80) =>
+    (async (input: { text: string; speed?: number; pauseSec?: number }) => {
+      calls.push({ speed: input.speed, pauseSec: input.pauseSec });
+      const gaps = input.text.split(/[.!?]\s+/).length - 1;
+      return { wavPath: await wavOf(speechSec + gaps * (input.pauseSec ?? 0)), cleanup: async () => {} };
+    }) as never;
+  const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");
+
+  test("short audio → re-synthesised once with longer sentence pauses, reports the final seconds", async () => {
+    const calls: Array<{ speed?: number; pauseSec?: number }> = [];
+    let sec = 0;
+    const b = createScoredSpeechRecordBuilder(ports, deps({ synthesize: synth(calls) }));
+    await b(text, "t", "EN_PRED_SCORE", { speed: 0.85, pauseSec: 0.3, minSec: 90, onAudio: (s) => (sec = s) });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.speed, 0.85);
+    assert.ok(calls[1]!.pauseSec! > 0.3);
+    assert.ok(sec >= 90, String(sec));
+  });
+
+  test("needed pause just over the cap → retried at the cap instead of giving up (review #93)", async () => {
+    const calls: Array<{ speed?: number; pauseSec?: number }> = [];
+    let sec = 0;
+    const b = createScoredSpeechRecordBuilder(ports, deps({ synthesize: synth(calls, 68) }));
+    await b(text, "t", "EN_PRED_SCORE", { pauseSec: 0.3, minSec: 90, onAudio: (s) => (sec = s) });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.pauseSec, 1.2);
+    assert.ok(sec >= 90, String(sec));
+  });
+
+  test("still short with the max pause → SpeechTooShortError before Clio/upload", async () => {
+    const { SpeechTooShortError } = await import("../src/scored-speech.js");
+    let scored = false;
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      synthesize: synth([], 40),
+      score: async () => { scored = true; throw new Error("unreachable"); },
+    }));
+    await assert.rejects(b(text, "t", "EN_PRED_SCORE", { minSec: 90, pauseSec: 0.3 }), SpeechTooShortError);
+    assert.equal(scored, false);
+  });
+});
+
+test("voiced record retries stop at UNIPUS_TTS_RETRY_MAX_MS wall budget", async () => {
+  let n = 0;
+  const b = createScoredSpeechRecordBuilder(
+    { ...(ports as object), env: { UNIPUS_TTS_RETRY_MAX_MS: "10000" } } as never,
+    deps({ retryDelayMs: 0, now: (() => { let t = 0; return () => (t += 6000); })(), synthesize: async () => { n++; throw new Error("kokoro boom"); } }),
+  );
+  await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), /kokoro boom/);
+  assert.ok(n < 4, `attempts ${n}`);
+});

@@ -9,7 +9,7 @@ import {
 import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
 import type { SpeechRecordType } from "../src/scored-speech.js";
 
-const FREE_TALK = Array.from({ length: 120 }, (_, i) => (i % 10 === 9 ? "music." : "music")).join(" ");
+const FREE_TALK = Array.from({ length: 220 }, (_, i) => (i % 10 === 9 ? "music." : "music")).join(" ");
 const okAsk = async () => FREE_TALK;
 
 function mockHttp(
@@ -564,9 +564,11 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
     const results = recorder();
     const r = await grindSpeakGaps(ports(scenario({}), { results }) as never, 1, 1);
     assert.equal(r.completed, 1);
-    assert.deepEqual(results.lines, [{
-      skill: "说", taskId: "555", ansVersion: 1, score: 90, scoreIsOut: true, status: "ok", error: null,
-    }]);
+    assert.equal(results.lines.length, 1);
+    const { parts, flags, ...line } = results.lines[0]!;
+    assert.deepEqual(line, { skill: "说", taskId: "555", ansVersion: 1, score: 90, scoreIsOut: true, status: "ok", error: null });
+    assert.deepEqual(Object.keys(parts as object).sort(), ["自由表达", "范例学习"]);
+    assert.deepEqual(flags, []);
   });
 
   test("low App score → low_score line; still grading → grading line", async () => {
@@ -691,5 +693,160 @@ describe("no template submit (Sein: 没答案不要用模板交)", () => {
     const r = await grindSpeakGaps({ credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech }, 2);
     assert.equal(r.refused, true);
     assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 0);
+  });
+});
+
+// ---- #92: AI part like the App, part-report scores in JSONL, free-talk duration, wall caps ----
+import { writeFile as writeFileGs } from "node:fs/promises";
+import { SpeechTooShortError } from "../src/scored-speech.js";
+
+const aiPaper = {
+  token: "paper-tok",
+  paperJson: JSON.stringify({
+    chr: [
+      ...JSON.parse(paper.paperJson).chr,
+      { q_qinstid: "333", q_template_name: "ai-dialog", nm: "ai", data: { contents: [{ text: "<p>Talk with AI about the music you like.</p>" }] } },
+    ],
+  }),
+};
+const threeParts = (): PartRow[] => [
+  ...twoParts(),
+  { partId: "p3", partName: "AI口语对话", questionInstanceIds: ["333"], reportStatus: null, submitted: null },
+];
+const reportBody = (partId: string, aiOut: boolean) =>
+  partId === "p1" ? { code: 200, data: { "oral-sentence-scoop_subjective": { totalScore: 97 } } }
+  : partId === "p2" ? { code: 200, data: { "oral-personal-state_subjective": { totalScore: 88, userResponse: { fullText: "I like music a lot" } } } }
+  : aiOut ? { code: 200, data: { "ai-spoken_subjective": { totalScore: 91 } } }
+  : { code: 500, message: "报告尚未生成完成", data: null };
+/** scenario() + paper with an AI part + conversation/ebcp/upload + part-report endpoints. */
+function aiScenario(opts: { aiReportOut?: boolean; submit?: (b: { action: string; partId: string }) => { code: number; msg?: string } } = {}) {
+  const inner = scenario({ parts: threeParts, submit: opts.submit });
+  return mockHttp(async (call) => {
+    if (call.url.includes("loadPaper")) return { statusCode: 200, body: JSON.stringify({ code: 1, value: aiPaper }) };
+    const pr = /part-report\?.*partId=(\w+)/.exec(call.url);
+    if (pr) return { statusCode: 200, body: JSON.stringify(reportBody(pr[1]!, opts.aiReportOut === true)) };
+    if (/conversation|ebcp|query-upload|upload-url/.test(call.url)) {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ code: 200, data: { conversationId: "9001", sceneId: "1", token: "t", record: { list: [] } }, value: { token: "qt", path: "p.wav", url: "https://cdn.example/p.wav" } }),
+      };
+    }
+    return inner.request(call);
+  });
+}
+const dialogReply = "I like pop music the most because the melodies are catchy and they help me relax after a long day of classes.";
+const aiRun = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) =>
+  completeOneSpeak({
+    credentials: { getJwt: async () => JWT }, http, env: { UNIPUS_AI_TURN_MIN_MS: "0" },
+    llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech,
+    sleep: async () => {}, appReadyPollTries: 2,
+    uploadFetch: async () => new Response("{}", { status: 200 }),
+    synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
+    openDialogSocket: () => ({
+      nextReply: async () => ({ asr: "I like pop.", text: "Nice! Why?", audio: Buffer.alloc(32000 * 3) }),
+      sendAudio() {}, close() {},
+    }),
+    ...extra,
+  } as never);
+
+describe("#92 speak paper", () => {
+  test("AI part: ONE part/submit (no snapshot), no instStatus, no u-app-id; other parts keep snapshot→submit+instStatus", async () => {
+    const http = aiScenario({ aiReportOut: true });
+    const r = await aiRun(http);
+    assert.equal(r.ok, true, (r as { detail?: string }).detail);
+    const subs = submitCalls(http).map((c) => ({ c, b: JSON.parse(String(c.body)) }));
+    const ai = subs.filter((x) => x.b.partId === "p3");
+    assert.deepEqual(ai.map((x) => x.b.action), ["submit"]);
+    assert.equal(ai[0]!.b.userData[0].instStatus, undefined);
+    assert.equal(ai[0]!.b.userData[0].context, JSON.stringify({ state: "done" }));
+    assert.equal(ai[0]!.c.headers?.["u-app-id"], undefined);
+    assert.match(ai[0]!.c.url, /ucloud/);
+    assert.ok(ai[0]!.b.duration >= 1);
+    const p1 = subs.filter((x) => x.b.partId === "p1");
+    assert.deepEqual(p1.map((x) => x.b.action), ["snapshot", "submit"]);
+    assert.equal(p1[1]!.b.userData[0].instStatus, 1);
+  });
+
+  test("part-report scores of all three parts land in the result; AI report never out → ai_report_missing", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const results = { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false };
+    const r = await grindSpeakGaps({
+      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: false }), env: { UNIPUS_AI_TURN_MIN_MS: "0", UNIPUS_AI_REPORT_MAX_MS: "60000" },
+      llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 2,
+      uploadFetch: async () => new Response("{}", { status: 200 }),
+      synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
+      openDialogSocket: () => ({ nextReply: async () => ({ asr: "I like pop.", text: "Nice! Why?", audio: Buffer.alloc(32000) }), sendAudio() {}, close() {} }),
+      results,
+    } as never, 1, 1);
+    assert.equal(r.completed, 1);
+    const line = lines[0]!;
+    assert.equal(line.status, "ok");
+    const parts = line.parts as Record<string, { score: number | null; status: string; asrWords?: number }>;
+    assert.equal(parts["范例学习"]!.score, 97);
+    assert.equal(parts["自由表达"]!.score, 88);
+    assert.equal(parts["自由表达"]!.asrWords, 5);
+    assert.equal(parts["AI口语对话"]!.status, "pending");
+    assert.deepEqual(line.flags, ["ai_report_missing"]);
+  });
+
+  test("AI report generated → AI score recorded, no flag", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    await grindSpeakGaps({
+      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: true }), env: { UNIPUS_AI_TURN_MIN_MS: "0" },
+      llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 2,
+      uploadFetch: async () => new Response("{}", { status: 200 }),
+      synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
+      openDialogSocket: () => ({ nextReply: async () => ({ asr: "I like pop.", text: "Nice! Why?", audio: Buffer.alloc(32000) }), sendAudio() {}, close() {} }),
+      results: { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false },
+    } as never, 1, 1);
+    assert.equal((lines[0]!.parts as Record<string, { score: number }>)["AI口语对话"]!.score, 91);
+    assert.deepEqual(lines[0]!.flags, []);
+  });
+
+  test("free talk is voiced slower with a ≥90 s gate; words + seconds reach the result", async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const speech = async (_t: string, _g: string, type: SpeechRecordType, o?: { minSec?: number; speed?: number; onAudio?: (s: number) => void }) => {
+      seen.push(o as never);
+      if (type === "EN_PRED_SCORE") o?.onAudio?.(95.5);
+      return { type, url: "u", recordDetail: { score: 90 } };
+    };
+    const lines: Array<Record<string, unknown>> = [];
+    await grindSpeakGaps({
+      credentials: { getJwt: async () => JWT }, http: scenario({}), env: {}, llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 1,
+      results: { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false },
+    } as never, 1, 1);
+    const free = seen.find((o) => o?.minSec != null)!;
+    assert.equal(free.minSec, 90);
+    assert.equal(free.speed, 0.85);
+    const p = (lines[0]!.parts as Record<string, { words?: number; sec?: number }>)["自由表达"]!;
+    assert.equal(p.words, 220);
+    assert.equal(p.sec, 95.5);
+  });
+
+  test("free talk audio too short → regenerated (bounded), then refused with no part/submit", async () => {
+    const http = scenario({});
+    let asks = 0;
+    const r = await run(http, (async (_t: string, _g: string, type: SpeechRecordType) => {
+      if (type === "EN_PRED_SCORE") throw new SpeechTooShortError(70, 90);
+      return { type, url: "u", recordDetail: { score: 90 } };
+    }) as never, async () => { asks++; return FREE_TALK; });
+    assert.equal(r.ok, false);
+    assert.equal((r as { refused?: boolean }).refused, true);
+    assert.match((r as { detail: string }).detail, /70\.0s < 90s/);
+    assert.equal(asks, 3);
+    assert.equal(submitCalls(http).length, 0);
+  });
+
+  test("paper wall cap passed before a part → stop before submitting it", async () => {
+    const http = scenario({});
+    let t = 0;
+    const r = await completeOneSpeak({
+      credentials: { getJwt: async () => JWT }, http, env: { UNIPUS_PAPER_MAX_MS: "60000" }, llmAsk: okAsk,
+      speechRecord: (async (_x: string, _g: string, type: SpeechRecordType) => { t += 70_000; return { type, url: "u", recordDetail: { score: 90 } }; }) as never,
+      sleep: async () => {}, appReadyPollTries: 1, clockMs: () => t,
+    } as never);
+    assert.equal(r.ok, false);
+    assert.match((r as { detail: string }).detail, /整卷.*上限/);
+    assert.equal(submitCalls(http).length, 0);
   });
 });

@@ -48,6 +48,8 @@ export type PartSubmitInput = PartSubmitBodyInput & {
   url?: string;
   /** When true, also send cloud WebView headers (sourceid + x-requested-with). */
   cloudHeaders?: boolean;
+  /** false: omit u-app-id (App AI口语对话 submit sends only openid + sourceid, #92). */
+  appIdHeader?: boolean;
 };
 
 export type PartSubmitPorts = AuthPorts & {
@@ -195,7 +197,7 @@ export async function partSubmit(
         return headers;
       }
       const headers = ulsCloudHeaders(jwt, ports.env, input.openId);
-      headers["u-app-id"] = resolveUAppId(ports.env);
+      if (input.appIdHeader !== false) headers["u-app-id"] = resolveUAppId(ports.env);
       // uadaptive WebView submit also carries u-openid (App 2.8.7 capture).
       if (/uadaptive/.test(url) && headers.openid) headers["u-openid"] = headers.openid;
       return headers;

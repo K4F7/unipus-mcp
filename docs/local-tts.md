@@ -16,6 +16,7 @@ cp <repo>/scripts/local-tts.py ~/tts-local/synth.py && chmod +x ~/tts-local/synt
 - `UNIPUS_TTS_ENGINE`：未设置时按平台默认——macOS 用系统 `say`（固定 `say -o <文件>` 写文件后 ffmpeg 转 16k 单声道 16bit WAV，绝不外放），其他平台用 `kokoro`；可显式设 `kokoro` | `piper` | `say`；旧 `edge`/`flite`/`auto` 仅显式指定时生效
 - `UNIPUS_SAY_VOICE`：macOS say 音色（默认 `Samantha`）；`UNIPUS_FFMPEG_BIN`：ffmpeg 路径（默认 PATH 上的 `ffmpeg`，单次 60s 强杀）
 - `UNIPUS_LOCAL_TTS_BIN`：脚本路径，默认 `~/tts-local/synth.py`
+- 脚本参数：`synth.py <engine> <voice> <out.wav> [speed] [sentence_pause_sec]`（文本走 stdin）。`speed`/`pause` 只在自由表达时传入（`UNIPUS_FREE_TALK_TTS_SPEED`，默认 0.85；句间停顿 0.5s，录音不足 `UNIPUS_FREE_TALK_MIN_SEC` 时自动加长到 1.2s）。旧版脚本会忽略这两个参数导致自由表达过短被拒交——升级仓库后请重新执行上面的 `cp`，`scripts/doctor.ts` 会检查。
 - `UNIPUS_KOKORO_VOICE`（默认 `af_heart`）/ `UNIPUS_PIPER_VOICE`
 
 ## 选型
