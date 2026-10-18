@@ -13,6 +13,8 @@ import {
   runWeeklyGrind,
   sanitizeSummaryForStdout,
 } from "../src/weekly-grind.js";
+import { createPaperReporter, redactSecrets } from "../src/paper-result.js";
+import { installProcessStallWatchdog } from "../src/watchdog.js";
 
 function printHelp(): void {
   console.log(`Usage:
@@ -23,7 +25,14 @@ Per account (sequential, stateless):
   1. rt → refresh_jwt; else/fail → password from env; CAPTCHA → skip
   2. listWeekProgress; skip if enabled sides already done
   3. headless submit gaps (listen loadPaper+submitAnswer; speak silent TTS→upload→submit)
-  4. stdout JSON summary (account_id, alias/note, grind, skips, before/after, errors)
+  4. stdout is JSONL (one JSON object per line, printed as it happens):
+       {"event":"paper","at","note","skill":"听|说","taskId","ansVersion","score","scoreIsOut",
+        "status":"ok|low_score|grading|failed|skipped_existing","error"}   ← after every paper
+       {"event":"summary", accounts:[…], totals, started_at, finished_at}  ← last line
+       {"event":"fatal","error_code":"STALL"|…, "message"}                 ← on stall / crash
+     paper lines are also appended to UNIPUS_RESULTS_FILE
+     (default ~/.config/unipus-mcp/results.jsonl); a taskId+ansVersion already
+     recorded there as ok/low_score/grading is never submitted again.
 
 Grind side filter (two layers; CLI overrides meta):
   --listen-only   only听力 (overrides meta.grind)
@@ -43,14 +52,16 @@ Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
 Per-account usage: npx tsx scripts/accounts.ts usage <id> self|assist … [--listen N|platform] [--speak N|platform]
   本周目标 = min(usage 配置篇数, 平台 weekFrequency)；0 = 这一侧本周不做；assist 到期后跳过
 Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
-Exit codes (stdout always carries the JSON summary when accounts were resolved):
+Exit codes (stdout ends with the summary line when accounts were resolved):
   0  at least one account done/ground/skipped_* / needs_placement
      skipped_expired = 帮刷窗口已过（meta.usage），不登录、不交卷
      skipped_not_started = 帮刷 --from 还没到，不登录、不交卷
      启用侧配置篇数全为 0 → skipped_done（不登录、不定级）
   1  every targeted account ended in status=error (see errors / error_class)
   2  usage error or no target accounts
-TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
+  3  stall watchdog: no log line / stage advance for UNIPUS_STALL_MINUTES (default 15; 0 = off)
+TTS: unset → macOS say (silent, -o file) / other platforms Kokoro; UNIPUS_TTS_ENGINE=kokoro|piper|say overrides
+  (edge|flite|auto legacy, deprecated). Self-check: npx tsx scripts/doctor.ts
 
 CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);
 }
@@ -67,13 +78,15 @@ async function main(): Promise<void> {
     printHelp();
     return;
   }
+  installProcessStallWatchdog("weekly-grind");
   const summary = sanitizeSummaryForStdout(
     await runWeeklyGrind(parsed.mode, {
       grindOverride: parsed.grindOverride,
       skipPlacement: parsed.skipPlacement,
+      resultsFor: (note) => createPaperReporter({ note }),
     }),
   );
-  console.log(JSON.stringify(summary, null, 2));
+  console.log(JSON.stringify({ event: "summary", ...summary }));
   const hardFail = summary.accounts.some(
     (a) => a.status === "error" && a.errors.length > 0,
   );
@@ -93,12 +106,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  const message = (error instanceof Error ? error.message : String(error)).replace(
-    /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g,
-    "[redacted-jwt]",
-  );
+  const message = redactSecrets(error instanceof Error ? error.message : String(error));
   console.error(message);
   // Keep stdout machine-readable even on a crash outside per-account handling.
-  console.log(JSON.stringify({ accounts: [], fatal: { message } }, null, 2));
+  console.log(JSON.stringify({ event: "fatal", error_code: "CRASH", message }));
   process.exitCode = 1;
 });

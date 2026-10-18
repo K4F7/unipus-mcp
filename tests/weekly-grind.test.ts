@@ -1155,3 +1155,32 @@ describe("grindOneAccount side isolation", () => {
     assert.equal(a.status, "ground");
   });
 });
+
+describe("per-paper result reporter wiring (#88)", () => {
+  test("resultsFor gets the account note (not the phone) and its reporter reaches both grind sides", async () => {
+    const { setAccountNote } = await import("../src/accounts.js");
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-results-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "13900000000", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.b", makeActive: false, syncLegacy: false },
+      { home, env },
+    );
+    await setAccountNote("13900000000", "一学期（5听3口）", { home, env });
+    const notes: Array<string | null> = [];
+    const reporter = { report: async () => {}, isSubmitted: () => false };
+    const seen: unknown[] = [];
+    await runWeeklyGrind(
+      { kind: "ids", ids: ["13900000000"] },
+      {
+        home,
+        env,
+        resultsFor: async (note) => (notes.push(note), reporter),
+        listProgress: async () => ({ listen_done: 0, listen_total: 1, speak_done: 0, speak_total: 1 }),
+        grindListen: async (p) => (seen.push((p as { results?: unknown }).results), { completed: 1, taskIds: ["a"] }),
+        grindSpeak: async (p) => (seen.push((p as { results?: unknown }).results), { completed: 1, taskIds: ["b"] }),
+      },
+    );
+    assert.deepEqual(notes, ["一学期（5听3口）"]);
+    assert.deepEqual(seen, [reporter, reporter]);
+  });
+});

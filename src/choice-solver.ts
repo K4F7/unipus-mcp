@@ -8,6 +8,7 @@
  * and the grind summary warns. With the LLM on, failures throw (no silent fallback).
  */
 import { pickSingleChoice, stripHtml } from "./grind-paper.js";
+import { wallClockSignal } from "./watchdog.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
@@ -38,30 +39,40 @@ export function resolveChoiceSolverConfig(
 
 export function createLlmAsk(config: ChoiceSolverConfig, fetchImpl: typeof fetch = globalThis.fetch): LlmAsk {
   return async (prompt) => {
-    const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: 0,
-        max_tokens: 300,
-        messages: [
-          { role: "system", content: "You are an expert English listening exam solver." },
-          { role: "user", content: prompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
-    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    return body.choices?.[0]?.message?.content ?? "";
+    const deadline = wallClockSignal(60_000);
+    try {
+      const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: config.model,
+          temperature: 0,
+          max_tokens: 300,
+          messages: [
+            { role: "system", content: "You are an expert English listening exam solver." },
+            { role: "user", content: prompt },
+          ],
+        }),
+        signal: deadline.signal,
+      });
+      if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      return body.choices?.[0]?.message?.content ?? "";
+    } finally {
+      deadline.clear();
+    }
   };
 }
 
 export const defaultFetchText: FetchText = async (url) => {
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`subtitle HTTP ${res.status}`);
-  return res.text();
+  const deadline = wallClockSignal(20_000);
+  try {
+    const res = await fetch(url, { signal: deadline.signal });
+    if (!res.ok) throw new Error(`subtitle HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    deadline.clear();
+  }
 };
 
 function asRecord(v: unknown): Record<string, unknown> {
