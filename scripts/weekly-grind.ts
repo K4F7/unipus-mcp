@@ -40,9 +40,12 @@ Placement / 定级:
 neither --all nor --account → active only
 
 Per-account policy: npx tsx scripts/accounts.ts grind <id> both|listen|speak
+Per-account usage: npx tsx scripts/accounts.ts usage <id> self|assist … [--listen N|platform] [--speak N|platform]
+  本周目标 = min(usage 配置篇数, 平台 weekFrequency)；0 = 这一侧本周不做；assist 到期后跳过
 Harness routines call this CLI; MCP stays scheduler-free (no run_weekly tool).
 Exit codes (stdout always carries the JSON summary when accounts were resolved):
   0  at least one account done/ground/skipped_* / needs_placement
+     skipped_expired = 帮刷窗口已过（meta.usage），不登录、不交卷
   1  every targeted account ended in status=error (see errors / error_class)
   2  usage error or no target accounts
 TTS: UNIPUS_TTS_ENGINE=auto(default, Edge→local flite fallback)|edge|flite
@@ -74,7 +77,7 @@ async function main(): Promise<void> {
   );
   // captcha skips are soft; exit 0 if anything ground/done/skipped
   const anyOk = summary.accounts.some((a) =>
-    ["done", "ground", "skipped_done", "skipped_captcha", "needs_placement"].includes(
+    ["done", "ground", "skipped_done", "skipped_captcha", "skipped_expired", "needs_placement"].includes(
       a.status,
     ),
   );

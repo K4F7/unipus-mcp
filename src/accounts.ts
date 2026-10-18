@@ -12,6 +12,13 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  normalizeUsage,
+  selfUsage,
+  type AccountUsage,
+} from "./account-usage.js";
+
+export type { AccountUsage } from "./account-usage.js";
 
 export type AccountFs = {
   env?: NodeJS.ProcessEnv;
@@ -57,6 +64,12 @@ export type AccountMeta = {
   grind?: GrindMode | null;
   /** When true, weekly-grind will not auto-run placement; summary → needs_placement. */
   skip_placement?: boolean | null;
+  /**
+   * self = 自用，不过期。assist = 帮别人刷，expires_at 之后周任务跳过。
+   * 两种模式都可以写 listen_per_week / speak_per_week。缺省按 self，篇数按平台。
+   * 不要从 note 文本解析。
+   */
+  usage?: AccountUsage | null;
   last_login_at?: string | null;
   last_refresh_at?: string | null;
   jwt_expire?: unknown;
@@ -72,6 +85,7 @@ export type ListedAccount = {
   alias: string | null;
   note: string | null;
   grind: GrindMode;
+  usage: AccountUsage;
   last_login_at: string | null;
   last_refresh_at: string | null;
 };
@@ -175,6 +189,7 @@ export async function readAccountMeta(
       note: typeof rec.note === "string" ? rec.note : null,
       grind: normalizeGrind(rec.grind),
       skip_placement: rec.skip_placement === true ? true : rec.skip_placement === false ? false : null,
+      usage: normalizeUsage(rec.usage),
       last_login_at: typeof rec.last_login_at === "string" ? rec.last_login_at : null,
       last_refresh_at:
         typeof rec.last_refresh_at === "string" ? rec.last_refresh_at : null,
@@ -201,6 +216,7 @@ export async function writeAccountMeta(
     note: meta.note ?? null,
     grind: normalizeGrind(meta.grind),
     skip_placement: meta.skip_placement ?? null,
+    usage: normalizeUsage(meta.usage),
     last_login_at: meta.last_login_at ?? null,
     last_refresh_at: meta.last_refresh_at ?? null,
     jwt_expire: meta.jwt_expire ?? null,
@@ -250,6 +266,7 @@ export async function listAccounts(
       alias: meta?.alias ?? null,
       note: meta?.note ?? null,
       grind: normalizeGrind(meta?.grind),
+      usage: normalizeUsage(meta?.usage),
       last_login_at: meta?.last_login_at ?? null,
       last_refresh_at: meta?.last_refresh_at ?? null,
     });
@@ -310,6 +327,10 @@ export async function saveAccountTokens(
         patch.skip_placement !== undefined
           ? patch.skip_placement
           : existing.skip_placement ?? null,
+      usage:
+        patch.usage !== undefined
+          ? normalizeUsage(patch.usage)
+          : normalizeUsage(existing.usage),
       last_login_at:
         patch.last_login_at !== undefined
           ? patch.last_login_at
@@ -446,6 +467,36 @@ export async function setAccountGrind(
     options,
   );
 }
+
+/**
+ * Set self (不过期) or assist (帮刷，带到期日). Requires existing jwt.
+ * Does not parse note text. Token refresh keeps this field.
+ */
+export async function setAccountUsage(
+  accountId: string,
+  usage: AccountUsage,
+  options: AccountFs = {},
+): Promise<void> {
+  const p = ports(options);
+  const id = sanitizeAccountId(accountId);
+  const dir = accountDir(id, p.env, p.home);
+  const hasJwt = await fileExists(join(dir, "jwt"), p.readFile);
+  if (!hasJwt) {
+    throw new Error(`账户 ${id} 不存在或缺少 jwt（期望目录 ${dir}）`);
+  }
+  const existing = (await readAccountMeta(id, options)) ?? { account_id: id };
+  await writeAccountMeta(
+    id,
+    {
+      ...existing,
+      account_id: id,
+      usage: normalizeUsage(usage),
+    },
+    options,
+  );
+}
+
+export { selfUsage };
 
 
 async function atomicWriteText(

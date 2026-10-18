@@ -4,6 +4,14 @@
  * (refresh/login saves with makeActive:false, syncLegacy:false).
  */
 import {
+  effectiveWeekTotal,
+  isUsageExpired,
+  normalizeUsage,
+  selfUsage,
+  shanghaiDate,
+  type AccountUsage,
+} from "./account-usage.js";
+import {
   listAccounts,
   normalizeGrind,
   readAccountMeta,
@@ -52,6 +60,7 @@ export type AccountGrindSummary = {
     | "ground"
     | "skipped_done"
     | "skipped_captcha"
+    | "skipped_expired"
     | "needs_placement"
     | "error";
   before: ProgressSnap | null;
@@ -62,6 +71,10 @@ export type AccountGrindSummary = {
   listen_skipped: string | null;
   /** Non-null when speak side skipped by CLI/meta policy. */
   speak_skipped: string | null;
+  /** self 不过期；assist 带到期日。两边都可以带每周听力/口语篇数。缺省档案按 self。 */
+  usage: AccountUsage;
+  /** Non-null when an assist window has ended and this account was not ground. */
+  usage_skip: string | null;
   errors: string[];
   /** Non-fatal notes (e.g. no LLM configured, unanswered listen questions). */
   warnings?: string[];
@@ -101,6 +114,8 @@ export type WeeklyGrindPorts = AccountFs & {
   loginPassword?: typeof loginWithPassword;
   /** When false (default), never call makeActive/syncLegacy on token save. */
   touchActive?: boolean;
+  /** Clock for assist expiry (Asia/Shanghai date). */
+  now?: () => Date;
   /**
    * CLI grind override (--listen-only / --speak-only).
    * null/undefined → use meta.grind (default both).
@@ -218,6 +233,7 @@ export async function resolveTargetAccounts(
           alias: null,
           note: null,
           grind: "both",
+          usage: selfUsage(),
           last_login_at: null,
           last_refresh_at: null,
         });
@@ -375,21 +391,25 @@ function snapFromProgress(p: {
 function isAlreadyDone(
   snap: ProgressSnap,
   sides: { listen: boolean; speak: boolean },
+  usage: AccountUsage,
 ): boolean {
   if (sides.listen) {
-    const ld = snap.listen_done;
-    const lt = snap.listen_total;
-    if (ld == null || lt == null || ld < lt) return false;
+    const total = effectiveWeekTotal(snap.listen_total, usage.listen_per_week);
+    if (snap.listen_done == null || total == null || snap.listen_done < total) return false;
   }
   if (sides.speak) {
-    const sd = snap.speak_done;
-    const st = snap.speak_total;
-    if (sd == null || st == null || sd < st) return false;
+    const total = effectiveWeekTotal(snap.speak_total, usage.speak_per_week);
+    if (snap.speak_done == null || total == null || snap.speak_done < total) return false;
   }
   return sides.listen || sides.speak;
 }
 
-function needCount(done: number | null, total: number | null): number {
+function needCount(
+  done: number | null,
+  platformTotal: number | null,
+  perWeek: number | null,
+): number {
+  const total = effectiveWeekTotal(platformTotal, perWeek);
   if (done == null || total == null) return 0;
   return Math.max(0, total - done);
 }
@@ -426,6 +446,8 @@ export async function grindOneAccount(
   const speak_skipped = sides.speak
     ? null
     : policySkipReason("speak", effective, ports.grindOverride);
+  const usage = normalizeUsage(meta?.usage ?? account.usage);
+  const today = shanghaiDate(ports.now?.() ?? new Date());
   const base: AccountGrindSummary = {
     account_id: account.account_id,
     alias: meta?.alias ?? account.alias ?? null,
@@ -438,8 +460,19 @@ export async function grindOneAccount(
     speak_completed: 0,
     listen_skipped,
     speak_skipped,
+    usage,
+    usage_skip: null,
     errors,
   };
+
+  if (isUsageExpired(usage, today)) {
+    const until = usage.expires_at ?? "未写到期日";
+    return {
+      ...base,
+      status: "skipped_expired",
+      usage_skip: `帮刷已到期 ${until}（term=${usage.term}），周任务已跳过`,
+    };
+  }
 
   const auth = await ensureAccountAuth(account.account_id, ports);
   if (!auth.ok) {
@@ -528,7 +561,7 @@ export async function grindOneAccount(
     };
   }
 
-  if (isAlreadyDone(base.before, sides)) {
+  if (isAlreadyDone(base.before, sides, usage)) {
     return {
       ...base,
       status: "skipped_done",
@@ -537,10 +570,10 @@ export async function grindOneAccount(
   }
 
   const listenNeed = sides.listen
-    ? needCount(base.before.listen_done, base.before.listen_total)
+    ? needCount(base.before.listen_done, base.before.listen_total, usage.listen_per_week)
     : 0;
   const speakNeed = sides.speak
-    ? needCount(base.before.speak_done, base.before.speak_total)
+    ? needCount(base.before.speak_done, base.before.speak_total, usage.speak_per_week)
     : 0;
 
   const grindPorts: GrindListenPorts & GrindSpeakPorts = {
@@ -585,7 +618,7 @@ export async function grindOneAccount(
   }
   base.after = afterRaw;
 
-  if (isAlreadyDone(afterRaw, sides)) {
+  if (isAlreadyDone(afterRaw, sides, usage)) {
     base.status = base.listen_completed + base.speak_completed > 0 ? "done" : "skipped_done";
   } else if (base.listen_completed + base.speak_completed > 0) {
     base.status = "ground";
@@ -618,6 +651,8 @@ export async function runWeeklyGrind(
         speak_completed: 0,
         listen_skipped: null,
         speak_skipped: null,
+        usage: normalizeUsage(account.usage),
+        usage_skip: null,
         errors: ["账户不存在或缺少 jwt|rt"],
       });
       continue;
@@ -639,6 +674,8 @@ export async function runWeeklyGrind(
         speak_completed: 0,
         listen_skipped: null,
         speak_skipped: null,
+        usage: normalizeUsage(account.usage),
+        usage_skip: null,
         errors: [err.message],
         error_class: classifyError(err),
       });
