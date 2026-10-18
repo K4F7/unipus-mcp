@@ -184,6 +184,12 @@ describe("account usage window", () => {
     assert.equal(normalizeUsage({ mode: "self", listen_per_week: 31 }).listen_per_week, null);
   });
 
+  test("a zero quota is zero even without platform progress", () => {
+    assert.equal(effectiveWeekTotal(null, 0), 0);
+    assert.equal(effectiveWeekTotal(null, 2), null);
+    assert.equal(effectiveWeekTotal(null, null), null);
+  });
+
   test("effective week total caps a configured count at the platform total", () => {
     assert.equal(effectiveWeekTotal(5, null), 5);
     assert.equal(effectiveWeekTotal(5, 2), 2);

@@ -397,11 +397,11 @@ function isAlreadyDone(
 ): boolean {
   if (sides.listen) {
     const total = effectiveWeekTotal(snap.listen_total, usage.listen_per_week);
-    if (snap.listen_done == null || total == null || snap.listen_done < total) return false;
+    if (total !== 0 && (snap.listen_done == null || total == null || snap.listen_done < total)) return false;
   }
   if (sides.speak) {
     const total = effectiveWeekTotal(snap.speak_total, usage.speak_per_week);
-    if (snap.speak_done == null || total == null || snap.speak_done < total) return false;
+    if (total !== 0 && (snap.speak_done == null || total == null || snap.speak_done < total)) return false;
   }
   return sides.listen || sides.speak;
 }

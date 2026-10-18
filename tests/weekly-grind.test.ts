@@ -767,6 +767,27 @@ describe("grind side policy", () => {
     assert.equal(open.usage.expires_at, "2027-01-15");
   });
 
+  test("a zero-quota side with null platform counters still counts as done", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-null-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "zn", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.n" },
+      { home, env },
+    );
+    await setAccountUsage("zn", { ...selfUsage(), speak_per_week: 0 }, { home, env });
+    let grindCalls = 0;
+    const row = (await listAccounts({ home, env }))[0]!;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      listProgress: async () => ({ listen_done: 5, listen_total: 5, speak_done: null, speak_total: null }),
+      grindListen: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
+      grindSpeak: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
+    });
+    assert.equal(result.status, "skipped_done");
+    assert.equal(grindCalls, 0);
+  });
+
   test("assist with a future --from skips before progress", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-future-"));
     const env = {};

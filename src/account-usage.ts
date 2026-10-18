@@ -69,12 +69,14 @@ function readWeekQuota(raw: unknown): Pick<AccountUsage, "listen_per_week" | "sp
 
 /**
  * 周任务达标数。未配置篇数时用平台 weekFrequency。
- * 配置后不超过平台达标数。平台总数未知时返回 null。
+ * 配置后不超过平台达标数。配置为 0 时恒为 0（不依赖平台进度）。
+ * 其余情况平台总数未知时返回 null。
  */
 export function effectiveWeekTotal(
   platformTotal: number | null,
   perWeek: number | null,
 ): number | null {
+  if (perWeek === 0) return 0;
   if (platformTotal == null || !Number.isFinite(platformTotal)) return null;
   if (perWeek == null) return platformTotal;
   return Math.min(platformTotal, perWeek);
