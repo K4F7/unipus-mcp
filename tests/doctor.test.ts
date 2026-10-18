@@ -21,5 +21,10 @@ test("doctor flags missing ffmpeg / tts script and never echoes the LLM key", ()
   assert.equal(r.checks.find((c) => c.name === "ffmpeg")!.ok, false);
   assert.equal(tts(r).ok, false);
   assert.doesNotMatch(JSON.stringify(r), /sk-secret/);
-  assert.match(r.checks.find((c) => c.name === "llm")!.detail, /已配置/);
+  const llm = r.checks.find((c) => c.name === "llm")!;
+  assert.equal(llm.ok, false);
+  assert.match(llm.detail, /缺 UNIPUS_LLM_BASE_URL \/ UNIPUS_LLM_MODEL/);
+  const full = doctorReport({ PATH: "/usr/bin", UNIPUS_LLM_BASE_URL: "https://x/v1", UNIPUS_LLM_MODEL: "m", UNIPUS_LLM_API_KEY: "sk-secret" }, "linux", all);
+  assert.equal(full.checks.find((c) => c.name === "llm")!.ok, true);
+  assert.doesNotMatch(JSON.stringify(full), /sk-secret|https:\/\/x/);
 });

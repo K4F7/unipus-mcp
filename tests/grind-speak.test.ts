@@ -9,6 +9,9 @@ import {
 import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
 import type { SpeechRecordType } from "../src/scored-speech.js";
 
+const FREE_TALK = Array.from({ length: 120 }, (_, i) => (i % 10 === 9 ? "music." : "music")).join(" ");
+const okAsk = async () => FREE_TALK;
+
 function mockHttp(
   handler: (call: UnipusHttpRequest) => Promise<{ statusCode: number; body: string }>,
 ): UnipusHttp & { calls: UnipusHttpRequest[] } {
@@ -36,7 +39,7 @@ const paper = {
         q_qinstid: "222",
         q_template_name: "oral-personal-state",
         nm: "free",
-        data: { children: [{}] },
+        data: { children: [{}], contents: [{ text: "<p>Talk in 60 seconds about the music you like.</p>" }] },
       },
     ],
   }),
@@ -179,6 +182,7 @@ describe("completeOneSpeak", () => {
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
       env: {},
+      llmAsk: okAsk,
       speechRecord,
       sleep: async () => {},
     });
@@ -258,6 +262,7 @@ describe("completeOneSpeak", () => {
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
       env: {},
+      llmAsk: okAsk,
       speechRecord: async () => ({
         type: "EN_SENT_SCORE",
         url: "https://cdn.example/a.wav",
@@ -322,8 +327,13 @@ function scenario(opts: {
     return { statusCode: 404, body: "{}" };
   });
 }
-const run = (http: ReturnType<typeof mockHttp>, speechRecord = okSpeech) =>
-  completeOneSpeak({ credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord, sleep: async () => {}, appReadyPollTries: 3 });
+const run = (
+  http: ReturnType<typeof mockHttp>,
+  speechRecord = okSpeech,
+  llmAsk: ((p: string) => Promise<string>) | null = okAsk,
+  env: Record<string, string> = {},
+) =>
+  completeOneSpeak({ credentials: { getJwt: async () => JWT }, http, env, llmAsk: llmAsk ?? undefined, speechRecord, sleep: async () => {}, appReadyPollTries: 3 });
 const submitCalls = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("part/submit"));
 
 describe("completeOneSpeak review (#62)", () => {
@@ -520,6 +530,7 @@ describe("completeOneSpeak review (#62)", () => {
       credentials: { getJwt: async () => JWT },
       http,
       env: {},
+      llmAsk: okAsk,
       speechRecord: okSpeech,
       sleep: async () => {},
       appReadyPollTries: 2,
@@ -545,7 +556,7 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
     };
   };
   const ports = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) => ({
-    credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech,
+    credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: okSpeech,
     sleep: async () => {}, appReadyPollTries: 2, ...extra,
   });
 
@@ -599,8 +610,86 @@ describe("grindSpeakGaps rounds (#88)", () => {
       return inner.request(call);
     });
     const r = await grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 1,
+      credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 1,
     } as never, 7);
     assert.equal(r.completed, 7, String(r.stoppedReason));
+  });
+});
+
+describe("no template submit (Sein: 没答案不要用模板交)", () => {
+  const recording = () => {
+    const texts: string[] = [];
+    const speech = async (t: string, _g: string, type: SpeechRecordType) => {
+      texts.push(t);
+      return { type, url: "u", recordDetail: { score: 90 } };
+    };
+    return { texts, speech };
+  };
+
+  test("no UNIPUS_LLM_* config (SiliconFlow key only) → refused: no TTS/upload, no part/submit", async () => {
+    const http = scenario({});
+    const { texts, speech } = recording();
+    const r = await run(http, speech, null, { SILICONFLOW_API_KEY: "k" });
+    assert.equal(r.ok, false);
+    assert.equal((r as { refused?: boolean }).refused, true);
+    assert.match((r as { detail: string }).detail, /ANSWER_REFUSED/);
+    assert.equal(texts.length, 0);
+    assert.equal(submitCalls(http).length, 0);
+  });
+
+  test("LLM keeps failing → refused: free talk never voiced, no part/submit", async () => {
+    const http = scenario({});
+    const { texts, speech } = recording();
+    let n = 0;
+    const r = await run(http, speech, async () => { n++; throw new Error("HTTP 502"); });
+    assert.equal(r.ok, false);
+    assert.equal((r as { refused?: boolean }).refused, true);
+    assert.ok(n >= 3);
+    assert.equal(texts.length, 0);
+    assert.equal(submitCalls(http).length, 0);
+  });
+
+  test("free talk voiced from the LLM text", async () => {
+    const http = scenario({});
+    const { texts, speech } = recording();
+    const r = await run(http, speech);
+    assert.equal(r.ok, true);
+    assert.deepEqual(texts, [FREE_TALK]);
+  });
+
+  test("resume: free talk already submitted → not regenerated; LLM down does not block pending parts", async () => {
+    const http = scenario({
+      parts: () => [
+        { partId: "p1", partName: "范例学习", questionInstanceIds: ["111"], reportStatus: null, submitted: null },
+        { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], reportStatus: "completed", submitted: true },
+      ],
+    });
+    const { texts, speech } = recording();
+    let n = 0;
+    const r = await run(http, speech, async () => { n++; throw new Error("HTTP 502"); });
+    assert.equal(n, 0);
+    assert.equal(texts.length, 0);
+    assert.equal((r as { refused?: boolean }).refused, undefined);
+    assert.deepEqual([...new Set(submitCalls(http).map((c) => JSON.parse(String(c.body)).partId))], ["p1"]);
+  });
+
+  test("grindSpeakGaps: refusal counts as failure and stops (no next paper)", async () => {
+    const http = scenario({});
+    const r = await grindSpeakGaps(
+      { credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: async () => { throw new Error("down"); }, speechRecord: okSpeech, sleep: async () => {} },
+      3,
+      5,
+    );
+    assert.equal(r.completed, 0);
+    assert.equal(r.refused, true);
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 1);
+    assert.equal(submitCalls(http).length, 0);
+  });
+
+  test("grindSpeakGaps without LLM config → refused before loading any paper", async () => {
+    const http = scenario({});
+    const r = await grindSpeakGaps({ credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech }, 2);
+    assert.equal(r.refused, true);
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 0);
   });
 });

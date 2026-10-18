@@ -15,7 +15,7 @@ import {
   type ConversationPorts,
 } from "./conversation.js";
 import { ebcpAuth, ebcpSpeakers, type EbcpPorts } from "./ebcp.js";
-import { DEFAULT_AI_SPEAK_SCRIPT } from "./grind-paper.js";
+import { AnswerRefusedError, resolveLlmAsk, type LlmAsk } from "./choice-solver.js";
 import { generateDialogReply } from "./speak-content.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { synthesizeSpeechWav, type SynthesizeSpeechPorts } from "./tts.js";
@@ -51,6 +51,8 @@ export type AiDialogFlowPorts = AuthPorts &
   EbcpPorts &
   UploadAnswerAudioPorts &
   SynthesizeSpeechPorts & {
+    /** LLM for user turns; default from UNIPUS_LLM_* (required — no canned script). */
+    llmAsk?: LlmAsk;
     /** Injected for tests; default opens wss://oral.unipus.cn/oral_api/ws//{cid}. */
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
   };
@@ -205,8 +207,8 @@ export type AiDialogFlowInput = {
   userTurns?: number;
   openId?: string;
   role?: string;
-  /** Task prompt (stripped) so user turns answer on-topic (#63). */
-  taskText?: string;
+  /** Task prompt (stripped); required — user turns are LLM replies to it (#63). */
+  taskText: string;
 };
 
 export type AiDialogTurn = {
@@ -230,17 +232,6 @@ function nowCurTime(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function splitUserScripts(turns: number): string[] {
-  const parts = DEFAULT_AI_SPEAK_SCRIPT.split(/(?<=[.!?])\s+/).filter(
-    (s) => s.trim().length > 0,
-  );
-  const out: string[] = [];
-  for (let i = 0; i < turns; i++) {
-    out.push(parts[i % parts.length] ?? DEFAULT_AI_SPEAK_SCRIPT);
-  }
-  return out;
 }
 
 async function ttsUpload(
@@ -284,6 +275,31 @@ async function ttsUploadOnce(
 }
 
 /** chat/info records with audio+text → turns (skips empty WS bot placeholders). */
+/**
+ * Fragments of the canned scripts older versions voiced when the LLM failed
+ * (DEFAULT_AI_SPEAK_SCRIPT, templateFreeTalk, the dialog fallback line).
+ * Stored server-side turns containing any of them must never be reused.
+ */
+const LEGACY_CANNED_FRAGMENTS = [
+  "last term i had some trouble with math",
+  "went to the teachers office and asked for help",
+  "explained the formula again with a simple example",
+  "how much a patient and caring teacher can help",
+  "thats a good question i think it is really important to me",
+  "this topic really matters to me in my daily life as a college student",
+  "the most important point is that it helps me learn more about myself",
+  "last semester i spent a lot of time on it",
+  "it also brings me a lot of fun and makes me feel more confident",
+  "i usually share my experience with my friends",
+  "i will keep paying attention to it in the future",
+];
+const normalizeTurn = (s: string) => s.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+
+export function isLegacyCannedTurn(text: string): boolean {
+  const t = normalizeTurn(text);
+  return LEGACY_CANNED_FRAGMENTS.some((f) => t.includes(f));
+}
+
 export function existingTurnsFromChatInfo(data: unknown): AiDialogTurn[] {
   const rec = (data as { record?: { list?: unknown } } | null)?.record;
   const list = Array.isArray(rec?.list) ? (rec!.list as Record<string, unknown>[]) : [];
@@ -339,6 +355,15 @@ export async function runAiDialogFlow(
   ports: AiDialogFlowPorts,
   input: AiDialogFlowInput,
 ): Promise<AiDialogFlowResult> {
+  // No task text or no LLM → refuse before touching the server (no canned user script).
+  const taskText = input.taskText?.trim();
+  if (!taskText) return toolError("ANSWER_REFUSED", "AI对话缺题目文本，拒绝用固定稿作答");
+  let ask: LlmAsk;
+  try {
+    ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
+  } catch (error) {
+    return toolError("ANSWER_REFUSED", (error as Error).message);
+  }
   const loaded = await ports.credentials.getJwt();
   if (loaded == null || loaded.length === 0) {
     return toolError("AUTH_REQUIRED", "未配置 JWT");
@@ -391,12 +416,14 @@ export async function runAiDialogFlow(
   const prior = existingTurnsFromChatInfo(info?.data);
   const priorUser = prior.filter((t) => t.type === "cos").length;
   const reusePrior = priorUser >= 2;
+  if (reusePrior && prior.some((t) => t.type === "cos" && isLegacyCannedTurn(t.text))) {
+    return toolError("ANSWER_REFUSED", "AI对话 已有会话含旧版模板话轮，拒绝复用交卷");
+  }
   await ebcpSpeakers(ports, { scene: "ai-cosplay", bizExt, openId });
 
   if (!reusePrior && priorUser > 0) {
     userTurns = Math.max(1, Math.min(userTurns, 10 - priorUser));
   }
-  const userScripts = splitUserScripts(userTurns);
   const turns: AiDialogTurn[] = reusePrior ? [...prior] : [];
   const cur = nowCurTime();
   let duration = reusePrior ? prior.reduce((a, t) => a + t.audioDuration, 0) : 0;
@@ -494,9 +521,7 @@ export async function runAiDialogFlow(
     await saveTurn("bot", opener, await ttsUpload(ports, opener, `${Date.now()}-b0`, openId));
     let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
-      const userText = input.taskText
-        ? await generateDialogReply(input.taskText, lastBot, i, { env: ports.env })
-        : userScripts[i]!;
+      const userText = await generateDialogReply(taskText, lastBot, i, { ask });
       const spoken = await synthesizeSpeechWav({ text: userText }, ports);
       let reply: DialogReply;
       let media: { url: string; dur: number };
@@ -522,6 +547,7 @@ export async function runAiDialogFlow(
     }
   } catch (error) {
     if (error instanceof SaveError) return error.result;
+    if (error instanceof AnswerRefusedError) return toolError("ANSWER_REFUSED", `AI对话 ${error.message}`);
     const detail = error instanceof Error ? error.message : String(error);
     return toolError("TTS_ERROR", `AI对话 WS/TTS/上传失败：${detail}`);
   } finally {

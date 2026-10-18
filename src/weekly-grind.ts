@@ -32,6 +32,7 @@ import {
 import { grindListenGaps, type GrindListenPorts } from "./grind-listen.js";
 import { runAutoPlacement, type GrindPlacementPorts } from "./grind-placement.js";
 import { grindSpeakGaps, type GrindSpeakPorts } from "./grind-speak.js";
+import { probeLlm, resolveLlmAsk, type LlmAsk } from "./choice-solver.js";
 import {
   loginWithPassword,
   refreshWithRt,
@@ -96,6 +97,8 @@ export type WeeklyGrindSummary = {
 
 export type WeeklyGrindPorts = AccountFs & {
   http?: UnipusHttp;
+  /** LLM for every answer (listen / speak / placement); default from UNIPUS_LLM_* (required). */
+  llmAsk?: LlmAsk;
   /**
    * When true, do not auto-run placement on NEEDS_PLACEMENT.
    * CLI --skip-placement or meta.skip_placement.
@@ -109,11 +112,11 @@ export type WeeklyGrindPorts = AccountFs & {
   grindListen?: (
     ports: GrindListenPorts,
     need: number,
-  ) => Promise<{ completed: number; taskIds: string[]; stoppedReason?: string }>;
+  ) => Promise<SideResult>;
   grindSpeak?: (
     ports: GrindSpeakPorts,
     need: number,
-  ) => Promise<{ completed: number; taskIds: string[]; stoppedReason?: string }>;
+  ) => Promise<SideResult>;
   refreshRt?: typeof refreshWithRt;
   loginPassword?: typeof loginWithPassword;
   /** When false (default), never call makeActive/syncLegacy on token save. */
@@ -130,6 +133,16 @@ export type WeeklyGrindPorts = AccountFs & {
    * status file. CLI passes createPaperReporter; omitted → no per-paper lines.
    */
   resultsFor?: (note: string | null) => Promise<PaperReporter>;
+};
+
+type SideResult = {
+  completed: number;
+  taskIds: string[];
+  stoppedReason?: string;
+  errorClass?: ErrorClass;
+  warnings?: string[];
+  /** A paper was refused (no valid LLM answer): account stops, counts as failure. */
+  refused?: boolean;
 };
 
 export type SelectAccountsMode =
@@ -502,6 +515,15 @@ export async function grindOneAccount(
     };
   }
 
+  // Answers come only from the LLM: missing config or a failed probe refuses before login / placement / any submit.
+  let llmAsk: LlmAsk;
+  try {
+    llmAsk = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
+    await probeLlm(llmAsk);
+  } catch (error) {
+    return { ...base, status: "error", errors: [toError(error).message] };
+  }
+
   markProgress(`account:auth ${base.note ?? "(无备注)"}`);
   const auth = await ensureAccountAuth(account.account_id, ports);
   if (!auth.ok) {
@@ -554,6 +576,7 @@ export async function grindOneAccount(
       credentials,
       http,
       env: ports.env,
+      llmAsk,
       flows: placeFlows,
     };
     const zeroQuotaNote =
@@ -577,6 +600,9 @@ export async function grindOneAccount(
       if (side && !side.ok) {
         errors.push(`placement_${side.flow}: ${side.detail}`);
       }
+    }
+    if ([placed.listen, placed.speak].some((side) => side && !side.ok && side.refused)) {
+      return { ...base, status: "error", errors };
     }
 
     const afterPlace = await listProgress(credentials);
@@ -625,22 +651,23 @@ export async function grindOneAccount(
     http,
     env: ports.env,
     results: ports.resultsFor ? await ports.resultsFor(base.note) : undefined,
+    llmAsk,
   };
 
   const grindListen = ports.grindListen ?? grindListenGaps;
   const grindSpeak = ports.grindSpeak ?? grindSpeakGaps;
 
   // Each side isolated: a throw on one side keeps the other side's completions.
-  const runSide = async (
-    side: "listen" | "speak",
-    run: () => Promise<{ completed: number; stoppedReason?: string; errorClass?: ErrorClass; warnings?: string[] }>,
-  ) => {
+  // A refusal (no valid LLM answer) stops the whole account: no retry, no next side.
+  let refused = false;
+  const runSide = async (side: "listen" | "speak", run: () => Promise<SideResult>) => {
     try {
       const r = await run();
       base[`${side}_completed`] = r.completed;
       if (r.warnings?.length) base.warnings = [...(base.warnings ?? []), ...r.warnings.map((w) => `${side}: ${w}`)];
       if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
       if (r.errorClass) base.error_class ??= r.errorClass;
+      if (r.refused) refused = true;
     } catch (error) {
       const err = toError(error);
       errors.push(`${side}: ${err.message}`);
@@ -648,14 +675,17 @@ export async function grindOneAccount(
     }
   };
   if (listenNeed > 0) await runSide("listen", () => grindListen(grindPorts, listenNeed));
-  if (speakNeed > 0) await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
+  if (speakNeed > 0) {
+    if (refused) errors.push("speak: 跳过（听力拒交，本账号停止）");
+    else await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
+  }
 
   const afterRaw = await listProgress(credentials);
   if ("error" in afterRaw) {
     errors.push(`progress_after: ${afterRaw.error}`);
     return {
       ...base,
-      status: errors.length && base.listen_completed + base.speak_completed === 0
+      status: refused || (errors.length && base.listen_completed + base.speak_completed === 0)
         ? "error"
         : "ground",
       errors,
@@ -663,7 +693,9 @@ export async function grindOneAccount(
   }
   base.after = afterRaw;
 
-  if (isAlreadyDone(afterRaw, sides, usage)) {
+  if (refused) {
+    base.status = "error";
+  } else if (isAlreadyDone(afterRaw, sides, usage)) {
     base.status = base.listen_completed + base.speak_completed > 0 ? "done" : "skipped_done";
   } else if (base.listen_completed + base.speak_completed > 0) {
     base.status = "ground";
@@ -736,20 +768,28 @@ export async function runWeeklyGrind(
   };
 }
 
-/** Redact any accidental secret-looking fields before stdout. */
+/** Phone-shaped account id → 139****0000; other ids keep only the last 4 chars. */
+export function maskAccountId(id: string): string {
+  if (/^1\d{10}$/.test(id)) return `${id.slice(0, 3)}****${id.slice(-4)}`;
+  return id.length > 4 ? `***${id.slice(-4)}` : "***";
+}
+
+const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g;
+const PHONE_RE = /(?<!\d)1\d{10}(?!\d)/g;
+
+/**
+ * stdout summary: accounts by note + masked id only (same as per-paper lines),
+ * never a full phone number or a jwt-shaped token.
+ */
 export function sanitizeSummaryForStdout(summary: WeeklyGrindSummary): WeeklyGrindSummary {
-  const json = JSON.stringify(summary);
-  // Soft guard: never echo jwt-shaped tokens in summary strings
-  if (/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(json)) {
-    return {
-      ...summary,
-      accounts: summary.accounts.map((a) => ({
-        ...a,
-        errors: a.errors.map((e) =>
-          e.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted-jwt]"),
-        ),
-      })),
-    };
-  }
-  return summary;
+  const clean = (e: string) => e.replace(JWT_RE, "[redacted-jwt]").replace(PHONE_RE, maskAccountId);
+  return {
+    ...summary,
+    accounts: summary.accounts.map((a) => ({
+      ...a,
+      account_id: maskAccountId(a.account_id),
+      errors: a.errors.map(clean),
+      ...(a.warnings ? { warnings: a.warnings.map(clean) } : {}),
+    })),
+  };
 }

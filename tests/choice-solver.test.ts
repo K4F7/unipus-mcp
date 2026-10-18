@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import {
   LLM_SOLVE_ATTEMPTS,
-  LlmSolveError,
+  AnswerRefusedError,
   buildSolvedFillblankAnswer,
   buildSolvedObjectiveAnswer,
   parseChoiceAnswers,
@@ -15,11 +15,37 @@ const opts = [
   { name: "B", value: "B", text: "<p>Neighbors.</p>" },
 ];
 
+const LLM_ENV = { UNIPUS_LLM_BASE_URL: "https://llm.example/v1/", UNIPUS_LLM_MODEL: "m", UNIPUS_LLM_API_KEY: "k" };
+
 describe("choice-solver", () => {
-  test("config off without key or with UNIPUS_LLM_SOLVER=off", () => {
-    assert.equal(resolveChoiceSolverConfig({}), null);
-    assert.equal(resolveChoiceSolverConfig({ UNIPUS_LLM_API_KEY: "k", UNIPUS_LLM_SOLVER: "off" }), null);
-    assert.equal(resolveChoiceSolverConfig({ UNIPUS_LLM_API_KEY: "k" })?.model, "deepseek-ai/DeepSeek-V3");
+  test("config reads only UNIPUS_LLM_BASE_URL / MODEL / API_KEY", () => {
+    assert.deepEqual(resolveChoiceSolverConfig(LLM_ENV), {
+      baseUrl: "https://llm.example/v1",
+      model: "m",
+      apiKey: "k",
+    });
+  });
+
+  test("config missing any UNIPUS_LLM_* var → AnswerRefusedError (no SiliconFlow fallback / defaults)", () => {
+    assert.throws(() => resolveChoiceSolverConfig({}), AnswerRefusedError);
+    assert.throws(
+      () => resolveChoiceSolverConfig({ SILICONFLOW_API_KEY: "k" }),
+      (e: unknown) => e instanceof AnswerRefusedError && /UNIPUS_LLM_BASE_URL/.test((e as Error).message),
+    );
+    for (const drop of Object.keys(LLM_ENV)) {
+      const env: Record<string, string> = { ...LLM_ENV };
+      delete env[drop];
+      assert.throws(() => resolveChoiceSolverConfig(env), (e: unknown) => e instanceof AnswerRefusedError && e.message.includes(drop));
+    }
+  });
+
+  test("config error never echoes the key", () => {
+    try {
+      resolveChoiceSolverConfig({ UNIPUS_LLM_API_KEY: "secret-xyz" });
+      assert.fail("should throw");
+    } catch (e) {
+      assert.doesNotMatch((e as Error).message, /secret-xyz/);
+    }
   });
 
   test("parseChoiceAnswers keeps only valid option letters", () => {
@@ -29,7 +55,7 @@ describe("choice-solver", () => {
     assert.deepEqual(parseChoiceAnswers("garbage", qs), [null]);
   });
 
-  test("multi-child: LLM picks win, invalid letter → heuristic and counted", async () => {
+  test("multi-child: every question gets the LLM letter", async () => {
     const data = {
       contents: [{ text: "<p>We are <strong>Neighbors.</strong></p>" }],
       children: [
@@ -38,13 +64,28 @@ describe("choice-solver", () => {
       ],
     };
     const seen: string[] = [];
-    const out = await buildSolvedObjectiveAnswer(data, async (prompt) => {
+    const answer = await buildSolvedObjectiveAnswer(data, async (prompt) => {
       seen.push(prompt);
-      return '{"answers":["A","?"]}';
+      return '{"answers":["A","b"]}';
     });
     assert.match(seen[0]!, /We are Neighbors\.[\s\S]*Q1\. Q1\?[\s\S]*Q2\. Q2\?/);
-    assert.deepEqual(JSON.parse(out.answer).children.map((c: { value: string[] }) => c.value[0]), ["A", "B"]);
-    assert.equal(out.unanswered, 1);
+    assert.deepEqual(JSON.parse(answer).children.map((c: { value: string[] }) => c.value[0]), ["A", "B"]);
+  });
+
+  test("invalid letter is retried, never guessed; still invalid → throws", async () => {
+    const data = { children: [{ quesText: "Q1?", options: opts }, { quesText: "Q2?", options: opts }] };
+    const replies = ['{"answers":["A","?"]}', '{"answers":["A","B"]}'];
+    let n = 0;
+    const answer = await buildSolvedObjectiveAnswer(data, async () => replies[n++]!);
+    assert.equal(n, 2);
+    assert.deepEqual(JSON.parse(answer).children.map((c: { value: string[] }) => c.value[0]), ["A", "B"]);
+
+    let m = 0;
+    await assert.rejects(
+      buildSolvedObjectiveAnswer(data, async () => { m++; return '{"answers":["A","Z"]}'; }),
+      (e: unknown) => e instanceof AnswerRefusedError && /无合法答案|invalid/.test((e as Error).message),
+    );
+    assert.equal(m, LLM_SOLVE_ATTEMPTS);
   });
 
   test("video item: question from quesText, context from WebVTT subtitles", async () => {
@@ -64,30 +105,33 @@ describe("choice-solver", () => {
   test("LLM retries transient failure / bad JSON, then succeeds", async () => {
     const replies = [() => { throw new Error("timeout"); }, () => "not json", () => '{"answers":["B"]}'];
     let n = 0;
-    const out = await buildSolvedObjectiveAnswer({ options: opts }, async () => replies[n++]!());
+    const answer = await buildSolvedObjectiveAnswer({ options: opts }, async () => replies[n++]!());
     assert.equal(n, LLM_SOLVE_ATTEMPTS);
-    assert.deepEqual(JSON.parse(out.answer).children[0].value, ["B"]);
+    assert.deepEqual(JSON.parse(answer).children[0].value, ["B"]);
   });
 
-  test("objective: LLM keeps failing → throws LlmSolveError (no heuristic fallback)", async () => {
+  test("objective: LLM keeps failing → throws AnswerRefusedError (no heuristic fallback)", async () => {
     let n = 0;
     await assert.rejects(
       buildSolvedObjectiveAnswer({ options: opts }, async () => { n++; throw new Error("HTTP 500"); }),
-      (e: unknown) => e instanceof LlmSolveError && /HTTP 500/.test((e as Error).message),
+      (e: unknown) => e instanceof AnswerRefusedError && /HTTP 500/.test((e as Error).message),
     );
     assert.equal(n, LLM_SOLVE_ATTEMPTS);
   });
 
-  test("fillblank: LLM answers per blank; failure throws; off (null) = empty blanks counted", async () => {
+  test("fillblank: every blank filled by the LLM", async () => {
     const data = { children: [{ quesText: "<p>a ____1____ b ____2____</p>" }, { quesText: "" }] };
-    const out = await buildSolvedFillblankAnswer(data, async () => '{"answers":["marine",""]}');
-    assert.deepEqual(JSON.parse(out.answer).children, [
+    const answer = await buildSolvedFillblankAnswer(data, async () => '{"answers":["marine","life"]}');
+    assert.deepEqual(JSON.parse(answer).children, [
       { value: ["marine"], isDone: true },
-      { value: [""], isDone: true },
+      { value: ["life"], isDone: true },
     ]);
-    assert.equal(out.unanswered, 1);
-    await assert.rejects(buildSolvedFillblankAnswer(data, async () => "garbage"), LlmSolveError);
-    const off = await buildSolvedFillblankAnswer(data, null);
-    assert.equal(off.unanswered, 2);
+  });
+
+  test("fillblank: empty blank or garbage → throws, never submitted empty", async () => {
+    const data = { children: [{ quesText: "<p>a ____1____ b ____2____</p>" }, { quesText: "" }] };
+    await assert.rejects(buildSolvedFillblankAnswer(data, async () => '{"answers":["marine",""]}'), AnswerRefusedError);
+    await assert.rejects(buildSolvedFillblankAnswer(data, async () => '{"answers":["marine"]}'), AnswerRefusedError);
+    await assert.rejects(buildSolvedFillblankAnswer(data, async () => "garbage"), AnswerRefusedError);
   });
 });

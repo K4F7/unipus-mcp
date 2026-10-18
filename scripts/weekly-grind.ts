@@ -62,6 +62,9 @@ Exit codes (stdout ends with the summary line when accounts were resolved):
   3  stall watchdog: no log line / stage advance for UNIPUS_STALL_MINUTES (default 15; 0 = off)
 TTS: unset → macOS say (silent, -o file) / other platforms Kokoro; UNIPUS_TTS_ENGINE=kokoro|piper|say overrides
   (edge|flite|auto legacy, deprecated). Self-check: npx tsx scripts/doctor.ts
+LLM (required, answers only from it — no template / heuristic / empty blank):
+  UNIPUS_LLM_BASE_URL  UNIPUS_LLM_MODEL  UNIPUS_LLM_API_KEY   (no defaults; SILICONFLOW_API_KEY ignored)
+  missing or failed probe → status=error ANSWER_REFUSED before login; no valid answer → paper not submitted, account stops
 
 CAPTCHA_REQUIRED → status skipped_captcha（继续其他账户）；有头登录后用\n  npx tsx scripts/import-tokens.ts --account <id> --jwt-file …\nNever prints jwt / rt / password.`);
 }

@@ -489,8 +489,9 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 
 ## 周刷分数（#59）
 
-- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；LLM 调用失败（HTTP 错误 / 超时 / JSON 解析失败）会重试，共 3 次，仍失败就抛错，**该卷不交**。单题字母无效时用启发式补上，计入 summary 的 `warnings`。
-- 关闭模式（无 key 或 `UNIPUS_LLM_SOLVER=off`）是明确的旧行为：单选走加粗/字面启发式，填空留空，开跑时打印警告并写入 summary 的 `warnings`。
+- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答，只读 `UNIPUS_LLM_BASE_URL` / `UNIPUS_LLM_MODEL` / `UNIPUS_LLM_API_KEY`（三者必填，无默认值，不读 `SILICONFLOW_API_KEY`，`UNIPUS_LLM_SOLVER` 已删除）。缺任一项 → `ANSWER_REFUSED`，不登录、不定级、不交卷。
+- 只交 LLM 答案：LLM 调用失败（HTTP 错误 / 超时）、JSON 解析失败、任一单选字母无效、任一填空为空，都会重试，共 3 次，仍不合法就抛 `AnswerRefusedError`（`ANSWER_REFUSED`），**该卷不交**，本账号本次停止。已删除加粗/字面启发式猜题和留空交卷。定级卷同样只用 LLM；LLM 答不了的题型（非单选/填空/纯学习）直接拒交。
+- 口语自由表达、AI 对话的每个用户话轮都由 LLM 生成；已删除 `templateFreeTalk` 和固定稿 `DEFAULT_AI_SPEAK_SCRIPT`。LLM 失败或回复过短 → 该 part 和其后所有 part 不交（自由表达在交任何 part 之前生成，失败时整卷不交；AI 对话失败时不 stop 会话、不交 AI part）。跟读 / 单词跟读缺原文同样拒交，不再读占位句。
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
 - 口语 App「历史训练」一直「评分中」有两层根因（#61）：
   1. 答体缺 `recordDetail` / `specific_scores`（#59/#60 已修：Clio 先打分再写 EN_SENT/EN_PRED）。

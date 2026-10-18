@@ -32,17 +32,6 @@ export function stripHtml(s: string): string {
     .trim();
 }
 
-function extractBold(html: string): string[] {
-  const out: string[] = [];
-  const re = /<(?:strong|b|em)[^>]*>([\s\S]*?)<\/(?:strong|b|em)>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html))) {
-    const t = stripHtml(m[1] ?? "");
-    if (t) out.push(t);
-  }
-  return out;
-}
-
 export function walkPaperLeaves(paper: unknown): GrindLeaf[] {
   const out: GrindLeaf[] = [];
   const visit = (node: unknown): void => {
@@ -106,62 +95,6 @@ export function walkPaperLeaves(paper: unknown): GrindLeaf[] {
   };
   visit(paper);
   return out;
-}
-
-export function pickSingleChoice(
-  childOrQ: Record<string, unknown>,
-  parentContents: unknown[],
-): string {
-  const options = Array.isArray(childOrQ.options) ? childOrQ.options : [];
-  if (options.length === 0) return "A";
-  const blob = parentContents
-    .map((c) =>
-      c != null && typeof c === "object" && !Array.isArray(c)
-        ? String((c as Record<string, unknown>).text || "")
-        : "",
-    )
-    .join(" ");
-  const bolds = extractBold(blob).map((b) => b.toLowerCase());
-  for (const opt of options) {
-    if (opt == null || typeof opt !== "object") continue;
-    const o = opt as Record<string, unknown>;
-    const t = stripHtml(String(o.text || "")).toLowerCase();
-    const v = String(o.value || o.name || "");
-    if (t && bolds.some((b) => b.includes(t) || t.includes(b))) return v || "A";
-  }
-  const plain = stripHtml(blob).toLowerCase();
-  for (const opt of options) {
-    if (opt == null || typeof opt !== "object") continue;
-    const o = opt as Record<string, unknown>;
-    const t = stripHtml(String(o.text || "")).toLowerCase();
-    const v = String(o.value || o.name || "");
-    if (t && plain.includes(t)) return v || "A";
-  }
-  const first = options[0] as Record<string, unknown>;
-  return String(first.value || first.name || "A");
-}
-
-export function buildObjectiveAnswer(leaf: GrindLeaf): string {
-  const data = leaf.data;
-  const children = Array.isArray(data.children) ? data.children : [];
-  const parentContents = Array.isArray(data.contents) ? data.contents : [];
-  if (children.length === 0) {
-    const v = pickSingleChoice(data, parentContents);
-    return JSON.stringify({
-      value: [],
-      children: [{ value: [v], isDone: true }],
-    });
-  }
-  const built = children.map((ch) => {
-    const child =
-      ch != null && typeof ch === "object" && !Array.isArray(ch)
-        ? (ch as Record<string, unknown>)
-        : {};
-    const extra = Array.isArray(child.contents) ? child.contents : [];
-    const v = pickSingleChoice(child, [...parentContents, ...extra]);
-    return { value: [v], isDone: true };
-  });
-  return JSON.stringify({ value: [], children: built });
 }
 
 /** Learn-only item (导读 / 音频学习): every child marked done. */
@@ -256,10 +189,3 @@ export function finalizeUserData(
 export function isOkApiCode(code: unknown): boolean {
   return code === 1 || code === 0 || code === 200;
 }
-
-export const DEFAULT_AI_SPEAK_SCRIPT = [
-  "Last term, I had some trouble with math.",
-  "After class, I went to the teacher's office and asked for help.",
-  "She explained the formula again with a simple example and showed me how to use it step by step.",
-  "That experience made me realize how much a patient and caring teacher can help.",
-].join(" ");

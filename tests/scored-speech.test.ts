@@ -66,3 +66,14 @@ test("clioTimeoutMs scales with audio length (#78)", async () => {
   assert.equal(clioTimeoutMs("x", {}, () => 44 + 32000 * 60), 300_000);
   assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_TIMEOUT_MS: "90000" }, () => 0), 90_000);
 });
+
+test("voiced / vocab items without source text → refused, never a placeholder sentence", async () => {
+  const { buildVoicedAnswer, buildVocabAnswer } = await import("../src/scored-speech.js");
+  const { AnswerRefusedError } = await import("../src/choice-solver.js");
+  const spoken: string[] = [];
+  const speech = async (t: string) => { spoken.push(t); return { url: "u" }; };
+  const leaf = (data: Record<string, unknown>) => ({ instanceId: "1", name: "跟读", data }) as never;
+  await assert.rejects(buildVoicedAnswer(leaf({ children: [{}] }), speech as never), AnswerRefusedError);
+  await assert.rejects(buildVocabAnswer(leaf({ contents: [] }), speech as never), AnswerRefusedError);
+  assert.deepEqual(spoken, []);
+});

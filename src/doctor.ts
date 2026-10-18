@@ -9,6 +9,7 @@ import { resolveHttpTimeoutMs } from "./http.js";
 import { resolveResultsFile } from "./paper-result.js";
 import { resolveFfmpegPath, resolveLocalTtsEngine, resolveLocalTtsScript, resolveTtsEngine, SAY_BIN } from "./tts.js";
 import { resolveStallMs } from "./watchdog.js";
+import { LLM_ENV_VARS } from "./choice-solver.js";
 
 export type DoctorCheck = { name: string; ok: boolean; detail: string };
 export type DoctorReport = { ok: boolean; platform: NodeJS.Platform; checks: DoctorCheck[] };
@@ -41,7 +42,13 @@ export function doctorReport(
     checks.push({ name: "tts", ok: true, detail: `legacy ${resolveTtsEngine(env)}（已弃用）` });
   }
 
-  checks.push({ name: "llm", ok: true, detail: `UNIPUS_LLM_API_KEY ${env.UNIPUS_LLM_API_KEY?.trim() ? "已配置" : "未配置"}` });
+  // Answers come only from the LLM: missing config = weekly-grind refuses every account.
+  const llmMissing = LLM_ENV_VARS.filter((k) => !env[k]?.trim());
+  checks.push({
+    name: "llm",
+    ok: llmMissing.length === 0,
+    detail: llmMissing.length === 0 ? `${LLM_ENV_VARS.join(" / ")} 已配置` : `缺 ${llmMissing.join(" / ")}（缺任一项会拒交）`,
+  });
   const stall = resolveStallMs(env);
   checks.push({
     name: "timeouts",

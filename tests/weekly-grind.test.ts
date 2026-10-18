@@ -12,10 +12,7 @@ import {
   setAccountUsage,
   setActiveAccountId,
 } from "../src/accounts.js";
-import {
-  buildObjectiveAnswer,
-  walkPaperLeaves,
-} from "../src/grind-paper.js";
+import { walkPaperLeaves } from "../src/grind-paper.js";
 import {
   ensureAccountAuth,
   grindOneAccount,
@@ -23,9 +20,13 @@ import {
   resolveEffectiveGrind,
   resolveTargetAccounts,
   runWeeklyGrind,
+  maskAccountId,
   sanitizeSummaryForStdout,
 } from "../src/weekly-grind.js";
 import { mockHttp } from "./mock-http.js";
+
+const okLlm = async () => "OK";
+const LLM_ENV = { UNIPUS_LLM_BASE_URL: "https://llm.example/v1", UNIPUS_LLM_MODEL: "m", UNIPUS_LLM_API_KEY: "k" };
 
 describe("parseWeeklyGrindArgs", () => {
   test("defaults to active; --all; multiple --account", () => {
@@ -50,7 +51,7 @@ describe("parseWeeklyGrindArgs", () => {
 describe("resolveTargetAccounts", () => {
   test("--all picks jwt|rt archives; active-only respects pointer", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-sel-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "aaa", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.a", refreshToken: "rt-a" },
       { home, env },
@@ -86,7 +87,7 @@ describe("resolveTargetAccounts", () => {
 });
 
 describe("grind-paper helpers", () => {
-  test("walkPaperLeaves + objective answer", () => {
+  test("walkPaperLeaves", () => {
     const paper = {
       chr: [
         {
@@ -111,8 +112,7 @@ describe("grind-paper helpers", () => {
     const leaves = walkPaperLeaves(paper);
     assert.equal(leaves.length, 1);
     assert.equal(leaves[0]!.expectedChildren, 1);
-    const ans = JSON.parse(buildObjectiveAnswer(leaves[0]!));
-    assert.equal(ans.children[0].value[0], "B");
+    assert.equal(leaves[0]!.isObjective, true);
   });
 });
 
@@ -120,7 +120,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
   test("CAPTCHA_REQUIRED skips and continues others", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-cap-"));
     // No password env: refresh captcha ⇒ skip cap; ok uses existing jwt only
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       {
         accountId: "cap",
@@ -145,6 +145,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       {
         home,
         env,
+        llmAsk: okLlm,
         refreshRt: async () =>
           ({
             ok: false as const,
@@ -173,7 +174,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
 
   test("already-done account is not re-ground", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-done-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       {
         accountId: "done1",
@@ -189,6 +190,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       refreshRt: async () => ({ ok: false, code: "X", message: "no" }) as never,
       listProgress: async () => ({
         listen_done: 5,
@@ -214,7 +216,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
 
   test("grounds listen/speak gaps via injected grinders", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-gap-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "gap1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.g" },
       { home, env },
@@ -226,6 +228,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       listProgress: async () => {
         phase += 1;
         if (phase === 1) {
@@ -260,7 +263,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
 
   test("self and assist weekly quotas cap gaps and count as done below platform totals", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-quota-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     const cases = [
       ["self-q", { ...selfUsage(), listen_per_week: 2, speak_per_week: 1 }],
       ["assist-q", { ...assistMonths(2, "2026-10-19"), listen_per_week: 2, speak_per_week: 1 }],
@@ -282,6 +285,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       const result = await grindOneAccount(row, {
         home,
         env,
+        llmAsk: okLlm,
         now: () => new Date("2026-10-19T04:00:00Z"),
         listProgress: async () => {
           phase += 1;
@@ -309,7 +313,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
 
   test("a side already at its weekly quota is not ground even if the platform total is higher", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-quota-done-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "capped", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.c" },
       { home, env },
@@ -324,6 +328,7 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       listProgress: async () => ({
         listen_done: 2,
         listen_total: 5,
@@ -342,6 +347,33 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     assert.equal(result.status, "skipped_done");
     assert.equal(grindCalls, 0);
     assert.equal(result.before?.speak_total, 3);
+  });
+
+  test("sanitizeSummaryForStdout: summary line carries note + masked id, never the phone", () => {
+    const row = {
+      account_id: "13912345678",
+      alias: null,
+      note: "一学期（5）",
+      grind: "both" as const,
+      status: "error" as const,
+      before: null,
+      after: null,
+      listen_completed: 0,
+      speak_completed: 0,
+      listen_skipped: null,
+      speak_skipped: null,
+      usage: selfUsage(),
+      usage_skip: null,
+      errors: ["AUTH_FAILED: 13912345678 登录失败"],
+      warnings: ["note 13912345678"],
+    };
+    const cleaned = sanitizeSummaryForStdout({ accounts: [row], started_at: "a", finished_at: "b" });
+    const line = JSON.stringify({ event: "summary", ...cleaned });
+    assert.doesNotMatch(line, /13912345678/);
+    assert.equal(cleaned.accounts[0]!.account_id, "139****5678");
+    assert.equal(cleaned.accounts[0]!.note, "一学期（5）");
+    assert.match(cleaned.accounts[0]!.errors[0]!, /139\*\*\*\*5678 登录失败/);
+    assert.equal(maskAccountId("me-local-id"), "***l-id");
   });
 
   test("sanitizeSummaryForStdout redacts jwt-shaped error text", () => {
@@ -413,7 +445,8 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await completeOneListen({
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
-      env: {},
+      env: { ...LLM_ENV },
+      llmAsk: okLlm,
     });
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.taskId, "555");
@@ -481,7 +514,8 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await completeOneListen({
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
-      env: {},
+      env: { ...LLM_ENV },
+      llmAsk: okLlm,
       sleep: async (ms) => {
         sleeps.push(ms);
       },
@@ -517,7 +551,8 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     const result = await completeOneListen({
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
-      env: {},
+      env: { ...LLM_ENV },
+      llmAsk: okLlm,
       sleep: async () => {},
       trainProfileMaxPolls: 3,
       trainProfilePollMs: 1,
@@ -576,7 +611,8 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       {
         credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
         http,
-        env: {},
+        env: { ...LLM_ENV },
+        llmAsk: okLlm,
         sleep: async () => {},
         trainProfilePollMs: 1,
       },
@@ -602,7 +638,7 @@ describe("grind side policy", () => {
 
   test("--speak-only only speaks even if meta=both", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-speak-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "cli-s", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.cs" },
       { home, env },
@@ -615,6 +651,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       grindOverride: "speak",
       listProgress: async () => ({
         listen_done: 0,
@@ -643,7 +680,7 @@ describe("grind side policy", () => {
 
   test("--listen-only only listens even if meta=both", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-listen-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "cli-l", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.cl" },
       { home, env },
@@ -656,6 +693,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       grindOverride: "listen",
       listProgress: async () => ({
         listen_done: 1,
@@ -681,7 +719,7 @@ describe("grind side policy", () => {
 
   test("meta.grind=speak skips listen under --all (summary marks skip)", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-meta-speak-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       {
         accountId: "meta-s",
@@ -699,6 +737,7 @@ describe("grind side policy", () => {
       {
         home,
         env,
+        llmAsk: okLlm,
         listProgress: async () => ({
           listen_done: 0,
           listen_total: 5,
@@ -728,7 +767,7 @@ describe("grind side policy", () => {
 
   test("expired assist skips before progress; a later window still runs", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "assist-old", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.old" },
       { home, env },
@@ -739,6 +778,7 @@ describe("grind side policy", () => {
     const expired = await grindOneAccount(listed[0]!, {
       home,
       env,
+      llmAsk: okLlm,
       now: () => new Date("2026-10-19T04:00:00Z"),
       listProgress: async () => {
         progressCalls += 1;
@@ -755,6 +795,7 @@ describe("grind side policy", () => {
     const open = await grindOneAccount(again, {
       home,
       env,
+      llmAsk: okLlm,
       now: () => new Date("2026-10-19T04:00:00Z"),
       listProgress: async () => {
         progressCalls += 1;
@@ -769,7 +810,7 @@ describe("grind side policy", () => {
 
   test("a zero-quota side with null platform counters still counts as done", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-null-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "zn", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.n" },
       { home, env },
@@ -780,6 +821,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       listProgress: async () => ({ listen_done: 5, listen_total: 5, speak_done: null, speak_total: null }),
       grindListen: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
       grindSpeak: async () => { grindCalls += 1; return { completed: 1, taskIds: [] }; },
@@ -790,7 +832,7 @@ describe("grind side policy", () => {
 
   test("a zero-quota side is never auto-placed", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-zero-place-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "zp", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.zp" },
       { home, env },
@@ -802,6 +844,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       skipPlacement: false,
       listProgress: async () => ({ error: "NEEDS_PLACEMENT: 听力仍在定级", code: "NEEDS_PLACEMENT" }),
       http: mockHttp(async (call) => {
@@ -824,7 +867,7 @@ describe("grind side policy", () => {
 
   test("assist with a future --from skips before progress", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-future-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "assist-future", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.f" },
       { home, env },
@@ -835,6 +878,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       now: () => new Date("2026-10-19T04:00:00Z"),
       listProgress: async () => {
         progressCalls += 1;
@@ -848,7 +892,7 @@ describe("grind side policy", () => {
 
   test("all enabled quotas 0 skip before auth, progress, and placement", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-usage-zero-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "zero", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.z" },
       { home, env },
@@ -863,6 +907,7 @@ describe("grind side policy", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       listProgress: async () => {
         progressCalls += 1;
         return { error: "NEEDS_PLACEMENT: grade", code: "NEEDS_PLACEMENT" };
@@ -882,6 +927,7 @@ describe("grind side policy", () => {
     const speakOnly = await grindOneAccount((await listAccounts({ home, env }))[0]!, {
       home,
       env,
+      llmAsk: okLlm,
       grindOverride: "speak",
       listProgress: async () => {
         progressCalls += 1;
@@ -894,7 +940,7 @@ describe("grind side policy", () => {
 
   test("CLI override beats meta.grind", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-cli-vs-meta-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "ov", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.ov" },
       { home, env },
@@ -909,6 +955,7 @@ describe("grind side policy", () => {
     await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       grindOverride: "listen",
       listProgress: async () => ({
         listen_done: 0,
@@ -948,6 +995,7 @@ describe("ensureAccountAuth captcha policy", () => {
     const result = await ensureAccountAuth("u1", {
       home,
       env,
+      llmAsk: okLlm,
       refreshRt: async () =>
         ({
           ok: false as const,
@@ -969,7 +1017,7 @@ describe("ensureAccountAuth captcha policy", () => {
 describe("needs_placement", () => {
   test("--skip-placement marks needs_placement without auto", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-skip-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "place1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.p1" },
       { home, env },
@@ -981,6 +1029,7 @@ describe("needs_placement", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       skipPlacement: true,
       listProgress: async () => ({
         error: "NEEDS_PLACEMENT: 听力仍在定级",
@@ -1002,7 +1051,7 @@ describe("needs_placement", () => {
 
   test("auto placement then continues when progress recovers", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-auto-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "place2", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.p2" },
       { home, env },
@@ -1016,6 +1065,7 @@ describe("needs_placement", () => {
     const result = await grindOneAccount(row, {
       home,
       env,
+      llmAsk: okLlm,
       skipPlacement: false,
       listProgress: async () => {
         progressCalls += 1;
@@ -1102,7 +1152,7 @@ describe("needs_placement", () => {
 describe("runWeeklyGrind resilience", () => {
   test("a throwing account still yields JSON summary; --all continues", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-throw-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     for (const id of ["boom", "fine"]) {
       await saveAccountTokens(
         { accountId: id, jwt: `eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.${id}`, makeActive: false, syncLegacy: false },
@@ -1116,6 +1166,7 @@ describe("runWeeklyGrind resilience", () => {
       {
         home,
         env,
+        llmAsk: okLlm,
         listProgress: async () => {
           calls += 1;
           if (calls === 1) throw new Error("Unexpected server response: 403");
@@ -1134,7 +1185,7 @@ describe("runWeeklyGrind resilience", () => {
 describe("grindOneAccount side isolation", () => {
   test("speak throw keeps listen completions; caught class propagates", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-side-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "both", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.b", makeActive: false, syncLegacy: false },
       { home, env },
@@ -1144,6 +1195,7 @@ describe("grindOneAccount side isolation", () => {
       {
         home,
         env,
+        llmAsk: okLlm,
         listProgress: async () => ({ listen_done: 0, listen_total: 2, speak_done: 0, speak_total: 1 }),
         grindListen: async () => ({ completed: 2, taskIds: ["a", "b"] }),
         grindSpeak: async () => ({ completed: 0, taskIds: [], stoppedReason: "tts/upload TIMEOUT: Timed out", errorClass: "TIMEOUT" as const }),
@@ -1160,7 +1212,7 @@ describe("per-paper result reporter wiring (#88)", () => {
   test("resultsFor gets the account note (not the phone) and its reporter reaches both grind sides", async () => {
     const { setAccountNote } = await import("../src/accounts.js");
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-results-"));
-    const env = {};
+    const env = { ...LLM_ENV };
     await saveAccountTokens(
       { accountId: "13900000000", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.b", makeActive: false, syncLegacy: false },
       { home, env },
@@ -1174,6 +1226,7 @@ describe("per-paper result reporter wiring (#88)", () => {
       {
         home,
         env,
+        llmAsk: okLlm,
         resultsFor: async (note) => (notes.push(note), reporter),
         listProgress: async () => ({ listen_done: 0, listen_total: 1, speak_done: 0, speak_total: 1 }),
         grindListen: async (p) => (seen.push((p as { results?: unknown }).results), { completed: 1, taskIds: ["a"] }),
@@ -1182,5 +1235,86 @@ describe("per-paper result reporter wiring (#88)", () => {
     );
     assert.deepEqual(notes, ["一学期（5听3口）"]);
     assert.deepEqual(seen, [reporter, reporter]);
+  });
+});
+
+describe("answer refusal (no LLM answer → no submit, account stops)", () => {
+  const progress = async () => ({ listen_done: 0, listen_total: 3, speak_done: 0, speak_total: 3 });
+  async function oneRow(id: string, env: Record<string, string>) {
+    const home = await mkdtemp(join(tmpdir(), `unipus-wg-refuse-${id}-`));
+    await saveAccountTokens({ accountId: id, jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.r" }, { home, env });
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: [id] }, { home, env }))[0]!;
+    return { home, row };
+  }
+
+  test("no UNIPUS_LLM_* config (SiliconFlow only) → error before login/progress/grind", async () => {
+    const env = { SILICONFLOW_API_KEY: "k" };
+    const { home, row } = await oneRow("nollm", env);
+    let progressCalls = 0;
+    let grindCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      listProgress: async () => { progressCalls++; return progress(); },
+      grindListen: async () => { grindCalls++; return { completed: 1, taskIds: ["l"] }; },
+      grindSpeak: async () => { grindCalls++; return { completed: 1, taskIds: ["s"] }; },
+    });
+    assert.equal(result.status, "error");
+    assert.match(result.errors.join("\n"), /ANSWER_REFUSED[\s\S]*UNIPUS_LLM_BASE_URL/);
+    assert.equal(progressCalls, 0);
+    assert.equal(grindCalls, 0);
+  });
+
+  test("LLM unreachable (probe fails) → error before login/progress/grind", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("probe", env);
+    let progressCalls = 0;
+    let grindCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: async () => { throw new Error("fetch failed"); },
+      listProgress: async () => { progressCalls++; return progress(); },
+      grindListen: async () => { grindCalls++; return { completed: 1, taskIds: ["l"] }; },
+      grindSpeak: async () => { grindCalls++; return { completed: 1, taskIds: ["s"] }; },
+    });
+    assert.equal(result.status, "error");
+    assert.match(result.errors.join("\n"), /ANSWER_REFUSED[\s\S]*探活失败[\s\S]*fetch failed/);
+    assert.equal(progressCalls, 0);
+    assert.equal(grindCalls, 0);
+  });
+
+  test("listen refused → speak not run, account status error", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("lref", env);
+    let speakCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      listProgress: progress,
+      grindListen: async () => ({ completed: 1, taskIds: ["l1"], stoppedReason: "ANSWER_REFUSED: x", refused: true }),
+      grindSpeak: async () => { speakCalls++; return { completed: 1, taskIds: ["s"] }; },
+    });
+    assert.equal(speakCalls, 0);
+    assert.equal(result.status, "error");
+    assert.equal(result.listen_completed, 1);
+    assert.match(result.errors.join("\n"), /listen: ANSWER_REFUSED/);
+    assert.match(result.errors.join("\n"), /speak: 跳过/);
+  });
+
+  test("speak refused → status error even with listen done", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("sref", env);
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      listProgress: progress,
+      grindListen: async () => ({ completed: 3, taskIds: ["a", "b", "c"] }),
+      grindSpeak: async () => ({ completed: 0, taskIds: [], stoppedReason: "ANSWER_REFUSED: y", refused: true }),
+    });
+    assert.equal(result.status, "error");
+    assert.equal(result.listen_completed, 3);
   });
 });
