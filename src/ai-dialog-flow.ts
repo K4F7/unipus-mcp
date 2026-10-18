@@ -275,6 +275,31 @@ async function ttsUploadOnce(
 }
 
 /** chat/info records with audio+text → turns (skips empty WS bot placeholders). */
+/**
+ * Fragments of the canned scripts older versions voiced when the LLM failed
+ * (DEFAULT_AI_SPEAK_SCRIPT, templateFreeTalk, the dialog fallback line).
+ * Stored server-side turns containing any of them must never be reused.
+ */
+const LEGACY_CANNED_FRAGMENTS = [
+  "last term i had some trouble with math",
+  "went to the teachers office and asked for help",
+  "explained the formula again with a simple example",
+  "how much a patient and caring teacher can help",
+  "thats a good question i think it is really important to me",
+  "this topic really matters to me in my daily life as a college student",
+  "the most important point is that it helps me learn more about myself",
+  "last semester i spent a lot of time on it",
+  "it also brings me a lot of fun and makes me feel more confident",
+  "i usually share my experience with my friends",
+  "i will keep paying attention to it in the future",
+];
+const normalizeTurn = (s: string) => s.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+
+export function isLegacyCannedTurn(text: string): boolean {
+  const t = normalizeTurn(text);
+  return LEGACY_CANNED_FRAGMENTS.some((f) => t.includes(f));
+}
+
 export function existingTurnsFromChatInfo(data: unknown): AiDialogTurn[] {
   const rec = (data as { record?: { list?: unknown } } | null)?.record;
   const list = Array.isArray(rec?.list) ? (rec!.list as Record<string, unknown>[]) : [];
@@ -391,6 +416,9 @@ export async function runAiDialogFlow(
   const prior = existingTurnsFromChatInfo(info?.data);
   const priorUser = prior.filter((t) => t.type === "cos").length;
   const reusePrior = priorUser >= 2;
+  if (reusePrior && prior.some((t) => t.type === "cos" && isLegacyCannedTurn(t.text))) {
+    return toolError("ANSWER_REFUSED", "AI对话 已有会话含旧版模板话轮，拒绝复用交卷");
+  }
   await ebcpSpeakers(ports, { scene: "ai-cosplay", bizExt, openId });
 
   if (!reusePrior && priorUser > 0) {

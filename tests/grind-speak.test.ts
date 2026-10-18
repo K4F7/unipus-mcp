@@ -657,6 +657,22 @@ describe("no template submit (Sein: 没答案不要用模板交)", () => {
     assert.deepEqual(texts, [FREE_TALK]);
   });
 
+  test("resume: free talk already submitted → not regenerated; LLM down does not block pending parts", async () => {
+    const http = scenario({
+      parts: () => [
+        { partId: "p1", partName: "范例学习", questionInstanceIds: ["111"], reportStatus: null, submitted: null },
+        { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], reportStatus: "completed", submitted: true },
+      ],
+    });
+    const { texts, speech } = recording();
+    let n = 0;
+    const r = await run(http, speech, async () => { n++; throw new Error("HTTP 502"); });
+    assert.equal(n, 0);
+    assert.equal(texts.length, 0);
+    assert.equal((r as { refused?: boolean }).refused, undefined);
+    assert.deepEqual([...new Set(submitCalls(http).map((c) => JSON.parse(String(c.body)).partId))], ["p1"]);
+  });
+
   test("grindSpeakGaps: refusal counts as failure and stops (no next paper)", async () => {
     const http = scenario({});
     const r = await grindSpeakGaps(

@@ -232,3 +232,51 @@ test("AI dialog: LLM replies drive every user turn", async () => {
   assert.equal(users.length, 2);
   for (const u of users) assert.equal(u.text, reply);
 });
+
+function aiPortsWithPrior(userTexts: string[], llmAsk = async () => "I like pop music because it relaxes me after class.") {
+  const list = userTexts.flatMap((t, i) => [
+    { type: "bot", text: `Question ${i}?`, audioUrl: `https://cdn.example/b${i}.wav`, audioDuration: 3 },
+    { type: "cos", text: t, audioUrl: `https://cdn.example/u${i}.wav`, audioDuration: 5 },
+  ]);
+  const { ports } = aiPorts(llmAsk);
+  const http = mockHttpAi(async () => ({
+    statusCode: 200,
+    body: JSON.stringify({
+      code: 200,
+      data: { conversationId: "9001", sceneId: "1", token: "t", record: { list } },
+      value: { token: "qt", path: "p.wav", url: "https://cdn.example/p.wav" },
+    }),
+  }));
+  return { http, ports: { ...ports, http } };
+}
+
+test("AI dialog: prior session holds legacy canned user turns → ANSWER_REFUSED, not reused, no stop", async () => {
+  const { http, ports } = aiPortsWithPrior([
+    "Last term I had some trouble with math",
+    "After class I went to the teacher's office and asked for help",
+  ]);
+  const r = await runFlow(ports as never, input);
+  assert.equal(r.isError, true);
+  assert.equal(r.code, "ANSWER_REFUSED");
+  assert.equal(r.answer, undefined);
+  assert.equal(calledStop(http), false);
+});
+
+test("AI dialog: legacy free-talk template turn (ASR punctuation/case drift) is also refused", async () => {
+  const { ports } = aiPortsWithPrior([
+    "Hello there.",
+    "i'd like to talk about music, first of all this topic really matters to me in my daily life as a college student",
+  ]);
+  const r = await runFlow(ports as never, input);
+  assert.equal(r.code, "ANSWER_REFUSED");
+});
+
+test("AI dialog: prior session with ordinary user turns is still reused (#74)", async () => {
+  const { http, ports } = aiPortsWithPrior([
+    "I really enjoy jazz on rainy evenings.",
+    "My favourite singer is Adele because her voice is powerful.",
+  ]);
+  const r = await runFlow(ports as never, input);
+  assert.equal(r.isError, false, r.message);
+  assert.equal(calledStop(http), true);
+});

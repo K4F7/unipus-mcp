@@ -381,14 +381,17 @@ export async function completeOneSpeak(
   }
 
   // AI对话 answers come from runAiDialogFlow in the part loop; never pre-voice a script for them.
-  const aiIds = new Set(parts.filter((p) => isAiDialogPartName(p.partName)).flatMap((p) => p.questionInstanceIds));
+  // Already-submitted parts are skipped below, so don't spend LLM/TTS on them either.
+  const skipIds = new Set(
+    parts.filter((p) => p.submitted === true || isAiDialogPartName(p.partName)).flatMap((p) => p.questionInstanceIds),
+  );
   const answers = new Map<string, string>();
   let ask: LlmAsk;
   try {
     ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
     const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
     for (const leaf of leaves) {
-      if (aiIds.has(leaf.instanceId)) continue;
+      if (skipIds.has(leaf.instanceId)) continue;
       answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech, ask));
     }
   } catch (error) {
