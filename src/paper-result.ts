@@ -27,6 +27,10 @@ export type PaperResultLine = {
   scoreIsOut: boolean | null;
   status: PaperStatus;
   error: string | null;
+  /** 说 only (#92): server part-report score per part (+ free-talk words / seconds). */
+  parts?: Record<string, { partId: string; score: number | null; status: string; [k: string]: unknown }>;
+  /** 说 only: report flags such as ai_report_missing / free_talk_below_80. */
+  flags?: string[];
 };
 
 export type PaperResult = Omit<PaperResultLine, "event" | "at" | "note">;

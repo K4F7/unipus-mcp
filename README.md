@@ -86,6 +86,21 @@ Any missing, or a one-request probe of the LLM fails → the account is `status=
 
 Speak grind synthesises answer audio locally and silently: unset `UNIPUS_TTS_ENGINE` → macOS built-in `say` (always `say -o <file>`, never played aloud, then ffmpeg → 16 kHz mono s16 WAV), other platforms → Kokoro; `UNIPUS_TTS_ENGINE=kokoro|piper|say` overrides, `edge|flite|auto` are legacy. `npx tsx scripts/doctor.ts` prints a read-only self-check (ffmpeg, TTS engine for this platform, timeouts, results file).
 
-stdout is JSONL: one `{"event":"paper",…}` line per paper as soon as it is done (`note`, `skill` 听/说, `taskId`, `ansVersion`, `score`, `scoreIsOut`, `status` = `ok|low_score|grading|failed|skipped_existing`, `error`; accounts by note only), then a final `{"event":"summary",…}` line (per-account `note`, masked `account_id` like `139****5678`, `status`, `errors`, `error_class`, `totals`; phone numbers in error text are masked too). Paper lines are appended to `UNIPUS_RESULTS_FILE` (default `~/.config/unipus-mcp/results.jsonl`); a paper already recorded there as submitted is never submitted again. Exit 0 = any account succeeded/skipped, 1 = all targeted accounts errored, 2 = usage / no targets, 3 = stall watchdog (`{"event":"fatal","error_code":"STALL"}` after `UNIPUS_STALL_MINUTES`, default 15, without any log line or stage advance; 0 disables).
+stdout is JSONL: one `{"event":"paper",…}` line per paper as soon as it is done (`note`, `skill` 听/说, `taskId`, `ansVersion`, `score`, `scoreIsOut`, `status` = `ok|low_score|grading|failed|skipped_existing`, `error`; speak lines also carry `parts` = per-part `{partId, score, status: ok|pending|error, words?, sec?}` from part-report and `flags` ⊆ `ai_report_missing|free_talk_below_80|free_talk_short`; accounts by note only), then a final `{"event":"summary",…}` line (per-account `note`, masked `account_id` like `139****5678`, `status`, `errors`, `error_class`, `totals`; phone numbers in error text are masked too). Paper lines are appended to `UNIPUS_RESULTS_FILE` (default `~/.config/unipus-mcp/results.jsonl`); a paper already recorded there as submitted is never submitted again. Exit 0 = any account succeeded/skipped, 1 = all targeted accounts errored, 2 = usage / no targets, 3 = stall watchdog (`{"event":"fatal","error_code":"STALL"}` after `UNIPUS_STALL_MINUTES`, default 15, without any log line or stage advance; 0 disables).
 
 Timeouts run on the wall clock so they still fire right after the box VM resumes: `UNIPUS_ORAL_WS_TIMEOUT_MS` (oral WS no-data timeout, default 60000, reset by every frame), `UNIPUS_ORAL_WS_TURN_MAX_MS` (one dialog turn incl. reconnects, default 240000), `UNIPUS_HTTP_TIMEOUT_MS` (default 60000), `UNIPUS_UPLOAD_TIMEOUT_MS`, Clio and ffmpeg (60s hard kill; binary via `UNIPUS_FFMPEG_BIN`).
+
+Speak/listen budgets (#92, all wall clock; `npx tsx scripts/doctor.ts` prints the effective values):
+
+| env | default | meaning |
+|---|---|---|
+| `UNIPUS_SCORE_POLL_MS` / `UNIPUS_SCORE_MAX_MS` | 5000 / 180000 | after submit, poll App history until `scoreIsOut`, then write the final score to the JSONL (listen + speak) |
+| `UNIPUS_AI_REPORT_POLL_MS` / `UNIPUS_AI_REPORT_MAX_MS` | 30000 / 600000 | speak: poll `part-report` for every part; still 500 at the end → `ai_report_missing` (`MAX=0` reads once) |
+| `UNIPUS_TTS_RETRY_MAX_MS` | 600000 | total time for TTS/Clio/upload retries of one recording |
+| `UNIPUS_PART_MAX_MS` | 900000 | building the answers of one part |
+| `UNIPUS_PAPER_MAX_MS` | 2400000 | one whole paper; past it no further part is submitted |
+| `UNIPUS_AI_TURN_MIN_MS` | 55000 | AI dialogue pacing: minimum time between saves, like a human turn |
+| `UNIPUS_FREE_TALK_MIN_SEC` | 90 | 自由表达 recording floor; shorter after regeneration → paper refused |
+| `UNIPUS_FREE_TALK_TTS_SPEED` | 0.85 | 自由表达 TTS speed (0.5–1.5); sentence pauses are stretched up to 1.2s if needed |
+
+自由表达 text: the LLM is asked for 200–230 words; lead-ins ("Sure, here's…"), titles, quotes, markdown and word counts are stripped, meta replies are rejected, and up to 3 generations are tried — a template or the prompt text is never submitted. Local Clio score is informational only. AI dialogue follows the App: one save per turn with user+bot (opener + 3 turns = 4 saves), real elapsed `duration`, server bot audio, then ebcp/speakers → stop → WS close and a single AI part submit.

@@ -185,6 +185,7 @@ function aiPorts(llmAsk?: (p: string) => Promise<string>, env: Record<string, st
     env,
     llmAsk,
     uploadFetch: async () => new Response("{}", { status: 200 }),
+    sleep: async () => {},
     synthesizeLocalWav: async (_t: string, wav: string) => writeFileAi(wav, Buffer.alloc(64000)),
     openDialogSocket: () => ({
       nextReply: async () => ({ asr: "", text: "Hi! What music do you like?" }),
@@ -279,4 +280,177 @@ test("AI dialog: prior session with ordinary user turns is still reused (#74)", 
   const r = await runFlow(ports as never, input);
   assert.equal(r.isError, false, r.message);
   assert.equal(calledStop(http), true);
+});
+
+// ---- #92: dialog flow mirrors the App capture (D1/D2/D3/D5/D9) ----
+const pcm = (sec: number) => Buffer.alloc(Math.round(sec * 32000));
+type FakeReply = { asr: string; text: string; audio?: Buffer };
+function appLikePorts(sockets: Array<Array<FakeReply | Error>>, env: Record<string, string> = {}) {
+  const events: string[] = [];
+  let t = 1_000_000;
+  let synth = 0;
+  const reply = "I had a bad flu last winter with a high fever, so I stayed in bed and drank lots of warm water every day.";
+  const { ports: base } = aiPorts(async () => reply, env);
+  const http = mockHttpAi(async (c) => {
+    if (/ebcp\/speakers/.test(c.url)) events.push("speakers");
+    if (/conversation\/stop/.test(c.url)) events.push("stop");
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        code: 200,
+        data: { conversationId: "9001", sceneId: "1", token: "t", record: { list: [] } },
+        value: { token: "qt", path: "p.wav", url: "https://cdn.example/p.wav" },
+      }),
+    };
+  });
+  let opened = 0;
+  const ports = {
+    ...base,
+    http,
+    clockMs: () => t,
+    sleep: async (ms: number) => { t += ms; events.push(`sleep:${ms}`); },
+    synthesizeLocalWav: async (_t: string, wav: string) => { synth++; await writeFileAi(wav, Buffer.alloc(44 + 32000 * 5)); },
+    openDialogSocket: () => {
+      const queue = sockets[opened++] ?? [];
+      events.push(`open${opened}`);
+      return {
+        nextReply: async () => {
+          const r = queue.shift();
+          if (r == null) throw new Error("oral WS closed");
+          if (r instanceof Error) throw r;
+          return r;
+        },
+        sendAudio() { events.push("send"); },
+        close() { events.push("close"); },
+      };
+    },
+  };
+  return { ports, http, events, synthCount: () => synth, reply };
+}
+const saves = (h: ReturnType<typeof mockHttpAi>) =>
+  h.calls.filter((c) => /conversation\/save/.test(c.url)).map((c) => JSON.parse(String(c.body)));
+
+test("AI dialog: opener save + one user+AI save per turn, wall-clock duration, server audio, paced turns (#92)", async () => {
+  const { ports, http, events, synthCount, reply } = appLikePorts([[
+    { asr: "", text: "I heard you got sick. What happened?", audio: pcm(8) },
+    { asr: "I had a bad flu.", text: "That sounds rough. How did you treat it?", audio: pcm(7.5) },
+    { asr: "I stayed in bed.", text: "Good. What did you learn?", audio: pcm(6) },
+    { asr: "Rest matters.", text: "Great lesson. Thanks for sharing!", audio: pcm(5) },
+  ]], { UNIPUS_AI_TURN_MIN_MS: "60000" });
+  const r = await runFlow(ports as never, { ...input, userTurns: 3 });
+  assert.equal(r.isError, false, r.message);
+  const s = saves(http);
+  assert.equal(s.length, 4, "3 turns → 4 saves like the App");
+  assert.deepEqual(s.map((b) => b.speakAddTaskRecord.sort), [0, 1, 2, 3]);
+  assert.deepEqual(s.map((b) => b.speakAddTaskRecord.speakType), [1, 2, 2, 2]);
+  const [open, t1] = [s[0].speakAddTaskRecord, s[1].speakAddTaskRecord];
+  assert.equal(open.botEnContent, "I heard you got sick. What happened?");
+  assert.equal(open.botAudioDuration, 8);
+  assert.equal(open.userAudioUrl, "");
+  assert.equal(t1.userEnContent, "I had a bad flu.");
+  assert.equal(t1.userAudioDuration, 5);
+  assert.ok(t1.userAudioUrl);
+  assert.equal(t1.botEnContent, "That sounds rough. How did you treat it?");
+  assert.equal(t1.botAudioDuration, 7.5);
+  assert.ok(t1.botAudioUrl);
+  // D2: seconds since create, increasing; D9: ≥60 s between saves.
+  const d = s.map((b) => b.duration);
+  for (let i = 1; i < d.length; i++) assert.ok(d[i] - d[i - 1] >= 59, `durations ${d}`);
+  assert.ok((r.duration_sec ?? 0) >= d[3]);
+  // D5: only user turns are synthesised; AI audio comes from the server.
+  assert.equal(synthCount(), 3);
+  // D3: speakers → stop → close, close only after stop.
+  const last = (e: string) => events.lastIndexOf(e);
+  assert.ok(last("speakers") < last("stop") && last("stop") < last("close"), events.join(","));
+  assert.equal(events.indexOf("close"), last("close"), "socket closed once, after stop");
+  const users = (r.turns ?? []).filter((t) => t.type === "cos");
+  assert.equal(users.length, 3);
+  assert.equal(users[0]!.text, "I had a bad flu.");
+  void reply;
+});
+
+test("AI dialog: WS closes on turn0 send → reconnect drops the re-sent opener, opener saved once, turns stay aligned (#92)", async () => {
+  const { ports, http } = appLikePorts([
+    [{ asr: "", text: "I heard you got sick. What happened?", audio: pcm(8) }, new Error("oral WS closed")],
+    [
+      { asr: "", text: "I heard you got sick. What happened?", audio: pcm(8) },
+      { asr: "I had a bad flu.", text: "How did you treat it?", audio: pcm(7) },
+    ],
+  ], { UNIPUS_AI_TURN_MIN_MS: "0" });
+  const r = await runFlow(ports as never, { ...input, userTurns: 1 });
+  assert.equal(r.isError, false, r.message);
+  const s = saves(http);
+  assert.equal(s.length, 2);
+  assert.equal(s[0].speakAddTaskRecord.botEnContent, "I heard you got sick. What happened?");
+  assert.equal(s[1].speakAddTaskRecord.botEnContent, "How did you treat it?");
+  assert.equal(s[1].speakAddTaskRecord.userEnContent, "I had a bad flu.");
+});
+
+test("AI dialog: opener lost on the first socket → reconnect greeting becomes the opener (#92)", async () => {
+  const { ports, http } = appLikePorts([
+    [new Error("oral WS closed")],
+    [
+      { asr: "", text: "Hi! Tell me about a time you were sick.", audio: pcm(6) },
+      { asr: "I had a flu.", text: "How long did it last?", audio: pcm(5) },
+    ],
+  ], { UNIPUS_AI_TURN_MIN_MS: "0" });
+  const r = await runFlow(ports as never, { ...input, userTurns: 1 });
+  assert.equal(r.isError, false, r.message);
+  assert.equal(saves(http)[0].speakAddTaskRecord.botEnContent, "Hi! Tell me about a time you were sick.");
+});
+
+test("AI dialog: reply without server audio falls back to local TTS for the AI line only", async () => {
+  const { ports, synthCount } = appLikePorts([[
+    { asr: "", text: "What happened?" },
+    { asr: "I had a flu.", text: "How long?", audio: pcm(4) },
+  ]], { UNIPUS_AI_TURN_MIN_MS: "0" });
+  const r = await runFlow(ports as never, { ...input, userTurns: 1 });
+  assert.equal(r.isError, false, r.message);
+  assert.equal(synthCount(), 2);
+});
+
+test("AI dialog: deadline passed between turns → error, no stop, socket closed", async () => {
+  const { ports, http, events } = appLikePorts([[
+    { asr: "", text: "What happened?", audio: pcm(4) },
+    { asr: "I had a flu.", text: "How long?", audio: pcm(4) },
+    { asr: "A week.", text: "Ok.", audio: pcm(4) },
+  ]], { UNIPUS_AI_TURN_MIN_MS: "60000" });
+  const r = await runFlow(ports as never, { ...input, userTurns: 3, deadlineAt: 1_000_000 + 90_000 });
+  assert.equal(r.isError, true);
+  assert.match(r.message, /上限/);
+  assert.equal(calledStop(http), false);
+  assert.ok(events.includes("close"));
+});
+
+test("oral WS: binary PCM frames of a reply are returned as its audio", async () => {
+  const { WebSocketServer } = await import("ws");
+  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((r) => wss.on("listening", () => r()));
+  const port = (wss.address() as { port: number }).port;
+  wss.on("connection", (c) => {
+    c.send("[+]ASR: hi");
+    c.send("Hello there.");
+    c.send(Buffer.from([1, 2, 3, 4]));
+    c.send(Buffer.from([5, 6]));
+    c.send("[end]");
+  });
+  try {
+    const s = openOralDialogSocket({ conversationId: "c", sceneId: "s", token: "t", url: `ws://127.0.0.1:${port}/x` }, 2000);
+    const r = await s.nextReply();
+    assert.equal(r.text, "Hello there.");
+    assert.deepEqual([...(r.audio ?? [])], [1, 2, 3, 4, 5, 6]);
+    s.close();
+  } finally {
+    wss.close();
+  }
+});
+
+test("pcmToWav: 16 kHz mono s16 RIFF header", async () => {
+  const { pcmToWav } = await import("../src/ai-dialog-flow.js");
+  const w = pcmToWav(Buffer.alloc(32000));
+  assert.equal(w.length, 44 + 32000);
+  assert.equal(w.toString("ascii", 0, 4), "RIFF");
+  assert.equal(w.readUInt32LE(24), 16000);
+  assert.equal(w.readUInt16LE(34), 16);
+  assert.equal(w.readUInt32LE(40), 32000);
 });

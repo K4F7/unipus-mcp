@@ -26,7 +26,7 @@ import {
   checkReportStatus,
   findHistoryTrainingTask,
 } from "./history-training-tasks.js";
-import { partSubmit } from "./part-submit.js";
+import { partSubmit, type PartSubmitUserItem } from "./part-submit.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 import {
@@ -42,7 +42,20 @@ import {
 import { openIdFromJwt } from "./uls-business.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
-import { markProgress } from "./watchdog.js";
+import { markProgress, withWallTimeout } from "./watchdog.js";
+import {
+  budgetFromTries,
+  pollWithin,
+  resolveAiReportPoll,
+  resolveFreeTalkMinSec,
+  resolveFreeTalkTtsSpeed,
+  resolvePaperMaxMs,
+  resolvePartMaxMs,
+  resolveScorePoll,
+  type PollBudget,
+} from "./limits.js";
+import { pollPartReports, type PartScore } from "./part-report.js";
+import { SpeechTooShortError } from "./scored-speech.js";
 import { AnswerRefusedError, resolveLlmAsk, type LlmAsk } from "./choice-solver.js";
 
 /** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
@@ -67,7 +80,9 @@ export type GrindSpeakPorts = AuthPorts & {
   speechRecord?: SpeechRecordBuilder;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
-  /** History scoreIsOut poll after submit (default 2000ms × 10 ≈ 20s). */
+  /** Test seam for the paper wall cap; default Date.now. */
+  clockMs?: () => number;
+  /** History scoreIsOut poll after submit; default UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS. */
   appReadyPollMs?: number;
   appReadyPollTries?: number;
   /** Override getHistoryTrainingTasks URL (tests). */
@@ -83,9 +98,15 @@ export type GrindSpeakPorts = AuthPorts & {
   results?: PaperReporter;
 };
 
+/** Server part-report per part name; 自由表达 also carries our script words + recording seconds. */
+export type SpeakPartScores = Record<string, PartScore & { words?: number; sec?: number }>;
+
+/** Report-only quality flags (App score decides ok / low_score). */
+type SpeakReport = { parts?: SpeakPartScores; flags?: string[] };
+
 export type GrindSpeakRoundResult =
-  | { ok: true; taskId: string; ansVersion?: number; appScore?: number }
-  | {
+  | ({ ok: true; taskId: string; ansVersion?: number; appScore?: number } & SpeakReport)
+  | ({
       ok: false;
       taskId: string | null;
       detail: string;
@@ -97,7 +118,7 @@ export type GrindSpeakRoundResult =
       scoreIsOut?: boolean;
       /** No LLM answer for a part → that part (and everything not yet submitted) refused. */
       refused?: boolean;
-    };
+    } & SpeakReport);
 
 type SpeakPart = {
   partId: string;
@@ -237,22 +258,60 @@ async function partSubmittedOnServer(
   }
 }
 
-/** 自由表达: LLM monologue on the task (EN_PRED_SCORE). Anything else here has no answer source → refuse. */
-async function buildFreeTalk(leaf: GrindLeaf, speech: SpeechRecordBuilder, ask: LlmAsk): Promise<string> {
+/** Silence between 自由表达 sentences (s); stretched up to MAX_SENTENCE_PAUSE_SEC when the recording is short. */
+const FREE_TALK_PAUSE_SEC = 0.5;
+/** Scripts tried when the recording stays under the minimum length. */
+const FREE_TALK_ATTEMPTS = 3;
+
+type FreeTalkMeta = { words: number; sec?: number };
+
+/**
+ * 自由表达: LLM monologue on the task (EN_PRED_SCORE), voiced slower with sentence pauses and
+ * a ≥UNIPUS_FREE_TALK_MIN_SEC gate (#92). Anything else here has no answer source → refuse.
+ */
+async function buildFreeTalk(
+  leaf: GrindLeaf,
+  speech: SpeechRecordBuilder,
+  ask: LlmAsk,
+  env: NodeJS.ProcessEnv | undefined,
+  meta: Map<string, FreeTalkMeta>,
+): Promise<string> {
   if (!`${leaf.template} ${leaf.type}`.includes("oral-personal-state")) {
     throw new AnswerRefusedError(`口语题型 ${leaf.template || leaf.type || "?"}（${leaf.name || leaf.instanceId}）无 LLM 作答路径，拒绝用固定稿交卷`);
   }
   const task = leafTaskText(leaf);
   if (!task) throw new AnswerRefusedError(`自由表达 ${leaf.name || leaf.instanceId} 缺题目文本，拒绝交卷`);
-  // #63: free talk must address the task points (server grades appropriateness).
-  const record = await speech(await generateFreeTalk(task, { ask }), `speak-${leaf.instanceId}-main`, "EN_PRED_SCORE");
-  return JSON.stringify({ value: [], children: [voicedChild(record)] });
+  const minSec = resolveFreeTalkMinSec(env);
+  let last = "";
+  for (let i = 0; i < FREE_TALK_ATTEMPTS; i++) {
+    // #63: free talk must address the task points (server grades appropriateness).
+    const text = await generateFreeTalk(task, { ask });
+    const m: FreeTalkMeta = { words: text.split(/\s+/).filter(Boolean).length };
+    try {
+      const record = await speech(text, `speak-${leaf.instanceId}-main`, "EN_PRED_SCORE", {
+        speed: resolveFreeTalkTtsSpeed(env),
+        pauseSec: FREE_TALK_PAUSE_SEC,
+        minSec,
+        onAudio: (sec) => (m.sec = Math.round(sec * 10) / 10),
+      });
+      meta.set(leaf.instanceId, m);
+      console.error(`[free-talk] ${leaf.instanceId} ${m.words} 词 ${m.sec ?? "?"}s`);
+      return JSON.stringify({ value: [], children: [voicedChild(record)] });
+    } catch (error) {
+      if (!(error instanceof SpeechTooShortError)) throw error;
+      last = `${m.words} 词，${error.message}`;
+      console.error(`[free-talk] 第 ${i + 1}/${FREE_TALK_ATTEMPTS} 稿录音太短：${last}`);
+    }
+  }
+  throw new AnswerRefusedError(`自由表达录音始终不足 ${minSec}s（${FREE_TALK_ATTEMPTS} 稿），拒绝交卷：${last}`);
 }
 
 async function buildLeafAnswer(
   leaf: GrindLeaf,
   speech: SpeechRecordBuilder,
   ask: LlmAsk,
+  env: NodeJS.ProcessEnv | undefined,
+  meta: Map<string, FreeTalkMeta>,
 ): Promise<string> {
   const t = `${leaf.template} ${leaf.type} ${leaf.replyType}`.toLowerCase();
   // App 2.8.7: 视频学习 (video-point-read, no children) submits an empty answer.
@@ -277,7 +336,7 @@ async function buildLeafAnswer(
     const scoop = t.includes("scoop") || t.includes("basic-oral");
     return buildVoicedAnswer(leaf, speech, scoop ? "EN_SENT_REC" : "EN_SENT_SCORE");
   }
-  return buildFreeTalk(leaf, speech, ask);
+  return buildFreeTalk(leaf, speech, ask, env, meta);
 }
 
 /** Complete one speak train paper via part/submit (App 历史训练 path). */
@@ -315,6 +374,10 @@ export async function completeOneSpeak(
     };
   }
   markProgress(`speak:load ${taskId}`);
+  const clock = ports.clockMs ?? Date.now;
+  const paperMaxMs = resolvePaperMaxMs(ports.env);
+  const partMaxMs = resolvePartMaxMs(ports.env);
+  const paperDeadline = clock() + paperMaxMs;
 
   const loadUrl = ports.loadPaperUrl ?? resolveLoadPaperUrl(ports.env);
   const loadPath = (() => {
@@ -386,13 +449,21 @@ export async function completeOneSpeak(
     parts.filter((p) => p.submitted === true || isAiDialogPartName(p.partName)).flatMap((p) => p.questionInstanceIds),
   );
   const answers = new Map<string, string>();
+  const freeTalkMeta = new Map<string, FreeTalkMeta>();
   let ask: LlmAsk;
   try {
     ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
     const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
     for (const leaf of leaves) {
       if (skipIds.has(leaf.instanceId)) continue;
-      answers.set(leaf.instanceId, await buildLeafAnswer(leaf, speech, ask));
+      answers.set(
+        leaf.instanceId,
+        await withWallTimeout(
+          buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta),
+          partMaxMs,
+          `口语答案 ${leaf.name || leaf.instanceId} 单 part 上限`,
+        ),
+      );
     }
   } catch (error) {
     const err = toError(error);
@@ -423,6 +494,9 @@ export async function completeOneSpeak(
       doneParts.push(`${part.partName || part.partId}(已交,跳过)`);
       continue;
     }
+    if (clock() > paperDeadline) {
+      return { ok: false, taskId, detail: `整卷超过墙钟上限 ${paperMaxMs}ms（UNIPUS_PAPER_MAX_MS），停在 ${part.partName || part.partId} 之前${doneSuffix()}` };
+    }
     markProgress(`speak:part ${part.partName || part.partId}`);
     let isAi = false;
     let aiDuration = 0;
@@ -439,6 +513,7 @@ export async function completeOneSpeak(
         ansVersion,
         openId,
         taskText: leafTaskText(byId.get(qi)!),
+        deadlineAt: Date.now() + Math.min(partMaxMs, paperDeadline - clock()),
       });
       if (flow.isError || flow.answer == null) {
         return {
@@ -467,75 +542,59 @@ export async function completeOneSpeak(
       context: { state: "doing" as const },
       contextVersion: 1,
     }));
-    const snap = await partSubmit(ports, {
-      action: "snapshot",
-      taskId,
-      partId: part.partId,
-      token: paperToken,
-      ansVersion,
-      duration: isAi ? aiDuration : 0,
-      url: isAi ? resolveUcloudPartSubmitUrl(ports.env) : resolveAdaptivePartSubmitUrl(ports.env),
-      userData: userDataSnap,
-      cloudHeaders: true,
-      openId,
-    });
-    if (snap.isError) {
-      if (
-        isAlreadySubmittedError(snap.message) &&
-        (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId))
-      ) {
-        // #84: server already closed this part; continue, App history decides the score.
-        console.error(`[part/submit] ${part.partName || part.partId} 4110 服务端已交，跳过本 part 续交后续 part`);
-        doneParts.push(`${part.partName || part.partId}(服务端已交,跳过)`);
-        continue;
-      }
-      return {
-        ok: false,
+    const label = part.partName || part.partId;
+    const submitPart = (action: "snapshot" | "submit", userData: PartSubmitUserItem[]) =>
+      partSubmit(ports, {
+        action,
         taskId,
-        detail: `part/submit snapshot ${part.partName || part.partId}: ${snap.code} ${snap.message}${doneSuffix()}`,
-      };
+        partId: part.partId,
+        token: paperToken,
+        ansVersion,
+        // App 2.8.7: 范例/自由 duration=0, AI = conversation seconds (ucloud).
+        duration: isAi ? aiDuration : 0,
+        url: isAi ? resolveUcloudPartSubmitUrl(ports.env) : resolveAdaptivePartSubmitUrl(ports.env),
+        userData,
+        cloudHeaders: true,
+        appIdHeader: !isAi,
+        openId,
+      });
+    /** 4110 + part/get shows the part submitted → the server already closed it (#84). */
+    const serverClosed = async (r: { message?: string }) =>
+      isAlreadySubmittedError(r.message) && (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId));
+    // D4: the App submits AI口语对话 once (no snapshot, no instStatus).
+    if (!isAi) {
+      const snap = await submitPart("snapshot", userDataSnap);
+      if (snap.isError) {
+        if (await serverClosed(snap)) {
+          console.error(`[part/submit] ${label} 4110 服务端已交，跳过本 part 续交后续 part`);
+          doneParts.push(`${label}(服务端已交,跳过)`);
+          continue;
+        }
+        return { ok: false, taskId, detail: `part/submit snapshot ${label}: ${snap.code} ${snap.message}${doneSuffix()}` };
+      }
     }
-    const sub = await partSubmit(ports, {
-      action: "submit",
-      taskId,
-      partId: part.partId,
-      token: paperToken,
-      ansVersion,
-      // App 2.8.7: 范例/自由 submit duration=0, AI = conversation seconds (ucloud).
-      duration: isAi ? aiDuration : 0,
-      url: isAi ? resolveUcloudPartSubmitUrl(ports.env) : resolveAdaptivePartSubmitUrl(ports.env),
+    const sub = await submitPart(
+      "submit",
       // instStatus=1 marks each instance finished; without it 范例学习 stays processing.
-      userData: userDataSnap.map((u) => ({
-        ...u,
-        context: { state: "done" as const },
-        instStatus: 1,
-      })),
-      cloudHeaders: true,
-      openId,
-    });
+      userDataSnap.map((u) => ({ ...u, context: { state: "done" as const }, ...(isAi ? {} : { instStatus: 1 }) })),
+    );
     if (sub.isError) {
-      if (
-        isAlreadySubmittedError(sub.message) &&
-        (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId))
-      ) {
-        console.error(`[part/submit] ${part.partName || part.partId} submit 4110 但 part/get 已交，视为已交`);
-        doneParts.push(`${part.partName || part.partId}(服务端已交)`);
+      if (await serverClosed(sub)) {
+        console.error(`[part/submit] ${label} submit 4110 但 part/get 已交，视为已交`);
+        doneParts.push(`${label}(服务端已交)`);
         continue;
       }
-      return {
-        ok: false,
-        taskId,
-        detail: `part/submit submit ${part.partName || part.partId}: ${sub.code} ${sub.message}${doneSuffix()}`,
-      };
+      return { ok: false, taskId, detail: `part/submit submit ${label}: ${sub.code} ${sub.message}${doneSuffix()}` };
     }
     doneParts.push(part.partName || part.partId);
   }
 
   const sleep =
     ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  // Each paper waits ~20s here (default 2000ms × 10) for App history scoreIsOut.
-  const pollMs = ports.appReadyPollMs ?? 3000;
-  const tries = Math.max(1, ports.appReadyPollTries ?? 20);
+  const scoreBudget: PollBudget =
+    ports.appReadyPollTries != null
+      ? budgetFromTries(ports.appReadyPollTries, ports.appReadyPollMs ?? 3000)
+      : resolveScorePoll(ports.env);
   const requireCheck = ports.requireCheckStatusOut !== false;
   // #63: App 显示分 <80 视为失败（UNIPUS_SPEAK_MIN_SCORE 可调，0 关闭）。
   const minAppScore = ports.minAppScore ?? Number(ports.env?.UNIPUS_SPEAK_MIN_SCORE ?? 80);
@@ -548,79 +607,120 @@ export async function completeOneSpeak(
   };
   let lastHint = "历史未查到该 task";
   let lastScore: number | undefined;
-  for (let i = 0; i < tries; i++) {
-    if (i > 0) await sleep(pollMs);
-    markProgress(`speak:score-poll ${taskId}`);
-    const found = await findHistoryTrainingTask(historyPorts, {
-      taskId,
-      flowType: "speak",
-      pageSize: 20,
-      maxPages: 5,
-    });
-    if (found.isError) {
-      lastHint = found.message;
-      continue;
-    }
-    const task = found.task;
-    if (task == null) {
-      lastHint = "历史列表未找到该 taskId";
-      continue;
-    }
-    lastScore = task.score;
-    if (task.scoreIsOut !== true) {
-      lastHint = `scoreIsOut=false score=${task.score ?? 0}`;
-      continue;
-    }
-    if (requireCheck) {
-      const cs = await checkReportStatus(historyPorts, {
+  const appScore = await pollWithin(
+    scoreBudget,
+    async () => {
+      markProgress(`speak:score-poll ${taskId}`);
+      const found = await findHistoryTrainingTask(historyPorts, {
         taskId,
-        ansVersion: task.ansVersion ?? ansVersion,
+        flowType: "speak",
+        pageSize: 20,
+        maxPages: 5,
       });
-      if (cs.isError) {
-        lastHint = `scoreIsOut=true 但 checkStatus 失败：${cs.message}`;
-        continue;
+      if (found.isError) {
+        lastHint = found.message;
+        return undefined;
       }
-      if (cs.check_status !== 3) {
-        lastHint = `scoreIsOut=true 但 checkStatus=${cs.check_status}（需 3）`;
-        continue;
+      const task = found.task;
+      if (task == null) {
+        lastHint = "历史列表未找到该 taskId";
+        return undefined;
       }
-    }
-    const appScore = task.score ?? 0;
-    if (appScore < minAppScore) {
-      return {
-        ok: false,
-        taskId,
-        ansVersion,
-        outcome: "low_score",
-        appScore,
-        scoreIsOut: true,
-        detail: `App 历史已出分但 score=${appScore} < ${minAppScore}（scoreIsOut=true）${doneSuffix()}`,
-      };
-    }
-    return { ok: true, taskId, ansVersion, appScore };
-  }
+      lastScore = task.score;
+      if (task.scoreIsOut !== true) {
+        lastHint = `scoreIsOut=false score=${task.score ?? 0}`;
+        return undefined;
+      }
+      if (requireCheck) {
+        const cs = await checkReportStatus(historyPorts, {
+          taskId,
+          ansVersion: task.ansVersion ?? ansVersion,
+        });
+        if (cs.isError) {
+          lastHint = `scoreIsOut=true 但 checkStatus 失败：${cs.message}`;
+          return undefined;
+        }
+        if (cs.check_status !== 3) {
+          lastHint = `scoreIsOut=true 但 checkStatus=${cs.check_status}（需 3）`;
+          return undefined;
+        }
+      }
+      return task.score ?? 0;
+    },
+    { sleep },
+  );
 
-  return {
-    ok: false,
-    taskId,
-    ansVersion,
-    outcome: "grading",
-    appScore: lastScore,
-    scoreIsOut: false,
-    detail: `已交但 App 评分中：part/submit 全部成功，但 getHistoryTrainingTasks 轮询后 scoreIsOut≠true（${lastHint}）${doneSuffix()}`,
-  };
+  const report = await speakPartReport(ports, taskId, ansVersion, parts, freeTalkMeta);
+  if (appScore == null) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      outcome: "grading",
+      appScore: lastScore,
+      scoreIsOut: false,
+      detail: `已交但 App 评分中：part/submit 全部成功，但 getHistoryTrainingTasks 轮询后 scoreIsOut≠true（${lastHint}）${doneSuffix()}`,
+      ...report,
+    };
+  }
+  if (appScore < minAppScore) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      outcome: "low_score",
+      appScore,
+      scoreIsOut: true,
+      detail: `App 历史已出分但 score=${appScore} < ${minAppScore}（scoreIsOut=true）${doneSuffix()}`,
+      ...report,
+    };
+  }
+  return { ok: true, taskId, ansVersion, appScore, ...report };
+}
+
+/**
+ * After submit: the server's own score per part (part-report) + free-talk script stats.
+ * ai_report_missing = the AI口语对话 report never generated within UNIPUS_AI_REPORT_MAX_MS.
+ */
+async function speakPartReport(
+  ports: GrindSpeakPorts,
+  taskId: string,
+  ansVersion: number,
+  parts: SpeakPart[],
+  freeTalkMeta: Map<string, FreeTalkMeta>,
+): Promise<Required<SpeakReport>> {
+  const scores: SpeakPartScores = await pollPartReports(
+    ports,
+    { taskId, ansVersion, parts },
+    resolveAiReportPoll(ports.env),
+  );
+  const flags: string[] = [];
+  const minSec = resolveFreeTalkMinSec(ports.env);
+  for (const part of parts) {
+    const name = part.partName || part.partId;
+    const s = scores[name];
+    if (s == null) continue;
+    const meta = part.questionInstanceIds.map((id) => freeTalkMeta.get(id)).find((m) => m != null);
+    if (meta) Object.assign(s, meta);
+    if (isAiDialogPartName(part.partName) && s.status !== "ok") flags.push("ai_report_missing");
+    if (meta && s.score != null && s.score < 80) flags.push("free_talk_below_80");
+    if (meta?.sec != null && meta.sec < minSec) flags.push("free_talk_short");
+  }
+  return { parts: scores, flags };
 }
 
 /** Round result → fixed-shape result line (#88). */
 export function speakPaperResult(r: GrindSpeakRoundResult): PaperResult {
   const base = { skill: "说" as const, taskId: r.taskId, ansVersion: r.ansVersion ?? null };
-  if (r.ok) return { ...base, score: r.appScore ?? null, scoreIsOut: true, status: "ok", error: null };
+  const report = r.parts ? { parts: r.parts, flags: r.flags ?? [] } : {};
+  if (r.ok) return { ...base, score: r.appScore ?? null, scoreIsOut: true, status: "ok", error: null, ...report };
   return {
     ...base,
     score: r.appScore ?? null,
     scoreIsOut: r.scoreIsOut ?? null,
     status: r.outcome ?? "failed",
     error: r.detail,
+    ...report,
   };
 }
 

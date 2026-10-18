@@ -16,7 +16,10 @@ export type SynthesizeSpeechInput = {
   voice?: string;
   /** Output wav path; default under os.tmpdir() */
   outPath?: string;
-};
+} & LocalTtsOptions;
+
+/** Local-engine prosody knobs (#92): speed factor (1 = engine default) and silence between sentences. */
+export type LocalTtsOptions = { speed?: number; pauseSec?: number };
 
 export type SynthesizeSpeechPorts = {
   /** Injected for tests. */
@@ -27,7 +30,7 @@ export type SynthesizeSpeechPorts = {
   env?: NodeJS.ProcessEnv;
   sleep?: (ms: number) => Promise<void>;
   /** Local TTS (Kokoro/Piper/macOS say) writing a 16k wav; injected in tests. */
-  synthesizeLocalWav?: (text: string, wavPath: string) => Promise<void>;
+  synthesizeLocalWav?: (text: string, wavPath: string, opts?: LocalTtsOptions) => Promise<void>;
 };
 
 export type LocalTtsEngine = "kokoro" | "piper" | "say";
@@ -72,6 +75,17 @@ export function sayArgs(voice: string, outFile: string): string[] {
   return ["-v", voice, "-o", outFile];
 }
 
+/** say -r: words per minute (default voice ≈175 wpm) scaled by speed. */
+export function sayRateArgs(speed: number | undefined): string[] {
+  return speed != null && speed !== 1 ? ["-r", String(Math.round(175 * speed))] : [];
+}
+
+/** say embedded command [[slnc ms]] between sentences. */
+export function withSayPauses(text: string, pauseSec: number | undefined): string {
+  if (!pauseSec || pauseSec <= 0) return text;
+  return text.replace(/([.!?])\s+(?=\S)/g, `$1 [[slnc ${Math.round(pauseSec * 1000)}]] `);
+}
+
 export function resolveLocalTtsScript(env: NodeJS.ProcessEnv = process.env): string {
   return (
     env.UNIPUS_LOCAL_TTS_BIN?.trim() || join(homedir(), "tts-local", "synth.py")
@@ -90,17 +104,19 @@ export function localSynthesizeWav(
   engine: LocalTtsEngine,
   env: NodeJS.ProcessEnv,
   ffmpegPath = resolveFfmpegPath(env),
-): (text: string, wavPath: string) => Promise<void> {
-  if (engine === "say") return (text, wavPath) => synthesizeWithSay(text, wavPath, env, ffmpegPath);
+): (text: string, wavPath: string, opts?: LocalTtsOptions) => Promise<void> {
+  if (engine === "say") return (text, wavPath, opts) => synthesizeWithSay(text, wavPath, env, ffmpegPath, opts);
   const script = resolveLocalTtsScript(env);
   const voice = defaultVoice(engine, env);
-  return (text, wavPath) =>
+  return (text, wavPath, opts) =>
     new Promise((resolve, reject) => {
       if (!existsSync(script)) {
         reject(new Error(`本地 TTS 脚本不存在：${script}（见 docs/local-tts.md）`));
         return;
       }
-      const child = spawn(script, [engine, voice, wavPath], { stdio: ["pipe", "ignore", "pipe"] });
+      // Optional argv[4] speed / argv[5] sentence pause; older synth.py copies ignore extra args.
+      const extra = opts?.speed != null || opts?.pauseSec ? [String(opts?.speed ?? 1), String(opts?.pauseSec ?? 0)] : [];
+      const child = spawn(script, [engine, voice, wavPath, ...extra], { stdio: ["pipe", "ignore", "pipe"] });
       let err = "";
       const cancelKill = wallClockTimer(180_000, () => child.kill("SIGKILL"));
       child.stderr.on("data", (c: Buffer) => (err += c.toString("utf8")));
@@ -117,13 +133,19 @@ export function localSynthesizeWav(
 }
 
 /** macOS `say -o file.aiff` (silent) → ffmpeg 16 kHz mono s16 WAV. */
-async function synthesizeWithSay(text: string, wavPath: string, env: NodeJS.ProcessEnv, ffmpegPath: string): Promise<void> {
+async function synthesizeWithSay(
+  text: string,
+  wavPath: string,
+  env: NodeJS.ProcessEnv,
+  ffmpegPath: string,
+  opts?: LocalTtsOptions,
+): Promise<void> {
   if (process.platform !== "darwin") throw new Error("UNIPUS_TTS_ENGINE=say 仅支持 macOS");
   const dir = await mkdtemp(join(tmpdir(), "unipus-say-"));
   const aiff = join(dir, "speech.aiff");
   try {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(SAY_BIN, sayArgs(defaultVoice("say", env), aiff), { stdio: ["pipe", "ignore", "pipe"] });
+      const child = spawn(SAY_BIN, [...sayArgs(defaultVoice("say", env), aiff), ...sayRateArgs(opts?.speed)], { stdio: ["pipe", "ignore", "pipe"] });
       let err = "";
       const cancelKill = wallClockTimer(180_000, () => child.kill("SIGKILL"));
       child.stderr.on("data", (c: Buffer) => { err = (err + c.toString("utf8")).slice(-4000); });
@@ -134,7 +156,7 @@ async function synthesizeWithSay(text: string, wavPath: string, env: NodeJS.Proc
         if (code === 0) resolve();
         else reject(new Error(`macOS say 失败 code=${code}: ${err.slice(-300)}`));
       });
-      child.stdin.end(text);
+      child.stdin.end(withSayPauses(text, opts?.pauseSec));
     });
     await runFfmpeg(ffmpegPath, aiff, wavPath);
   } finally {
@@ -185,7 +207,7 @@ export async function synthesizeSpeechWav(
     const run = ports.synthesizeLocalWav ?? localSynthesizeWav(local, env, ports.ffmpegPath ?? resolveFfmpegPath(env));
     try {
       // No silent fallback (#66): a failed synthesis aborts the paper.
-      await run(text, wavPath);
+      await run(text, wavPath, input.speed != null || input.pauseSec != null ? { speed: input.speed, pauseSec: input.pauseSec } : undefined);
     } catch (error) {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
       throw error;

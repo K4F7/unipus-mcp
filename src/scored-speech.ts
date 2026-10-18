@@ -10,17 +10,46 @@ import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
 import { AnswerRefusedError } from "./choice-solver.js";
 import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
+import { resolveTtsRetryMaxMs } from "./limits.js";
 import { join } from "node:path";
 import { mkdtemp, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 export type SpeechRecordType = "EN_SENT_SCORE" | "EN_SENT_REC" | "EN_PRED_SCORE";
 
+/** 自由表达 prosody + duration gate (#92). */
+export type SpeechOptions = {
+  speed?: number;
+  /** Silence between sentences (s). */
+  pauseSec?: number;
+  /** Minimum recording length (s); shorter audio is never scored or uploaded. */
+  minSec?: number;
+  /** Final recording length (s) of the voiced answer. */
+  onAudio?: (sec: number) => void;
+};
+
 export type SpeechRecordBuilder = (
   text: string,
   tag: string,
   type: SpeechRecordType,
+  opts?: SpeechOptions,
 ) => Promise<Record<string, unknown>>;
+
+/** Recording still shorter than minSec with the longest natural sentence pause. */
+export class SpeechTooShortError extends Error {
+  constructor(readonly sec: number, readonly minSec: number) {
+    super(`录音 ${sec.toFixed(1)}s < ${minSec}s（已加长句间停顿仍不够）`);
+    this.name = "SpeechTooShortError";
+  }
+}
+
+/** Longest silence inserted between sentences when stretching a short recording. */
+export const MAX_SENTENCE_PAUSE_SEC = 1.2;
+
+/** 16 kHz mono s16 WAV → seconds. */
+export function wavSeconds(wavPath: string, sizeOf: (p: string) => number = (p) => statSync(p).size): number {
+  return Math.max(0, (sizeOf(wavPath) - 44) / 32000);
+}
 
 function wordDetails(result: Record<string, unknown>): Array<{ char: string; score: number }> {
   const raw = Array.isArray(result.details) ? result.details : [];
@@ -39,6 +68,8 @@ export type ScoredSpeechDeps = {
   /** Convert scored wav → mp3 path for birdflock (App SOE uploads mp3). Default ffmpeg. */
   convertToMp3?: (wavPath: string) => Promise<string>;
   retryDelayMs?: number;
+  /** Wall clock for the retry budget (tests). */
+  now?: () => number;
 };
 
 /** Clio failure is fatal: an unscored record would land as 「评分中」 again. */
@@ -59,8 +90,30 @@ export function createScoredSpeechRecordBuilder(
   const score = deps.score ?? scoreEnSent;
   const upload = deps.upload ?? uploadAnswerAudio;
   const convertToMp3 = deps.convertToMp3 ?? ((w) => wavToMp3(w, ports.env));
-  const once: SpeechRecordBuilder = async (text, tag, type) => {
-    const spoken = await synthesize({ text }, { env: ports.env });
+  const synthesizeLongEnough = async (text: string, opts: SpeechOptions = {}) => {
+    let spoken = await synthesize({ text, speed: opts.speed, pauseSec: opts.pauseSec }, { env: ports.env });
+    if (!opts.minSec) return spoken;
+    let sec = wavSeconds(spoken.wavPath);
+    const gaps = text.split(/[.!?]\s+(?=\S)/).length - 1;
+    if (sec < opts.minSec && gaps > 0) {
+      // Stretch only the pauses between sentences (speech itself unchanged), within a natural limit.
+      const pauseSec = (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps;
+      if (pauseSec <= MAX_SENTENCE_PAUSE_SEC) {
+        await spoken.cleanup?.();
+        console.error(`[speech] 录音 ${sec.toFixed(1)}s < ${opts.minSec}s，句间停顿加到 ${pauseSec.toFixed(2)}s 重合成`);
+        spoken = await synthesize({ text, speed: opts.speed, pauseSec }, { env: ports.env });
+        sec = wavSeconds(spoken.wavPath);
+      }
+    }
+    if (sec < opts.minSec) {
+      await spoken.cleanup?.();
+      throw new SpeechTooShortError(sec, opts.minSec);
+    }
+    opts.onAudio?.(sec);
+    return spoken;
+  };
+  const once: SpeechRecordBuilder = async (text, tag, type, opts) => {
+    const spoken = await synthesizeLongEnough(text, opts);
     try {
       const scored = await score({ transcript: text, wavPath: spoken.wavPath, timeoutMs: clioTimeoutMs(spoken.wavPath, ports.env) }, { env: ports.env });
       const reviewScores = mapClioResultToReviewScores(scored.result);
@@ -101,15 +154,18 @@ export function createScoredSpeechRecordBuilder(
       await spoken.cleanup?.();
     }
   };
-  // Box egress to Clio/七牛 drops TLS intermittently; retry the whole record.
-  return async (text, tag, type) => {
+  const now = deps.now ?? Date.now;
+  // Box egress to Clio/七牛 drops TLS intermittently; retry the whole record within a wall budget (#92).
+  return async (text, tag, type, opts) => {
+    const deadline = now() + resolveTtsRetryMaxMs(ports.env);
     let last: unknown;
     for (let i = 0; i < 4; i++) {
       try {
-        return await once(text, tag, type);
+        return await once(text, tag, type, opts);
       } catch (e) {
         last = e;
-        if (/Clio 未返回有效分数/.test(String((e as Error)?.message))) throw e;
+        if (e instanceof SpeechTooShortError || /Clio 未返回有效分数/.test(String((e as Error)?.message))) throw e;
+        if (now() >= deadline) break;
         await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 3000));
       }
     }

@@ -118,6 +118,29 @@ describe("grind-listen per-paper results (#88)", () => {
     }]);
   });
 
+  test("score comes out after a while → final App score written (polls UNIPUS_SCORE_* budget, not 5 tries) (#92)", async () => {
+    let n = 0;
+    const base = withHistory(null);
+    const h = mockHttp(async (c) => {
+      if (c.url.includes("getHistoryTrainingTasks")) {
+        n++;
+        const item = n >= 8 ? { taskId: "100000000000000001", ansVersion: 2, score: 100, scoreIsOut: true } : { taskId: "100000000000000001", ansVersion: 2, score: 0, scoreIsOut: false };
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { page: 1, pageSize: 20, total: 1, totalPages: 1, list: [item] } }) };
+      }
+      return base.request(c as never);
+    });
+    const sleeps: number[] = [];
+    const lines: Array<Record<string, unknown>> = [];
+    await grindListenGaps({
+      credentials: { getJwt: async () => "jwt" }, http: h, env: { UNIPUS_SCORE_POLL_MS: "5000", UNIPUS_SCORE_MAX_MS: "60000" },
+      llmAsk: async () => '{"answers":["B"]}', sleep: async (ms: number) => void sleeps.push(ms), trainProfileMaxPolls: 1,
+      results: { report: async (r: Record<string, unknown>) => void lines.push(r), isSubmitted: () => false },
+    } as never, 1, 1);
+    assert.equal(lines[0]!.score, 100);
+    assert.equal(lines[0]!.status, "ok");
+    assert.equal(sleeps.filter((ms) => ms === 5000).length, 7);
+  });
+
   test("score not out yet → grading line (grind itself still succeeds)", async () => {
     const { r, lines } = await run(withHistory(null));
     assert.equal(r.completed, 1);

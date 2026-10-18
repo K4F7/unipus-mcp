@@ -68,7 +68,8 @@ export type ConversationStopInput = {
   conversationId?: string;
   evaluation: number | string;
   evaluationContent?: string;
-  voiceToneId?: string;
+  /** App sends the number 3. */
+  voiceToneId?: string | number;
   openId?: string;
 };
 
@@ -247,8 +248,8 @@ export async function conversationStop(
   if (input.evaluationContent != null) {
     body.evaluationContent = input.evaluationContent;
   }
-  const voiceToneId = input.voiceToneId?.trim();
-  if (voiceToneId != null && voiceToneId.length > 0) {
+  const voiceToneId = typeof input.voiceToneId === "string" ? input.voiceToneId.trim() : input.voiceToneId;
+  if (voiceToneId != null && voiceToneId !== "") {
     body.voiceToneId = voiceToneId;
   }
 

@@ -40,6 +40,7 @@ import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { findHistoryTrainingTask } from "./history-training-tasks.js";
 import { MIN_APP_SCORE, statusFromScore, type PaperReporter } from "./paper-result.js";
 import { markProgress } from "./watchdog.js";
+import { budgetFromTries, pollWithin, resolveScorePoll } from "./limits.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -61,7 +62,7 @@ export type GrindListenPorts = AuthPorts & {
   trainProfilePollMs?: number;
   /** Per-paper JSONL result lines + idempotency ledger (#88); CLI-only. */
   results?: PaperReporter;
-  /** App history score polls per paper when `results` is set (default 5 × 3000ms). */
+  /** App history score polls per paper when `results` is set (default UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS). */
   scorePollTries?: number;
   scorePollMs?: number;
 };
@@ -330,36 +331,44 @@ export async function completeOneListen(
   return { ok: true, taskId, ansVersion };
 }
 
-/** Poll App listen history for the paper's score (reporting only; never fails the grind). */
+/**
+ * Poll App listen history for the paper's score (reporting only; never fails the grind).
+ * Budget: UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS (#92); ports.scorePollTries overrides (tests).
+ */
 async function listenAppScore(
   ports: GrindListenPorts,
   taskId: string,
 ): Promise<{ score: number | null; scoreIsOut: boolean | null; error: string | null }> {
-  const tries = Math.max(1, ports.scorePollTries ?? 5);
-  const sleep = ports.sleep ?? defaultSleep;
+  const budget = ports.scorePollTries != null
+    ? budgetFromTries(ports.scorePollTries, ports.scorePollMs ?? 3000)
+    : resolveScorePoll(ports.env);
   let last = "历史列表未找到该 taskId";
   let score: number | null = null;
-  for (let i = 0; i < tries; i++) {
-    if (i > 0) await sleep(ports.scorePollMs ?? 3000);
-    markProgress(`listen:score-poll ${taskId}`);
-    let found: Awaited<ReturnType<typeof findHistoryTrainingTask>>;
-    try {
-      found = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
-    } catch (error) {
-      // The paper is already submitted: a history timeout must not turn it into a failed round.
-      last = toError(error).message;
-      continue;
-    }
-    if (found.isError) {
-      last = found.message;
-      continue;
-    }
-    if (found.task == null) continue;
-    score = found.task.score ?? null;
-    if (found.task.scoreIsOut === true) return { score, scoreIsOut: true, error: null };
-    last = `scoreIsOut=false score=${score ?? 0}`;
-  }
-  return { score, scoreIsOut: false, error: `已交但 App 未出分：${last}` };
+  const out = await pollWithin(
+    budget,
+    async () => {
+      markProgress(`listen:score-poll ${taskId}`);
+      let found: Awaited<ReturnType<typeof findHistoryTrainingTask>>;
+      try {
+        found = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
+      } catch (error) {
+        // The paper is already submitted: a history timeout must not turn it into a failed round.
+        last = toError(error).message;
+        return undefined;
+      }
+      if (found.isError) {
+        last = found.message;
+        return undefined;
+      }
+      if (found.task == null) return undefined;
+      score = found.task.score ?? null;
+      if (found.task.scoreIsOut === true) return { score, scoreIsOut: true, error: null };
+      last = `scoreIsOut=false score=${score ?? 0}`;
+      return undefined;
+    },
+    { sleep: ports.sleep ?? defaultSleep },
+  );
+  return out ?? { score, scoreIsOut: false, error: `已交但 App 未出分：${last}` };
 }
 
 async function reportListen(ports: GrindListenPorts, r: GrindListenRoundResult): Promise<void> {
