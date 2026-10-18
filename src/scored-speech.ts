@@ -11,6 +11,7 @@ import { AnswerRefusedError } from "./choice-solver.js";
 import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 import { resolveTtsRetryMaxMs } from "./limits.js";
+import { withWallTimeout } from "./watchdog.js";
 import { join } from "node:path";
 import { mkdtemp, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -97,8 +98,8 @@ export function createScoredSpeechRecordBuilder(
     const gaps = text.split(/[.!?]\s+(?=\S)/).length - 1;
     if (sec < opts.minSec && gaps > 0) {
       // Stretch only the pauses between sentences (speech itself unchanged), within a natural limit.
-      const pauseSec = (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps;
-      if (pauseSec <= MAX_SENTENCE_PAUSE_SEC) {
+      const pauseSec = Math.min(MAX_SENTENCE_PAUSE_SEC, (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps);
+      if (pauseSec > (opts.pauseSec ?? 0)) {
         await spoken.cleanup?.();
         console.error(`[speech] 录音 ${sec.toFixed(1)}s < ${opts.minSec}s，句间停顿加到 ${pauseSec.toFixed(2)}s 重合成`);
         spoken = await synthesize({ text, speed: opts.speed, pauseSec }, { env: ports.env });
@@ -161,7 +162,8 @@ export function createScoredSpeechRecordBuilder(
     let last: unknown;
     for (let i = 0; i < 4; i++) {
       try {
-        return await once(text, tag, type, opts);
+        // Each attempt is bounded too, so a stalled TTS/Clio/upload cannot outlive the budget.
+        return await withWallTimeout(once(text, tag, type, opts), Math.max(1, deadline - now()), "TTS 重试总时长上限");
       } catch (e) {
         last = e;
         if (e instanceof SpeechTooShortError || /Clio 未返回有效分数/.test(String((e as Error)?.message))) throw e;

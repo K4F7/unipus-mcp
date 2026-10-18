@@ -460,8 +460,9 @@ export async function completeOneSpeak(
         leaf.instanceId,
         await withWallTimeout(
           buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta),
-          partMaxMs,
-          `口语答案 ${leaf.name || leaf.instanceId} 单 part 上限`,
+          // Never past the paper deadline either (review #93).
+          Math.max(1, Math.min(partMaxMs, paperDeadline - clock())),
+          `口语答案 ${leaf.name || leaf.instanceId} 单 part / 整卷上限`,
         ),
       );
     }
@@ -513,7 +514,7 @@ export async function completeOneSpeak(
         ansVersion,
         openId,
         taskText: leafTaskText(byId.get(qi)!),
-        deadlineAt: Date.now() + Math.min(partMaxMs, paperDeadline - clock()),
+        deadlineAt: clock() + Math.min(partMaxMs, paperDeadline - clock()),
       });
       if (flow.isError || flow.answer == null) {
         return {

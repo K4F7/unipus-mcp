@@ -98,3 +98,10 @@ test("cleanSpoken keeps a real first sentence that merely starts with 'Here is'"
   const s = "Here is what happened when I got sick last winter. I had a high fever.";
   assert.equal(speakContent.cleanSpoken(s), s);
 });
+
+test("cleanSpoken keeps the answer that follows an inline title/label (review #93)", async () => {
+  const { cleanSpoken } = await import("../src/speak-content.js");
+  assert.equal(cleanSpoken("**My answer:** First, I love jazz. It relaxes me."), "First, I love jazz. It relaxes me.");
+  assert.equal(cleanSpoken("Title: Music I Like. First, I love jazz."), "First, I love jazz.");
+  assert.equal(cleanSpoken("**Music I Like**\nFirst, I love jazz."), "First, I love jazz.");
+});

@@ -32,6 +32,8 @@ const LEAD_IN = new RegExp(
 const BARE_LEAD_IN = /^(?:sure|certainly|of course|absolutely)\s*[!.,]\s+/i;
 /** Meta lines: markdown headings, bold titles, "Title:", word-count notes. */
 const META_LINE = /^(?:#{1,6}\s.*|\*\*[^*]{1,80}\*\*|(?:title|topic|spoken (?:response|answer))\s*[:：].{0,80}|\(?\s*(?:word count\s*[:：]?\s*)?(?:about |approximately |around )?\d{2,3}\s*words?\s*\)?\.?|word count\s*[:：]?\s*\d+.*)$/i;
+/** An inline label in front of the real answer ("**My answer:** First, …", "Title: Music. First, …"): drop only the label. */
+const INLINE_LABEL = /^(?:\*\*[^*\n]{1,40}?[:：]?\*\*\s*[:：]?|(?:title|topic)\s*[:：][^.!?\n]{1,60}[.!?])\s+(?=\S)/i;
 /** Left-over assistant talk means the reply is not a clean spoken answer. */
 const META_TALK = /\b(?:as an ai|language model|spoken response|word count|i hope this helps|feel free to)\b/i;
 
@@ -39,7 +41,7 @@ const META_TALK = /\b(?:as an ai|language model|spoken response|word count|i hop
 export function cleanSpoken(raw: string): string {
   const lines = raw
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.trim().replace(INLINE_LABEL, ""))
     .filter((l) => l && !META_LINE.test(l));
   let s = lines.join(" ");
   for (let prev = ""; prev !== s; ) {
