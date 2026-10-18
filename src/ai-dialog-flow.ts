@@ -1,6 +1,6 @@
 /**
  * Headless AI口语对话: ebcp/auth → create → save(N) → stop → answer JSON for part/submit.
- * Does not drive oral.unipus.cn WS (MCP contract); bot/user audio from TTS upload.
+ * Harness drives oral.unipus.cn WS; bot/user audio is persisted through TTS upload.
  * openid WebView headers come from ulsCloudHeaders (JWT claim).
  */
 import { randomUUID } from "node:crypto";
@@ -15,7 +15,6 @@ import {
   type ConversationPorts,
 } from "./conversation.js";
 import { ebcpAuth, ebcpSpeakers, type EbcpPorts } from "./ebcp.js";
-import { DEFAULT_AI_SPEAK_SCRIPT } from "./grind-paper.js";
 import { generateDialogReply } from "./speak-content.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { synthesizeSpeechWav, type SynthesizeSpeechPorts } from "./tts.js";
@@ -24,6 +23,8 @@ import {
   type UploadAnswerAudioPorts,
 } from "./upload-answer-audio.js";
 import { toolError, type ToolResult } from "./result.js";
+import type { AnswerAsk } from "./choice-solver.js";
+import { AgentAnswerRequiredError, answerGroupId, type AgentAnswerAction } from "./agent-answers.js";
 
 const BOT_AVATAR =
   "https://unicloud-1313083974.cos.ap-beijing.myqcloud.com/ai-icon/ai-spoken-avatar.png";
@@ -50,6 +51,7 @@ export type AiDialogFlowPorts = AuthPorts &
   EbcpPorts &
   UploadAnswerAudioPorts &
   SynthesizeSpeechPorts & {
+    answerAsk?: AnswerAsk | null;
     /** Injected for tests; default opens wss://oral.unipus.cn/oral_api/ws//{cid}. */
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
   };
@@ -121,13 +123,19 @@ export function openOralDialogSocket(o: {
   const ws = new WebSocket(url, { headers: { origin: "https://uadaptive.unipus.cn" } });
   const parser = createReplyParser();
   const queue: DialogReply[] = [];
-  const waiters: Array<{ ok: (r: DialogReply) => void; fail: (e: Error) => void }> = [];
+  const waiters: Array<{
+    ok: (r: DialogReply) => void;
+    fail: (e: Error) => void;
+    touch: () => void;
+  }> = [];
   let failed: Error | null = null;
   const fail = (e: Error) => {
     failed = e;
     while (waiters.length) waiters.shift()!.fail(e);
   };
   ws.on("message", (data, isBinary) => {
+    // Text and TTS audio can stream for minutes before the final [end].
+    for (const waiter of waiters) waiter.touch();
     if (isBinary) return;
     const r = parser.push(String(data));
     if (r == null) return;
@@ -148,11 +156,21 @@ export function openOralDialogSocket(o: {
       if (q) return Promise.resolve(q);
       if (failed) return Promise.reject(failed);
       return new Promise((ok, rej) => {
-        const t = setTimeout(() => rej(new Error("oral WS reply timeout")), timeoutMs);
-        waiters.push({
-          ok: (r) => { clearTimeout(t); ok(r); },
-          fail: (e) => { clearTimeout(t); rej(e); },
-        });
+        let timer: ReturnType<typeof setTimeout>;
+        const waiter = {
+          ok: (r: DialogReply) => { clearTimeout(timer); ok(r); },
+          fail: (e: Error) => { clearTimeout(timer); rej(e); },
+          touch: () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              const index = waiters.indexOf(waiter);
+              if (index >= 0) waiters.splice(index, 1);
+              waiter.fail(new Error("oral WS reply timeout"));
+            }, timeoutMs);
+          },
+        };
+        waiters.push(waiter);
+        waiter.touch();
       });
     },
     sendAudio(wav) {
@@ -160,6 +178,7 @@ export function openOralDialogSocket(o: {
       opened.then(() => ws.send(wav)).catch(() => {});
     },
     close() {
+      fail(new Error("oral WS closed"));
       ws.removeAllListeners("close");
       ws.on("error", () => {});
       ws.close();
@@ -172,7 +191,7 @@ export type AiDialogFlowInput = {
   questionId: string;
   partId: string;
   ansVersion?: number;
-  /** Number of user turns to save (default 3; App max ~10). */
+  /** Number of user turns to save (default 4; App max ~10). */
   userTurns?: number;
   openId?: string;
   role?: string;
@@ -195,23 +214,13 @@ export type AiDialogFlowResult = ToolResult & {
   /** Conversation seconds (App part/submit duration). */
   duration_sec?: number;
   turns?: AiDialogTurn[];
+  next_action?: AgentAnswerAction;
 };
 
 function nowCurTime(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function splitUserScripts(turns: number): string[] {
-  const parts = DEFAULT_AI_SPEAK_SCRIPT.split(/(?<=[.!?])\s+/).filter(
-    (s) => s.trim().length > 0,
-  );
-  const out: string[] = [];
-  for (let i = 0; i < turns; i++) {
-    out.push(parts[i % parts.length] ?? DEFAULT_AI_SPEAK_SCRIPT);
-  }
-  return out;
 }
 
 async function ttsUpload(
@@ -367,7 +376,9 @@ export async function runAiDialogFlow(
   if (!reusePrior && priorUser > 0) {
     userTurns = Math.max(1, Math.min(userTurns, 10 - priorUser));
   }
-  const userScripts = splitUserScripts(userTurns);
+  if (!reusePrior && !input.taskText?.trim()) {
+    return toolError("LOW_SCORE_REFUSED", "AI 对话没有题目文本，拒绝通用稿");
+  }
   const turns: AiDialogTurn[] = reusePrior ? [...prior] : [];
   const cur = nowCurTime();
   let duration = reusePrior ? prior.reduce((a, t) => a + t.audioDuration, 0) : 0;
@@ -421,7 +432,9 @@ export async function runAiDialogFlow(
     sceneId: String(created.scene_id ?? ""),
     token: String(created.token ?? ""),
   };
-  const openSock = () => (ports.openDialogSocket ?? openOralDialogSocket)(sockArgs);
+  const openSock = () => ports.openDialogSocket
+    ? ports.openDialogSocket(sockArgs)
+    : openOralDialogSocket(sockArgs, resolveOralWsTimeoutMs(ports.env));
   let ws = openSock();
   const wsRetries = Math.max(0, Number(ports.env?.UNIPUS_ORAL_WS_RETRIES ?? 4) || 0);
   /** Await one bot reply; on timeout/close reopen WS (same cid/token) and resend `wav`. */
@@ -457,9 +470,11 @@ export async function runAiDialogFlow(
     await saveTurn("bot", opener, await ttsUpload(ports, opener, `${Date.now()}-b0`, openId));
     let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
-      const userText = input.taskText
-        ? await generateDialogReply(input.taskText, lastBot, i, { env: ports.env })
-        : userScripts[i]!;
+      const userText = await generateDialogReply(input.taskText ?? "", lastBot, i, {
+        env: ports.env,
+        ask: ports.answerAsk,
+        groupId: answerGroupId(input.taskId, input.questionId),
+      });
       const spoken = await synthesizeSpeechWav({ text: userText }, ports);
       let reply: DialogReply;
       let media: { url: string; dur: number };
@@ -485,6 +500,9 @@ export async function runAiDialogFlow(
     }
   } catch (error) {
     if (error instanceof SaveError) return error.result;
+    if (error instanceof AgentAnswerRequiredError) {
+      return { ...toolError(error.code, error.message), next_action: error.action };
+    }
     const detail = error instanceof Error ? error.message : String(error);
     return toolError("TTS_ERROR", `AI对话 WS/TTS/上传失败：${detail}`);
   } finally {

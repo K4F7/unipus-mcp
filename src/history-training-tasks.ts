@@ -406,3 +406,41 @@ export async function checkReportStatus(
     raw_code: rawCode,
   };
 }
+
+export type TrainingResult = ToolResult & {
+  task_id?: string;
+  state?: "not_found" | "scoring" | "ready";
+  score?: number | null;
+  score_is_out?: boolean;
+  check_status?: number | null;
+  next_action?: "check_training_result";
+};
+
+/** Read-only verification. An accepted submission alone never means ready. */
+export async function getTrainingResult(
+  ports: HistoryTrainingTasksPorts,
+  input: { taskId: string; flowType?: HistoryFlowType; ansVersion?: number },
+): Promise<TrainingResult> {
+  const found = await findHistoryTrainingTask(ports, input);
+  if (found.isError) return found;
+  if (!found.task) return {
+    isError: false, status: "ok", code: "TASK_NOT_FOUND",
+    message: "Task not found in the most recent 100 history entries",
+    task_id: input.taskId, state: "not_found", score: null,
+    next_action: "check_training_result",
+  };
+  const task = found.task;
+  const check = await checkReportStatus(ports, {
+    taskId: task.taskId, ansVersion: input.ansVersion ?? task.ansVersion ?? 1,
+  });
+  if (check.isError) return { ...check, task_id: task.taskId };
+  const ready = task.scoreIsOut && check.check_status === 3 && task.score != null;
+  return {
+    isError: false, status: "ok", code: ready ? "OK" : "GRADING_PENDING",
+    message: ready ? "Platform history score and report readiness verified" : "Submitted task is still awaiting a complete platform result; check again",
+    task_id: task.taskId, state: ready ? "ready" : "scoring",
+    score: ready ? task.score! : null,
+    score_is_out: task.scoreIsOut, check_status: check.check_status,
+    ...(!ready ? { next_action: "check_training_result" as const } : {}),
+  };
+}

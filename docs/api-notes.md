@@ -489,8 +489,7 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 
 ## 周刷分数（#59）
 
-- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题改为用卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 OpenAI 兼容 LLM 作答：`UNIPUS_LLM_API_KEY`（缺省读 `SILICONFLOW_API_KEY`）、`UNIPUS_LLM_BASE_URL`（默认 SiliconFlow）、`UNIPUS_LLM_MODEL`（默认 `deepseek-ai/DeepSeek-V3`）；LLM 调用失败（HTTP 错误 / 超时 / JSON 解析失败）会重试，共 3 次，仍失败就抛错，**该卷不交**。单题字母无效时用启发式补上，计入 summary 的 `warnings`。
-- 关闭模式（无 key 或 `UNIPUS_LLM_SOLVER=off`）是明确的旧行为：单选走加粗/字面启发式，填空留空，开跑时打印警告并写入 summary 的 `warnings`。
+- `loadPaper` 不含标准答案（`answers: []`）；`paperReport.items[].standardAnswer` 只在交卷后出现。听力客观题 / 填空题把卷内原文（`contents[].text`，视频题取 `subtitles[].path` 的 WebVTT）交给 `UNIPUS_AGENT_ANSWER_DIR` 里的 agent 作答。同一道题的小题留在一条请求里；同一套卷的不同题目一起发布为一条 `answer_batch`，按 `group_id` 分给不同 agent。作答失败、选项无效或填空为空会抛错，**该卷不交**。没有这个目录时同样不交。
 - 填空题（`fillblank-scoop`）答体：`children[i].value = ["词"]`，每空一个子项。
 - 口语 App「历史训练」一直「评分中」有两层根因（#61）：
   1. 答体缺 `recordDetail` / `specific_scores`（#59/#60 已修：Clio 先打分再写 EN_SENT/EN_PRED）。

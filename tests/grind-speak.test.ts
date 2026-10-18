@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import {
   classifyAppReadiness,
@@ -35,7 +38,7 @@ const paper = {
         q_qinstid: "222",
         q_template_name: "oral-personal-state",
         nm: "free",
-        data: { children: [{}] },
+        data: { children: [{}], contents: [{ text: "Talk about your weekend plans." }] },
       },
     ],
   }),
@@ -67,6 +70,22 @@ describe("partsAppHistoryReady", () => {
 });
 
 describe("completeOneSpeak", () => {
+  test("resume of submitted parts verifies scores without regenerating audio or answers", async () => {
+    const http = scenario({
+      parts: () => twoParts().map((p) => ({ ...p, submitted: true, reportStatus: "completed" })),
+    });
+    const result = await completeOneSpeak({
+      credentials: { getJwt: async () => JWT },
+      http,
+      env: {},
+      speechRecord: async () => { throw new Error("already submitted audio must not be regenerated"); },
+      sleep: async () => {},
+      appReadyPollTries: 1,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(http.calls.filter((c) => c.url.includes("part/submit")).length, 0);
+  });
+
   test("uses part/submit snapshot→submit, not submitAnswer", async () => {
     let partGetAfterSubmit = false;
     const http = mockHttp(async (call) => {
@@ -178,6 +197,7 @@ describe("completeOneSpeak", () => {
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
       env: {},
+      answerAsk: freeTalkAsk,
       speechRecord,
       sleep: async () => {},
     });
@@ -257,6 +277,7 @@ describe("completeOneSpeak", () => {
       credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
       http,
       env: {},
+      answerAsk: freeTalkAsk,
       speechRecord: async () => ({
         type: "EN_SENT_SCORE",
         url: "https://cdn.example/a.wav",
@@ -271,6 +292,8 @@ describe("completeOneSpeak", () => {
 });
 
 const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t";
+const FREE_TALK = Array.from({ length: 100 }, (_, i) => `word${i}`).join(" ");
+const freeTalkAsk = async () => FREE_TALK;
 const okSpeech = async (_t: string, _g: string, type: SpeechRecordType) => ({
   type, url: "u", recordDetail: { score: 90 },
 });
@@ -322,7 +345,15 @@ function scenario(opts: {
   });
 }
 const run = (http: ReturnType<typeof mockHttp>, speechRecord = okSpeech) =>
-  completeOneSpeak({ credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord, sleep: async () => {}, appReadyPollTries: 3 });
+  completeOneSpeak({
+    credentials: { getJwt: async () => JWT },
+    http,
+    env: {},
+    answerAsk: freeTalkAsk,
+    speechRecord,
+    sleep: async () => {},
+    appReadyPollTries: 3,
+  });
 const submitCalls = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("part/submit"));
 
 describe("completeOneSpeak review (#62)", () => {
@@ -449,7 +480,12 @@ describe("completeOneSpeak review (#62)", () => {
     });
     const r = await run(http);
     assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+    if (!r.ok) {
+      assert.match(r.detail, /已交但 App 评分中/);
+      assert.deepEqual(r.nextAction, {
+        type: "check_training_result", task_id: "555", flow_type: "speak", ans_version: 1,
+      });
+    }
     assert.ok(http.calls.some((c) => c.url.includes("getHistoryTrainingTasks")));
   });
 
@@ -473,6 +509,16 @@ describe("completeOneSpeak review (#62)", () => {
     const r = await run(http);
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.detail, /已交但 App 评分中/);
+  });
+
+  test("a missing platform score stays pending instead of being invented as zero", async () => {
+    const http = scenario({ history: () => ({ taskId: "555", scoreIsOut: true, ansVersion: 1 }) });
+    const result = await run(http);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.nextAction?.type, "check_training_result");
+      assert.match(result.detail, /分数缺失/);
+    }
   });
 
   test("paginates history until taskId found with scoreIsOut", async () => {
@@ -531,5 +577,72 @@ describe("completeOneSpeak review (#62)", () => {
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: true, reportStatus: "completed" }] }), "ready");
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: true, reportStatus: "processing" }] }), "submitted_not_ready");
     assert.equal(classifyAppReadiness({ partList: [{ partId: "p", submitted: null, reportStatus: null }] }), "not_submitted");
+  });
+});
+
+describe("speak answer batch", () => {
+  test("two free-talk questions are published before speech or part submit", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "unipus-speak-batch-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { type: "train", taskId: "555", ansVersion: 1 } }) };
+      }
+      if (call.url.includes("loadPaper")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: {
+              token: "tok",
+              paperJson: JSON.stringify({
+                chr: [
+                  { q_qinstid: "111", q_template_name: "oral-personal-state", data: { children: [{}], contents: [{ text: "Describe your morning." }] } },
+                  { q_qinstid: "222", q_template_name: "oral-personal-state", data: { children: [{}], contents: [{ text: "Describe your city." }] } },
+                ],
+              }),
+            },
+          }),
+        };
+      }
+      if (call.url.includes("part/get")) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            code: 1,
+            value: {
+              partList: [
+                { partId: "p1", partName: "自由表达", questionInstanceIds: ["111"], submitted: null },
+                { partId: "p2", partName: "自由表达", questionInstanceIds: ["222"], submitted: null },
+              ],
+            },
+          }),
+        };
+      }
+      if (call.url.includes("part/submit")) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: {} }) };
+      }
+      return { statusCode: 404, body: "{}" };
+    });
+    let spoken = 0;
+    const result = await completeOneSpeak({
+      credentials: { getJwt: async () => JWT },
+      http,
+      env: { UNIPUS_AGENT_ANSWER_DIR: dir, UNIPUS_AGENT_ANSWER_WAIT_MS: "0" },
+      speechRecord: async () => { spoken += 1; return { type: "EN_PRED_SCORE", url: "u" }; },
+      sleep: async () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.equal(spoken, 0);
+    assert.equal(http.calls.some((call) => call.url.includes("part/submit")), false);
+    assert.equal((await readdir(dir)).filter((name) => name.endsWith(".request.json")).length, 2);
+    if (!result.ok && result.nextAction?.type === "answer_batch") {
+      assert.deepEqual(
+        result.nextAction.groups.map((group) => group.group_id).sort(),
+        ["555:111", "555:222"],
+      );
+    } else {
+      assert.fail("expected answer_batch");
+    }
   });
 });

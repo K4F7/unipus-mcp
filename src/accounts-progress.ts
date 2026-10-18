@@ -2,6 +2,7 @@
  * Read-only multi-account week progress table for MCP.
  * No grind/scheduling; never returns jwt/rt/password.
  */
+import type { AccountUsage } from "./account-usage.js";
 import {
   listAccounts,
   readAccountMeta,
@@ -26,6 +27,7 @@ export type AccountProgressRow = {
   alias: string | null;
   note: string | null;
   grind: GrindMode;
+  usage: AccountUsage;
   skip_placement: boolean | null;
   listen_done: number | null;
   listen_total: number | null;
@@ -58,7 +60,7 @@ export type ListAccountsProgressInput = {
 
 function redactedListedBase(listed: ListedAccount): Pick<
   AccountProgressRow,
-  "account_id" | "active" | "alias" | "note" | "grind"
+  "account_id" | "active" | "alias" | "note" | "grind" | "usage"
 > {
   return {
     account_id: listed.account_id,
@@ -66,6 +68,7 @@ function redactedListedBase(listed: ListedAccount): Pick<
     alias: listed.alias,
     note: listed.note,
     grind: listed.grind,
+    usage: listed.usage,
   };
 }
 

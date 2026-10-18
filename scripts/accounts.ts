@@ -9,11 +9,22 @@
  *   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
  *   npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
  *   npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
+ *   npx tsx scripts/accounts.ts usage <account_id> self [--listen N|platform] [--speak N|platform]
+ *   npx tsx scripts/accounts.ts usage <account_id> assist --months N [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
+ *   npx tsx scripts/accounts.ts usage <account_id> assist --semester [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
+ *   npx tsx scripts/accounts.ts usage <account_id> assist --until YYYY-MM-DD [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
  *   npx tsx scripts/accounts.ts set-password <account_id>
  */
 import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  formatUsage,
+  monthWindowCapped,
+  parseUsageArgs,
+  shanghaiDate,
+  usageFromCommand,
+} from "../src/account-usage.js";
 import {
   accountDir,
   defaultConfigDir,
@@ -23,7 +34,9 @@ import {
   resolvePasswordForSet,
   sanitizeAccountId,
   setAccountGrind,
+  readAccountMeta,
   setAccountNote,
+  setAccountUsage,
   setActiveAccountId,
   writeAccountPassword,
 } from "../src/accounts.js";
@@ -37,11 +50,21 @@ function printHelp(): void {
   npx tsx scripts/accounts.ts set-note <account_id> --text '…'
   npx tsx scripts/accounts.ts grind <account_id> both|listen|speak
   npx tsx scripts/accounts.ts set-grind <account_id> both|listen|speak
+  npx tsx scripts/accounts.ts usage <account_id> self [--listen N|platform] [--speak N|platform]
+  npx tsx scripts/accounts.ts usage <account_id> assist --months <1-24> [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
+  npx tsx scripts/accounts.ts usage <account_id> assist --semester [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
+  npx tsx scripts/accounts.ts usage <account_id> assist --until YYYY-MM-DD [--from YYYY-MM-DD] [--listen N|platform] [--speak N|platform]
   npx tsx scripts/accounts.ts set-password <account_id>
 
-Only prints redacted meta (account_id, active, has_jwt/has_rt/has_password, alias, note, grind, timestamps).
+Only prints redacted meta (account_id, active, has_jwt/has_rt/has_password, alias, note, grind, usage, timestamps).
 Never prints jwt / rt / password. Switching is CLI-only (no MCP use_account).
 grind 写入 meta.json（听/口策略）；勿从 note 文本解析。
+usage 写入 meta.json：self 自用不过期；assist 帮刷，到期日（上海日期，含当天）之后 weekly-grind 跳过。
+--listen / --speak 对 self 和 assist 都可用，写每周听力、口语篇数（0–30）。platform 改回平台 weekFrequency。
+未写的一侧沿用已保存的篇数。周任务取 min(配置, 平台达标数)。0 表示这一侧本周不做。
+--semester 按配置当天所在学期结束：秋 9/1–次年 1/15，春 2/20–7/10；假期则落到下一学期结束日。
+--months 在同一套校历里加自然月，但到期日停在起始日所在学期的结束日，不进入下学期。
+--until 按指定日期。--from 默认今天。已保存的 expires_at 不会事后重算。
 set-password：UNIPUS_PASSWORD_<id> → stdin 写入 accounts/<id>/password（0600）；不读全局 UNIPUS_PASSWORD；永不回显。
 本仓自管密码，不强制 SecretSpec；禁止把密码作 MCP 工具参数。`);
 }
@@ -72,10 +95,11 @@ async function cmdList(): Promise<void> {
     const alias = a.alias ? ` alias=${a.alias}` : "";
     const note = formatNoteForList(a.note);
     const grind = ` grind=${a.grind}`;
+    const usage = ` ${formatUsage(a.usage)}`;
     const login = a.last_login_at ? ` login=${a.last_login_at}` : "";
     const refresh = a.last_refresh_at ? ` refresh=${a.last_refresh_at}` : "";
     console.log(
-      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"} pw=${a.has_password ? "yes" : "no"}${alias}${note}${grind}${login}${refresh}`,
+      `${mark} ${a.account_id}  jwt=${a.has_jwt ? "yes" : "no"} rt=${a.has_rt ? "yes" : "no"} pw=${a.has_password ? "yes" : "no"}${alias}${note}${grind}${usage}${login}${refresh}`,
     );
   }
 }
@@ -223,6 +247,32 @@ async function main(): Promise<void> {
     }
     await setAccountGrind(id, mode);
     console.log(`已设置 ${id} 的 grind=${mode}（秘密未打印）`);
+    return;
+  }
+  if (cmd === "usage" || cmd === "set-usage") {
+    const id = rest[0]?.trim();
+    if (!id) {
+      console.error(
+        "usage: accounts.ts usage <account_id> self [--listen N|platform] [--speak N|platform] | assist --months N | assist --semester | assist --until YYYY-MM-DD [--listen N|platform] [--speak N|platform]",
+      );
+      process.exit(2);
+    }
+    const parsed = parseUsageArgs(rest.slice(1));
+    if (!parsed.ok) {
+      console.error(parsed.error);
+      process.exit(2);
+    }
+    const existing = await readAccountMeta(id);
+    let usage;
+    try {
+      usage = usageFromCommand(parsed.command, new Date(), existing?.usage ?? null);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(2);
+    }
+    await setAccountUsage(id, usage);
+    const capped = monthWindowCapped(usage) ? "；按月超出本学期，已截到本学期结束日" : "";
+    console.log(`已设置 ${id} 的 ${formatUsage(usage, shanghaiDate())}（秘密未打印）${capped}`);
     return;
   }
   if (cmd === "set-password") {

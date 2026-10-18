@@ -7,7 +7,7 @@ import { statSync } from "node:fs";
 import { mapClioResultToReviewScores, scoreEnSent } from "./clio-speech.js";
 import { buildEnSentScoreRecord } from "./grade-question.js";
 import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
-import { synthesizeSpeechWav } from "./tts.js";
+import { synthesizeSpeechWav, resolveFfmpegPath } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -157,7 +157,7 @@ export async function buildVocabAnswer(leaf: GrindLeaf, speech: SpeechRecordBuil
 async function wavToMp3(wavPath: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "unipus-mp3-"));
   const out = join(dir, "speech.mp3");
-  const ffmpeg = env?.UNIPUS_FFMPEG?.trim() || "ffmpeg";
+  const ffmpeg = resolveFfmpegPath(env);
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       ffmpeg,

@@ -53,13 +53,17 @@ import {
   type ScoreEnSentPorts,
 } from "./clio-speech.js";
 import { z } from "zod";
+import { registerAgentTools } from "./register-agent-tools.js";
 
 const LIST_ACCOUNTS_DESCRIPTION = [
   "List local Unipus account archives under ~/.config/unipus-mcp/accounts/.",
-  "Returns account_id, active flag, has_jwt/has_rt/has_password (boolean only), alias, note, grind, and timestamps — redacted meta only. Never password contents.",
+  "Returns account_id, active flag, has_jwt/has_rt/has_password (boolean only), alias, note, grind, usage, and timestamps — redacted meta only. Never password contents.",
+  "usage.mode=self never expires. usage.mode=assist expires after expires_at (Asia/Shanghai, inclusive). Weekly grind skips expired assist accounts.",
+  "Both modes may set usage.listen_per_week and usage.speak_per_week (0–30, or null to follow platform weekFrequency). Weekly grind uses min(configured, weekFrequency).",
   "Never returns jwt/rt/password. Switching accounts is CLI-only: npx tsx scripts/accounts.ts use <id>.",
   "Set usage note via CLI: npx tsx scripts/accounts.ts note <id> <text> | note <id> --clear.",
   "Set grind policy via CLI: npx tsx scripts/accounts.ts grind <id> both|listen|speak.",
+  "Set usage via CLI: npx tsx scripts/accounts.ts usage <id> self [--listen N|platform] [--speak N|platform] | assist --months N | assist --semester | assist --until YYYY-MM-DD [--listen N|platform] [--speak N|platform].",
 ].join(" ");
 
 const AUTH_STATUS_DESCRIPTION = [
@@ -171,6 +175,8 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
       now: authPorts.now,
     };
   }
+
+  registerAgentTools(server, { env: ports?.env, authPortsFor });
 
   server.registerTool(
     "auth_status",
@@ -574,7 +580,7 @@ export function createUnipusMcpServer(ports?: UnipusServerPorts): McpServer {
   );
 
   const SPEAK_AND_SUBMIT_DESCRIPTION = [
-    "One-shot silent oral: TTS (edge) → upload_answer_audio → submit_answer.",
+    "One-shot silent oral: configured TTS → upload_answer_audio → submit_answer.",
     "Requires paperToken from start_listening_training / loadPaper.",
     "Args: text, taskId, paperToken, instanceId; optional voice / ansVersion / durationSec / openId.",
     "Needs ffmpeg on PATH. Does not accept credentials.",

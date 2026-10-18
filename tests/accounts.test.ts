@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
+import { assistMonths, assistSemester, selfUsage } from "../src/account-usage.js";
 import {
   NOTE_MAX_LENGTH,
   listAccounts,
@@ -18,6 +19,7 @@ import {
   saveAccountTokens,
   setAccountGrind,
   setAccountNote,
+  setAccountUsage,
   setActiveAccountId,
   sanitizeAccountId,
 } from "../src/accounts.js";
@@ -234,6 +236,7 @@ describe("account grind policy", () => {
       { home, env },
     );
     await setAccountGrind("gp", "speak", { home, env });
+    await setAccountUsage("gp", assistSemester("2026-10-19"), { home, env });
     await saveAccountTokens(
       {
         accountId: "gp",
@@ -243,11 +246,68 @@ describe("account grind policy", () => {
       },
       { home, env },
     );
-    assert.equal((await readAccountMeta("gp", { home, env }))?.grind, "speak");
+    const kept = await readAccountMeta("gp", { home, env });
+    assert.equal(kept?.grind, "speak");
+    assert.equal(kept?.usage?.mode, "assist");
+    assert.equal(kept?.usage?.expires_at, "2027-01-15");
+    assert.equal(kept?.usage?.term, "semester");
+  });
+
+  test("setAccountUsage persists months and note stays untouched", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-usage-"));
+    const env = {};
+    await saveAccountTokens(
+      {
+        accountId: "u1",
+        jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.u",
+        metaPatch: { note: "室友" },
+      },
+      { home, env },
+    );
+    assert.equal((await readAccountMeta("u1", { home, env }))?.usage?.mode, "self");
+    await setAccountUsage("u1", assistMonths(3, "2026-10-19"), { home, env });
+    const meta = await readAccountMeta("u1", { home, env });
+    assert.equal(meta?.note, "室友");
+    assert.equal(meta?.usage?.mode, "assist");
+    assert.equal(meta?.usage?.months, 3);
+    assert.equal(meta?.usage?.expires_at, "2027-01-15");
+    assert.equal(meta?.usage?.listen_per_week, null);
+    assert.equal((await listAccounts({ home, env }))[0]!.usage.expires_at, "2027-01-15");
+  });
+
+  test("weekly listen and speak counts persist on self and assist", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-usage-quota-"));
+    const env = {};
+    await saveAccountTokens(
+      { accountId: "q1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.q" },
+      { home, env },
+    );
+    await setAccountUsage(
+      "q1",
+      { ...selfUsage(), listen_per_week: 2, speak_per_week: 1 },
+      { home, env },
+    );
+    assert.equal((await readAccountMeta("q1", { home, env }))?.usage?.listen_per_week, 2);
+    await setAccountUsage(
+      "q1",
+      { ...assistMonths(1, "2026-10-19"), listen_per_week: 4, speak_per_week: 0 },
+      { home, env },
+    );
+    const meta = await readAccountMeta("q1", { home, env });
+    assert.equal(meta?.usage?.mode, "assist");
+    assert.equal(meta?.usage?.listen_per_week, 4);
+    assert.equal(meta?.usage?.speak_per_week, 0);
+    assert.equal((await listAccounts({ home, env }))[0]!.usage.speak_per_week, 0);
   });
 });
 
 describe("per-account password", () => {
+  test("file passwords preserve literal punctuation and surrounding spaces", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-pw-literal-"));
+    await writeAccountPassword("literal", "  SamplePassword. ", { home, env: {} });
+    assert.equal(await resolveAccountPassword("literal", { home, env: {} }), "  SamplePassword. ");
+  });
+
   test("writeAccountPassword 0600; resolve prefers UNIPUS_PASSWORD_<id> then file then global", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-pw-"));
     const env: NodeJS.ProcessEnv = {};

@@ -15,6 +15,18 @@ export type ToolResult = {
   message: string;
 };
 
+/** One question (one paper leaf, or one AI-dialog session) for one agent. */
+export type AnswerBatchGroup = {
+  group_id: string;
+  request_ids: string[];
+};
+
+/** Actionable handoffs returned to the driving agent. */
+export type NextAction =
+  | { type: "answer_request"; request_id: string; queue_dir: string; group_id?: string }
+  | { type: "answer_batch"; queue_dir: string; groups: AnswerBatchGroup[] }
+  | { type: "check_training_result"; task_id: string; flow_type: "speak" | "listen"; ans_version: number };
+
 export type AuthStatusResult = ToolResult & {
   authenticated: boolean;
   expired?: boolean | null;
