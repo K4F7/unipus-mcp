@@ -592,6 +592,16 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
     assert.equal(results.lines[0]!.status, "ok");
   });
 
+  test("every answer step runs inside its part budget: LLM / TTS / Clio / upload see ≤ UNIPUS_PART_MAX_MS left (#100)", async () => {
+    const { remainingBudgetMs } = await import("../src/watchdog.js");
+    const left: number[] = [];
+    const speechRecord = async (t: string, g: string, type: SpeechRecordType) => (left.push(remainingBudgetMs()), okSpeech(t, g, type));
+    const llmAsk = async () => (left.push(remainingBudgetMs()), okAsk());
+    await grindSpeakGaps(ports(scenario({}), { env: { UNIPUS_PART_MAX_MS: "60000" }, speechRecord, llmAsk }) as never, 1, 1);
+    assert.ok(left.length > 0);
+    for (const ms of left) assert.ok(ms > 0 && ms <= 60_000, String(ms));
+  });
+
   test("taskId+ansVersion already in the ledger and App history → skipped_existing, nothing loaded or submitted", async () => {
     const http = scenario({});
     const results = recorder(["说|555|1"]);

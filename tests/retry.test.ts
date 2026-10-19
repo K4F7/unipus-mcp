@@ -105,6 +105,19 @@ describe("retryWithinBudget (#98)", () => {
     }
   });
 
+  test("the retry budget is hard-capped by an enclosing part / paper budget (#100)", async () => {
+    const { retryWithinBudget } = await import("../src/retry.js");
+    const { withDeadline } = await import("../src/watchdog.js");
+    const t = 5_000_000;
+    const seen: number[] = [];
+    await withDeadline(t + 120_000, () =>
+      retryWithinBudget(async (remainingMs) => void seen.push(remainingMs), {
+        label: "speak-1", budgetMs: 600_000, now: () => t, log: () => {},
+      }),
+    );
+    assert.deepEqual(seen, [120_000]);
+  });
+
   test("backs off exponentially with a cap and logs every failed attempt", async () => {
     const { retryWithinBudget } = await import("../src/retry.js");
     const clock = fakeClock();

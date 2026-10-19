@@ -43,7 +43,7 @@ import { openIdFromJwt } from "./uls-business.js";
 import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
-import { activeNow, markProgress, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, withDeadline, withWallTimeout } from "./watchdog.js";
 import {
   budgetFromTries,
   pollWithin,
@@ -511,7 +511,8 @@ export async function completeOneSpeak(
       answers.set(
         leaf.instanceId,
         await withWallTimeout(
-          buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta),
+          // Every step below (LLM, TTS, Clio, upload) is capped by this part's remaining budget (#100).
+          withDeadline(partDeadlines.get(part)!, () => buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta)),
           Math.max(1, partDeadlines.get(part)! - clock()),
           `口语答案 ${leaf.name || leaf.instanceId} 单 part / 整卷上限`,
         ),

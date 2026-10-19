@@ -2,7 +2,7 @@ import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 
 import WebSocket from "ws";
-import { wallClockTimer } from "./watchdog.js";
+import { capToBudget, wallClockTimer } from "./watchdog.js";
 
 import {
   DEFAULT_CLIO_APPLICATION_ID,
@@ -116,10 +116,12 @@ export async function scoreEnSent(
     };
   const wssUrl = input.wssUrl?.trim() || resolveClioWssUrl(env);
   const userId = input.userId?.trim() || "unipus-mcp";
-  const timeoutMs =
+  // The result wait is hard-capped by the enclosing budget (#100).
+  const timeoutMs = capToBudget(
     input.timeoutMs != null && Number.isFinite(input.timeoutMs)
       ? Math.max(1_000, Number(input.timeoutMs))
-      : 30_000;
+      : 30_000,
+  );
 
   const nowMs = (ports.nowMs ?? Date.now)();
   const timestamp = clioTimestampFromNowMs(nowMs);

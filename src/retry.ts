@@ -1,5 +1,5 @@
 /** Shared retry/backoff + error classification for flaky upstreams (Edge TTS, fetch). */
-import { activeNow, withWallTimeout } from "./watchdog.js";
+import { activeNow, remainingBudgetMs, withDeadline, withWallTimeout } from "./watchdog.js";
 
 export type ErrorClass =
   | "TIMEOUT"
@@ -110,7 +110,8 @@ export async function retryWithinBudget<T>(
   const sleep = opts.sleep ?? realSleep;
   const log = opts.log ?? ((line: string) => console.error(line));
   const start = now();
-  const deadline = start + opts.budgetMs;
+  // Never past an enclosing part / paper budget (#100); nested steps see this deadline too.
+  const deadline = start + Math.min(opts.budgetMs, remainingBudgetMs(now));
   let last: Error = new Error("no attempt");
   let attempt = 0;
   while (attempt < attempts) {
@@ -119,7 +120,7 @@ export async function retryWithinBudget<T>(
     attempt++;
     const remaining = Math.max(1, deadline - now());
     try {
-      return await withWallTimeout(fn(remaining, attempt), remaining, `${opts.label} 重试总时长上限`, { now });
+      return await withWallTimeout(withDeadline(deadline, () => fn(remaining, attempt)), remaining, `${opts.label} 重试总时长上限`, { now });
     } catch (raw) {
       last = toError(raw);
       if (opts.isFatal?.(last)) throw last;

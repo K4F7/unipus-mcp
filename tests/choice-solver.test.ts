@@ -243,3 +243,36 @@ describe("LLM first-byte / idle / total timeouts (#100)", () => {
     await assert.rejects(endless("hi"), /LLM 总时长超时 \(80ms/);
   });
 });
+
+describe("LLM limits are hard-capped by the remaining budget (#100)", () => {
+  const enc = (t: string) => new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"${t}"}}]}\n\n`);
+  const sse = (pull: (c: ReadableStreamDefaultController<Uint8Array>) => void | Promise<void>) =>
+    new Response(new ReadableStream({ pull }), { headers: { "content-type": "text/event-stream" } });
+  const never = () => new Promise<void>(() => {});
+  /** Configured limits (60s / 60s / 180s) all far beyond the 100ms budget. */
+  const runInBudget = async (budgetMs: number, respond: () => Response) => {
+    const { createLlmAsk } = await import("../src/choice-solver.js");
+    const { withDeadline, activeNow } = await import("../src/watchdog.js");
+    const ask = createLlmAsk(
+      { baseUrl: "https://x/v1", model: "m", apiKey: "k", firstByteMs: 60_000, idleMs: 60_000, timeoutMs: 180_000 },
+      (async () => respond()) as never,
+    );
+    const t0 = Date.now();
+    const err = (await withDeadline(activeNow() + budgetMs, () => ask("hi")).then(() => null, (e: Error) => e))!;
+    const limit = Number(/超时 \((\d+)ms/.exec(err?.message ?? "")?.[1]);
+    return { err, limit, took: Date.now() - t0 };
+  };
+  const cases: Array<[string, () => Response]> = [
+    ["no first byte", () => sse(never)],
+    ["stalls after the first chunk (idle)", () => { let n = 0; return sse(async (c) => { if (n++ === 0) c.enqueue(enc("a")); else await never(); }); }],
+    ["steady endless stream (total)", () => sse(async (c) => { await new Promise((r) => setTimeout(r, 10)); c.enqueue(enc("y")); })],
+  ];
+  for (const [name, respond] of cases) {
+    test(`${name}: aborted within the budget, reported limit ≤ budget`, async () => {
+      const { err, limit, took } = await runInBudget(100, respond);
+      assert.match(String(err?.message), /^LLM (首包|流空闲|总时长)超时/);
+      assert.ok(limit > 0 && limit <= 100, `limit ${limit}`);
+      assert.ok(took < 3_000, `took ${took}ms`);
+    });
+  }
+});

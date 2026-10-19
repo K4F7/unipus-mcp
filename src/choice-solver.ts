@@ -9,7 +9,7 @@
  * the caller must not submit (Sein: 没答案不要交).
  */
 import { stripHtml } from "./grind-paper.js";
-import { wallClockSignal, wallClockTimer } from "./watchdog.js";
+import { capToBudget, wallClockSignal, wallClockTimer } from "./watchdog.js";
 import { resolveLlmFirstByteMs, resolveLlmIdleMs, resolveLlmMaxTokens, resolveLlmTimeoutMs } from "./limits.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
@@ -77,15 +77,16 @@ export async function probeLlm(ask: LlmAsk, attempts = 2): Promise<void> {
 /**
  * Streamed chat completion with three limits (#100): no body byte within
  * `firstByteMs` (dead gateway), a silent stream for `idleMs` (stalled mid-way),
- * and `timeoutMs` overall. Each error names its stage so logs tell them apart.
+ * and `timeoutMs` overall, each hard-capped by the enclosing budget
+ * (`withDeadline`). Each error names its stage and the limit actually used.
  */
 export function createLlmAsk(
   config: ChoiceSolverConfig & LlmRequestLimits,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): LlmAsk {
   return async (prompt) => {
-    const totalMs = config.timeoutMs ?? resolveLlmTimeoutMs({});
-    const idleMs = config.idleMs ?? resolveLlmIdleMs({});
+    const totalMs = capToBudget(config.timeoutMs ?? resolveLlmTimeoutMs({}));
+    const idleLimitMs = config.idleMs ?? resolveLlmIdleMs({});
     const ctl = new AbortController();
     let received = 0;
     const abort = (message: string) => {
@@ -94,11 +95,12 @@ export function createLlmAsk(
       ctl.abort(err);
     };
     const cancelTotal = wallClockTimer(totalMs, () => abort(`LLM 总时长超时 (${totalMs}ms，已收 ${received} 字节)`));
-    const firstByteMs = config.firstByteMs ?? resolveLlmFirstByteMs({});
+    const firstByteMs = capToBudget(config.firstByteMs ?? resolveLlmFirstByteMs({}));
     let cancelIdle = wallClockTimer(firstByteMs, () => abort(`LLM 首包超时 (${firstByteMs}ms)`));
     const onBytes = (n: number) => {
       received += n;
       cancelIdle();
+      const idleMs = capToBudget(idleLimitMs);
       cancelIdle = wallClockTimer(idleMs, () => abort(`LLM 流空闲超时 (${idleMs}ms 无数据，已收 ${received} 字节)`));
     };
     try {

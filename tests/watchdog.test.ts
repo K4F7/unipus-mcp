@@ -167,3 +167,23 @@ test("activeNow is the default clock of wall timers", () => {
   assert.equal(typeof activeNow(), "number");
   assert.ok(Math.abs(activeNow() - Date.now()) < 24 * 3600_000);
 });
+
+test("withDeadline / remainingBudgetMs: nested scopes keep the tighter deadline; none = unbounded (#100)", async () => {
+  const { withDeadline, remainingBudgetMs, capToBudget } = await import("../src/watchdog.js");
+  assert.equal(remainingBudgetMs(), Infinity);
+  assert.equal(capToBudget(45_000), 45_000);
+  const t = 1_000_000;
+  const now = () => t;
+  await withDeadline(t + 900_000, async () => {
+    assert.equal(remainingBudgetMs(now), 900_000);
+    await withDeadline(t + 2_000_000, async () => {
+      assert.equal(remainingBudgetMs(now), 900_000, "an inner, looser budget cannot extend the outer one");
+      await withDeadline(t + 30_000, async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        assert.equal(remainingBudgetMs(now), 30_000, "survives awaits");
+        assert.equal(capToBudget(45_000, now), 30_000);
+      });
+    });
+  });
+  await withDeadline(t - 5, async () => assert.equal(capToBudget(45_000, now), 1, "spent budget → 1ms, never 0/negative"));
+});

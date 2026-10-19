@@ -10,6 +10,8 @@
  * socket still times out on schedule.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export type Clock = { now?: () => number; tickMs?: number };
 
 /** Exit code when the process-level stall watchdog fires. */
@@ -68,6 +70,29 @@ let processClock: StallClock | null = null;
 export function activeNow(): number {
   processClock ??= createStallClock();
   return processClock.now();
+}
+
+/** Innermost budget deadline (activeNow scale) of the current async call chain. */
+const budgetScope = new AsyncLocalStorage<number>();
+
+/**
+ * Run `fn` under a budget ending at `deadlineAt` (activeNow scale, #100). Nested
+ * scopes keep the tighter deadline, so a part / paper cap bounds every step below
+ * it; steps read it with `capToBudget`.
+ */
+export function withDeadline<T>(deadlineAt: number, fn: () => Promise<T>): Promise<T> {
+  return budgetScope.run(Math.min(deadlineAt, budgetScope.getStore() ?? Infinity), fn);
+}
+
+/** Time left in the current budget scope (Infinity outside any scope). */
+export function remainingBudgetMs(now: () => number = activeNow): number {
+  const deadline = budgetScope.getStore();
+  return deadline == null ? Infinity : Math.max(0, deadline - now());
+}
+
+/** A step timeout hard-capped by the remaining budget (≥1ms). */
+export function capToBudget(ms: number, now?: () => number): number {
+  return Math.max(1, Math.min(ms, remainingBudgetMs(now)));
 }
 
 /** Call `onFire` once `ms` of active time (`activeNow`) has passed. Returns cancel (always call it on settle). */

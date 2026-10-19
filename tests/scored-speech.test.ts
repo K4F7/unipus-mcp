@@ -49,6 +49,19 @@ describe("scored-speech", () => {
     assert.deepEqual(logs, ["vocab-1-0 用时 TTS 合成 1.2s / Clio 评分 3.4s / mp3 转码 0.1s / 上传 0.8s（共 5.5s）"]);
   });
 
+  test("the Clio result wait is capped by the enclosing budget (#100)", async () => {
+    const { withDeadline, activeNow } = await import("../src/watchdog.js");
+    const timeouts: number[] = [];
+    const base = deps();
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      log: () => {},
+      score: async (input, p) => { timeouts.push(input.timeoutMs!); return base.score!(input, p); },
+    }));
+    await withDeadline(activeNow() + 20_000, () => b("hi", "t", "EN_SENT_SCORE"));
+    assert.equal(timeouts.length, 1);
+    assert.ok(timeouts[0]! <= 20_000 && timeouts[0]! > 19_000, String(timeouts[0]));
+  });
+
   test("EN_PRED_SCORE keeps the same score blocks", async () => {
     const rec = await createScoredSpeechRecordBuilder(ports, deps())("hi", "t", "EN_PRED_SCORE");
     assert.equal(rec.type, "EN_PRED_SCORE");
