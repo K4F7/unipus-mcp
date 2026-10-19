@@ -23,11 +23,11 @@ test("no template script is exported", () => {
 
 const words = (n: number) => Array.from({ length: n }, (_, i) => (i % 12 === 11 ? "music." : "music")).join(" ");
 
-test("generateFreeTalk uses LLM output of 200-230 words and asks for >=90s", async () => {
+test("generateFreeTalk asks for 210-240 words and >=90s (#96)", async () => {
   const prompts: string[] = [];
-  const out = await generateFreeTalk("Talk about music", { ask: async (p) => { prompts.push(p); return `"${words(215)}"`; } });
-  assert.equal(out, words(215));
-  assert.match(prompts[0]!, /200-230 words/);
+  const out = await generateFreeTalk("Talk about music", { ask: async (p) => { prompts.push(p); return `"${words(225)}"`; } });
+  assert.equal(out, words(225));
+  assert.match(prompts[0]!, /210-240 words/);
   assert.match(prompts[0]!, /90 seconds/);
 });
 
@@ -43,6 +43,16 @@ test("generateFreeTalk strips LLM lead-ins, titles, markdown and word-count note
     const out = await generateFreeTalk("Talk about music", { ask: async () => raw });
     assert.equal(out, body, raw.slice(0, 40));
   }
+});
+
+test("generateFreeTalk: 205-250 words accepted; 204 or 251 regenerated before any TTS (#96)", async () => {
+  for (const ok of [205, 250]) {
+    assert.equal(await generateFreeTalk("Talk about music", { ask: async () => words(ok) }), words(ok));
+  }
+  const replies = [words(204), words(251), words(207)];
+  let n = 0;
+  assert.equal(await generateFreeTalk("Talk about music", { ask: async () => replies[n++]! }), words(207));
+  assert.equal(n, 3);
 });
 
 test("generateFreeTalk: too short / too long replies are regenerated, then refused (#92)", async () => {

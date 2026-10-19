@@ -81,15 +81,18 @@ async function askWithRetry(ports: SpeakContentPorts, prompt: string, check: (s:
   throw new AnswerRefusedError(`口语 LLM 作答失败（${ATTEMPTS} 次），拒绝用模板交卷：${last}`);
 }
 
-/** Accepted free-talk length: prompt asks 200-230 words; ±10 tolerance before regenerating. */
-export const FREE_TALK_WORDS = { min: 190, max: 240 } as const;
+/**
+ * Accepted free-talk length: the prompt asks 210-240 words; outside 205-250 the script is regenerated
+ * before any TTS. ~205 words is what reaches 90 s at speed 0.85 with the max sentence pause (#96).
+ */
+export const FREE_TALK_WORDS = { min: 205, max: 250 } as const;
 
-/** ≥90 s monologue (200–230 words) covering every bullet of the task (#92). */
+/** ≥90 s monologue (210–240 words) covering every bullet of the task (#92, #96). */
 export async function generateFreeTalk(task: string, ports: SpeakContentPorts = {}): Promise<string> {
   return askWithRetry(
     ports,
     `You are a Chinese college student taking an English speaking test.\nTask: ${task}\n\n` +
-      `Write what you would SAY: a natural first-person spoken answer of 200-230 words (it must take at least 90 seconds to say) ` +
+      `Write what you would SAY: a natural first-person spoken answer of 210-240 words (it must take at least 90 seconds to say) ` +
       `that clearly covers EVERY point in the task, in order, with a short opening sentence, linking words ` +
       `(first, besides, for example, as a result, in short) and a short conclusion. ` +
       `Use short, simple, correct sentences of 8-18 words and common words that are easy to pronounce. ` +

@@ -23,7 +23,7 @@ export function resolveLlmTimeoutMs(env: NodeJS.ProcessEnv = process.env): numbe
   return envNumber(env, "UNIPUS_LLM_TIMEOUT_MS", 180_000, 5_000);
 }
 
-/** max_tokens per LLM request; 300 truncated 200–230-word scripts on non-reasoning models. */
+/** max_tokens per LLM request; 300 truncated 200+-word free-talk scripts on non-reasoning models. */
 export function resolveLlmMaxTokens(env: NodeJS.ProcessEnv = process.env): number {
   return Math.round(envNumber(env, "UNIPUS_LLM_MAX_TOKENS", 1024, 64));
 }
