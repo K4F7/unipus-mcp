@@ -98,7 +98,7 @@ export function createReplyParser() {
   let asr = "";
   let text = "";
   let audio: Buffer[] = [];
-  /** Last closed reply: the server streams its TTS audio after "[end]" (#92). */
+  /** Last closed reply: the server streams its TTS audio after "[end]" (#94). */
   let closed: DialogReply | null = null;
   return {
     pushAudio(chunk: Buffer): void {
