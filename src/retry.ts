@@ -114,6 +114,8 @@ export async function retryWithinBudget<T>(
   let last: Error = new Error("no attempt");
   let attempt = 0;
   while (attempt < attempts) {
+    // A VM suspend during backoff can overshoot the deadline: never start a late attempt.
+    if (attempt > 0 && deadline - now() <= 0) break;
     attempt++;
     const remaining = Math.max(1, deadline - now());
     try {

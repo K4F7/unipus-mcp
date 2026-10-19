@@ -246,24 +246,35 @@ async function partSubmittedOnServer(
   partId: string,
 ): Promise<boolean> {
   try {
-    const body = (await adaptiveGet(
-      ports,
-      `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
-      jwt,
-    )) as Record<string, unknown>;
-    return parsePartList(body?.value ?? body).some(
-      (p) => p.partId === partId && p.submitted === true,
-    );
+    return (await readPartSubmitted(ports, jwt, taskId, ansVersion, partId)) === true;
   } catch {
     return false;
   }
 }
 
+/** part/get: is this part submitted? null when the check is inconclusive (request failed / part missing). */
+async function readPartSubmitted(
+  ports: GrindSpeakPorts,
+  jwt: string,
+  taskId: string,
+  ansVersion: number,
+  partId: string,
+): Promise<boolean | null> {
+  const body = (await adaptiveGet(
+    ports,
+    `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+    jwt,
+  )) as Record<string, unknown>;
+  const part = parsePartList(body?.value ?? body).find((p) => p.partId === partId);
+  return part == null ? null : part.submitted === true;
+}
+
 /**
  * Before re-sending a part after 4021 (#98): the rejected request stored nothing
  * ("请重新加载试卷"), but another session may have moved on. Re-send only while the
- * ledger and getUserStatus still show this exact paper; take a fresh loadPaper
- * token and report whether part/get already has this part submitted.
+ * ledger and getUserStatus still show this exact paper and part/get conclusively
+ * shows the part unsubmitted; only then take a fresh loadPaper token (taking one
+ * earlier would knock out the other session for nothing).
  */
 async function reloadForResubmit(
   ports: GrindSpeakPorts,
@@ -272,7 +283,7 @@ async function reloadForResubmit(
   taskId: string,
   ansVersion: number,
   partId: string,
-): Promise<{ ok: true; token: string; partSubmitted: boolean } | { ok: false; detail: string }> {
+): Promise<{ ok: true; partSubmitted: true } | { ok: true; partSubmitted: false; token: string } | { ok: false; detail: string }> {
   if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
     return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
   }
@@ -282,11 +293,14 @@ async function reloadForResubmit(
     if (now?.type !== "train" || String(now.taskId) !== taskId || Number(now.ansVersion || 1) !== ansVersion) {
       return { ok: false, detail: `当前卷已变为 ${JSON.stringify(now)}（可能已被另一会话交卷）` };
     }
+    const submitted = await readPartSubmitted(ports, jwt, taskId, ansVersion, partId);
+    if (submitted == null) return { ok: false, detail: "part/get 无法确认该 part 状态，保守不重交" };
+    if (submitted) return { ok: true, partSubmitted: true };
     const loadRes = (await adaptivePost(ports, loadPath, jwt, { taskId, ansVersion })) as Record<string, unknown>;
     const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<string, unknown>;
     const token = isOkApiCode(loadRes.code) ? String(data.token || "") : "";
     if (!token) return { ok: false, detail: `重新 loadPaper 失败：${JSON.stringify(loadRes).slice(0, 200)}` };
-    return { ok: true, token, partSubmitted: await partSubmittedOnServer(ports, jwt, taskId, ansVersion, partId) };
+    return { ok: true, partSubmitted: false, token };
   } catch (error) {
     return { ok: false, detail: `复核失败，保守不重交：${toError(error).message}` };
   }
@@ -633,10 +647,8 @@ export async function completeOneSpeak(
       label: `说 ${taskId} ${label}`,
       reload: async () => {
         const fresh = await reloadForResubmit(ports, jwt, loadPath, taskId, ansVersion, part.partId);
-        if (fresh.ok) {
-          paperToken = fresh.token;
-          serverHasPart = fresh.partSubmitted;
-        }
+        if (fresh.ok && fresh.partSubmitted) serverHasPart = true;
+        else if (fresh.ok) paperToken = fresh.token;
         return fresh;
       },
       // The part landed meanwhile (part/get) → never send it twice.

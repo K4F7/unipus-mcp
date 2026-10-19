@@ -125,6 +125,20 @@ describe("retryWithinBudget (#98)", () => {
     assert.deepEqual(seen, [10_000, 5000]);
   });
 
+  test("no new attempt once a (suspended) backoff overshot the deadline", async () => {
+    const { retryWithinBudget } = await import("../src/retry.js");
+    const clock = fakeClock();
+    let n = 0;
+    await assert.rejects(
+      retryWithinBudget(async () => { n++; throw new Error("boom"); }, {
+        label: "t", budgetMs: 10_000, baseDelayMs: 1000,
+        now: clock.now, sleep: async () => clock.advance(60_000), log: () => {},
+      }),
+      /t：1 次均失败.*boom/,
+    );
+    assert.equal(n, 1);
+  });
+
   test("fatal errors are rethrown unchanged without retry", async () => {
     const { retryWithinBudget } = await import("../src/retry.js");
     class Fatal extends Error {}

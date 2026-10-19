@@ -941,6 +941,21 @@ describe("speak part/submit 4021 (#98)", () => {
     assert.equal(r.ok, true, (r as { detail?: string }).detail);
     const p1 = submitCalls(http).map((c) => JSON.parse(String(c.body))).filter((b) => b.partId === "p1");
     assert.equal(p1.length, 1);
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 1, "no fresh token taken when nothing is re-sent");
+  });
+
+  test("4021 and part/get inconclusive → conservatively not re-sent, no fresh token", async () => {
+    let gets = 0;
+    const inner = scenario({ submit: () => busy });
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("part/get") && ++gets > 1) return { statusCode: 500, body: "oops" };
+      return inner.request(call);
+    });
+    const { r } = await runWith(http);
+    assert.equal(r.ok, false);
+    assert.match((r as { detail: string }).detail, /4021 后不重交/);
+    assert.equal(submitCalls(http).length, 1);
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 1);
   });
 
   test("4021 and the server moved to another paper → nothing re-sent, paper fails with the reason", async () => {
