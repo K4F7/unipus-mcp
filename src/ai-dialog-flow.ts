@@ -98,29 +98,34 @@ export function createReplyParser() {
   let asr = "";
   let text = "";
   let audio: Buffer[] = [];
+  /** Last closed reply: the server streams its TTS audio after "[end]" (#94). */
+  let closed: DialogReply | null = null;
   return {
     pushAudio(chunk: Buffer): void {
-      audio.push(chunk);
+      if (closed) closed.audio = closed.audio ? Buffer.concat([closed.audio, chunk]) : chunk;
+      else audio.push(chunk);
     },
     push(frame: string): DialogReply | null {
       const f = frame.replace(/\s+$/, "");
-      if (f.startsWith("[+]ASR:")) {
-        asr = f.slice(7).trim();
-        return null;
-      }
       if (f === "[end]") {
         const out: DialogReply = { asr, text: text.trim().replace(/\s+/g, " ") };
         if (audio.length) out.audio = Buffer.concat(audio);
         asr = "";
         text = "";
         audio = [];
+        closed = out;
         return out;
       }
-      text += frame;
+      closed = null;
+      if (f.startsWith("[+]ASR:")) asr = f.slice(7).trim();
+      else text += frame;
       return null;
     },
   };
 }
+
+/** Trailing AI audio counts as finished after this much silence (never more than half the no-data timeout). */
+const AUDIO_QUIET_MS = 1500;
 
 /** Server AI audio is raw 16 kHz mono s16 PCM (App wraps it the same way before upload). */
 export function pcmToWav(pcm: Buffer, sampleRate = 16000): Buffer {
@@ -170,7 +175,7 @@ export function openOralDialogSocket(o: {
   token: string;
   /** Test-only endpoint override. */
   url?: string;
-}, timeoutMs = resolveOralWsTimeoutMs()): DialogSocket {
+}, timeoutMs = resolveOralWsTimeoutMs(), audioQuietMs = Math.min(AUDIO_QUIET_MS, timeoutMs / 2)): DialogSocket {
   const url = o.url ??
     `wss://oral.unipus.cn/oral_api/ws//${encodeURIComponent(o.conversationId)}` +
     `?scene_id=${encodeURIComponent(o.sceneId)}&language=en-uspeak&tts_gender=female&tts_speed=normal&token=${encodeURIComponent(o.token)}`;
@@ -183,21 +188,38 @@ export function openOralDialogSocket(o: {
   const waiters: Array<{ ok: (r: DialogReply) => void; fail: (e: Error) => void; touch: () => void }> = [];
   let failed: Error | null = null;
   const fail = (e: Error) => {
+    deliver(); // a complete reply still counts even if the socket drops during its trailing audio
     failed = e;
     while (waiters.length) waiters.shift()!.fail(e);
+  };
+  // A closed reply waits until its trailing audio has been quiet for audioQuietMs (or the next reply starts).
+  let held: { reply: DialogReply; timer: ReturnType<typeof setTimeout> } | null = null;
+  const deliver = () => {
+    if (!held) return;
+    clearTimeout(held.timer);
+    const r = held.reply;
+    held = null;
+    const w = waiters.shift();
+    if (w) w.ok(r);
+    else queue.push(r);
+  };
+  const hold = (reply: DialogReply) => {
+    held = { reply, timer: setTimeout(deliver, audioQuietMs) };
   };
   ws.on("message", (data, isBinary) => {
     // Inactivity timeout: any frame (text chunk or TTS audio) proves the reply is streaming.
     for (const w of waiters) w.touch();
     if (isBinary) {
       parser.pushAudio(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+      if (held) {
+        clearTimeout(held.timer);
+        hold(held.reply);
+      }
       return;
     }
+    deliver();
     const r = parser.push(String(data));
-    if (r == null) return;
-    const w = waiters.shift();
-    if (w) w.ok(r);
-    else queue.push(r);
+    if (r != null) hold(r);
   });
   // Protocol-level ping while the client "thinks" between turns (paced like the App, #92).
   const keepAlive = setInterval(() => {

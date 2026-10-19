@@ -445,6 +445,45 @@ test("oral WS: binary PCM frames of a reply are returned as its audio", async ()
   }
 });
 
+test("createReplyParser: AI audio streamed after [end] belongs to that reply, not the next (#92)", async () => {
+  const { createReplyParser } = await import("../src/ai-dialog-flow.js");
+  const p = createReplyParser();
+  p.push("Hi, what movie do you like?");
+  const opener = p.push("[end]")!;
+  assert.equal(opener.audio, undefined);
+  p.pushAudio(Buffer.from([1, 2]));
+  p.pushAudio(Buffer.from([3]));
+  assert.deepEqual([...(opener.audio ?? [])], [1, 2, 3]);
+  p.push("[+]ASR: I like Coco.");
+  p.push("Nice choice!");
+  p.pushAudio(Buffer.from([9]));
+  const next = p.push("[end]")!;
+  assert.deepEqual([...(next.audio ?? [])], [9]);
+  assert.deepEqual([...(opener.audio ?? [])], [1, 2, 3]);
+});
+
+test("oral WS: a reply is delivered once its trailing audio has gone quiet (#92)", async () => {
+  const { WebSocketServer } = await import("ws");
+  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((r) => wss.on("listening", () => r()));
+  const port = (wss.address() as { port: number }).port;
+  wss.on("connection", (c) => {
+    c.send("Hello there.");
+    c.send("[end]");
+    setTimeout(() => c.send(Buffer.from([1, 2])), 20);
+    setTimeout(() => c.send(Buffer.from([3])), 60);
+  });
+  try {
+    const s = openOralDialogSocket({ conversationId: "c", sceneId: "s", token: "t", url: `ws://127.0.0.1:${port}/x` }, 2000, 150);
+    const r = await s.nextReply();
+    assert.equal(r.text, "Hello there.");
+    assert.deepEqual([...(r.audio ?? [])], [1, 2, 3]);
+    s.close();
+  } finally {
+    wss.close();
+  }
+});
+
 test("pcmToWav: 16 kHz mono s16 RIFF header", async () => {
   const { pcmToWav } = await import("../src/ai-dialog-flow.js");
   const w = pcmToWav(Buffer.alloc(32000));
