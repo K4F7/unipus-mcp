@@ -76,3 +76,60 @@ export async function withRetry<T>(
 
 /** Reject after ms of wall time (#88); underlying work is abandoned (caller should clean up). */
 export { withWallTimeout as withTimeout };
+
+export type BudgetRetryOptions = {
+  /** Shown in logs and the final error, e.g. the record tag. */
+  label: string;
+  /** Wall-clock budget for all attempts and backoffs together. */
+  budgetMs: number;
+  /** Attempt cap (default 4). */
+  attempts?: number;
+  /** First backoff; doubles each retry up to maxDelayMs (defaults 3000 / 30000). */
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  /** Errors that must not be retried (rethrown unchanged). */
+  isFatal?: (error: Error) => boolean;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  log?: (line: string) => void;
+};
+
+/**
+ * Bounded retry (#98): every attempt gets only the budget left (a hung attempt is
+ * cut there), retries back off exponentially, and every failure is logged so a
+ * stall leaves evidence. Throws `${label}：N 次均失败…：<last cause>` at the end.
+ */
+export async function retryWithinBudget<T>(
+  fn: (remainingMs: number, attempt: number) => Promise<T>,
+  opts: BudgetRetryOptions,
+): Promise<T> {
+  const attempts = Math.max(1, opts.attempts ?? 4);
+  const base = opts.baseDelayMs ?? 3_000;
+  const max = opts.maxDelayMs ?? 30_000;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? realSleep;
+  const log = opts.log ?? ((line: string) => console.error(line));
+  const start = now();
+  const deadline = start + opts.budgetMs;
+  let last: Error = new Error("no attempt");
+  let attempt = 0;
+  while (attempt < attempts) {
+    attempt++;
+    const remaining = Math.max(1, deadline - now());
+    try {
+      return await withWallTimeout(fn(remaining, attempt), remaining, `${opts.label} 重试总时长上限`);
+    } catch (raw) {
+      last = toError(raw);
+      if (opts.isFatal?.(last)) throw last;
+      const delay = Math.min(max, base * 2 ** (attempt - 1));
+      const retry = attempt < attempts && now() + delay < deadline;
+      log(
+        `[retry] ${opts.label} 第 ${attempt}/${attempts} 次失败（已用 ${now() - start}ms）：${last.message}；` +
+          (retry ? `${delay}ms 后重试` : "不再重试"),
+      );
+      if (!retry) break;
+      await sleep(delay);
+    }
+  }
+  throw new Error(`${opts.label}：${attempt} 次均失败（${now() - start}ms）：${last.message}`, { cause: last });
+}

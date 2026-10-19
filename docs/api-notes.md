@@ -117,7 +117,7 @@ MCP（#23）：`part_submit` + `buildEnPredScoreRecord` / `buildEnPredScoreQuest
 
 - Thin alias：可选覆盖 `taskId`/`ansVersion`，否则 `GET getUserStatusForApp?flowType=speak`（裸 JWT + `u-app-id`）→ 同一 `POST loadPaper`。
 - 返回与 `start_listening_training` 相同（`task_id` / `paper_token` / `instance_ids`）。
-- 勿与打开的 WebView 抢 token（`part/submit` → `4021`）。
+- 勿与打开的 WebView 抢 token（`part/submit` → `4021`）。4021 表示本次提交被拒（“请重新加载试卷”），grind 会等待后复核该卷仍为当前未交卷，再重新 `loadPaper` 取新 token 重交，有限次（#98）。
 - AI对话 / 自由表达专用工具见 #23：`conversation_*` / `part_submit` / `EN_PRED_SCORE` helpers（`docs/mcp.md`）。
 
 ### 交卷后读分 / MCP `load_graded_questions` (#20; 非空样例 #18)

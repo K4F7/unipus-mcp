@@ -850,3 +850,119 @@ describe("#92 speak paper", () => {
     assert.equal(submitCalls(http).length, 0);
   });
 });
+
+describe("grindSpeakGaps per-paper skip + consecutive-failure stop (#98)", () => {
+  const recorder = () => {
+    const lines: Array<Record<string, unknown>> = [];
+    return { lines, report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false };
+  };
+  const gaps = (http: ReturnType<typeof mockHttp>, speechRecord: unknown, need: number, extra: Record<string, unknown> = {}) => {
+    const results = recorder();
+    return grindSpeakGaps({
+      credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord, sleep: async () => {}, appReadyPollTries: 1, results, ...extra,
+    } as never, need).then((r) => ({ r, lines: results.lines }));
+  };
+  const loads = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("loadPaper")).length;
+
+  test("TTS timeout on one paper → recorded and skipped, the next round goes on", async () => {
+    let n = 0;
+    const speech = async (t: string, g: string, type: SpeechRecordType) => {
+      if (++n === 1) throw new Error("speak-111-0：4 次均失败（600000ms）：Clio 评分失败：Clio WSS 超时 (45000ms)");
+      return okSpeech(t, g, type);
+    };
+    const { r, lines } = await gaps(scenario({}), speech, 1);
+    assert.equal(r.completed, 1);
+    assert.deepEqual(lines.map((l) => l.status), ["failed", "ok"]);
+    assert.match(String(lines[0]!.error), /tts\/upload TIMEOUT: .*Clio WSS 超时/);
+    assert.match(String(r.warnings), /跳过/);
+  });
+
+  test("UNIPUS_MAX_CONSECUTIVE_FAILURES papers failing in a row stop the account", async () => {
+    const http = scenario({});
+    const { r, lines } = await gaps(http, async () => { throw new Error("TTS 重试总时长上限 timed out (599999ms)"); }, 3);
+    assert.equal(r.completed, 0);
+    assert.match(String(r.stoppedReason), /连续 2 张失败/);
+    assert.equal(r.errorClass, "TIMEOUT");
+    assert.equal(lines.length, 2);
+    assert.equal(loads(http), 2);
+  });
+
+  test("low App score is recorded and the grind continues (streak still bounded)", async () => {
+    const http = scenario({ history: () => ({ taskId: "555", scoreIsOut: true, score: 74, ansVersion: 1 }) });
+    const { r, lines } = await gaps(http, okSpeech, 3);
+    assert.deepEqual(lines.map((l) => l.status), ["low_score", "low_score"]);
+    assert.match(String(r.stoppedReason), /连续 2 张失败/);
+  });
+
+  test("refusal still stops at once (unchanged)", async () => {
+    const http = scenario({});
+    const { r } = await gaps(http, okSpeech, 3, { llmAsk: async () => { throw new Error("down"); } });
+    assert.equal(r.refused, true);
+    assert.equal(loads(http), 1);
+  });
+
+  test("no jwt → stops at once", async () => {
+    const http = scenario({});
+    const { r } = await gaps(http, okSpeech, 3, { credentials: { getJwt: async () => null } });
+    assert.match(String(r.stoppedReason), /no jwt/);
+    assert.equal(loads(http), 0);
+  });
+});
+
+describe("speak part/submit 4021 (#98)", () => {
+  const busy = { code: 4021, msg: "请勿多设备同时作答，作答数据可能丢失，请重新加载试卷" };
+  const runWith = (http: ReturnType<typeof mockHttp>, env: Record<string, string> = {}) => {
+    const sleeps: number[] = [];
+    return completeOneSpeak({
+      credentials: { getJwt: async () => JWT }, http, env, llmAsk: okAsk, speechRecord: okSpeech,
+      sleep: async (ms: number) => void sleeps.push(ms), appReadyPollTries: 1,
+    }).then((r) => ({ r, sleeps }));
+  };
+
+  test("4021 → wait, same paper still current, fresh loadPaper token, part re-sent", async () => {
+    let n = 0;
+    const http = scenario({ submit: () => (++n === 1 ? busy : { code: 1 }) });
+    const { r, sleeps } = await runWith(http);
+    assert.equal(r.ok, true, (r as { detail?: string }).detail);
+    assert.ok(sleeps.includes(60_000), String(sleeps));
+    assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 2);
+    const p1 = submitCalls(http).map((c) => JSON.parse(String(c.body))).filter((b) => b.partId === "p1");
+    assert.deepEqual(p1.map((b) => b.action), ["snapshot", "snapshot", "submit"]);
+  });
+
+  test("4021 but part/get now shows the part submitted → not re-sent, next part continues", async () => {
+    let n = 0;
+    let p1Done = false;
+    const http = scenario({
+      submit: (b) => { if (b.partId === "p1" && ++n === 1) { p1Done = true; return busy; } return { code: 1 }; },
+      parts: () => twoParts().map((p) => (p.partId === "p1" && p1Done ? { ...p, submitted: true } : p)),
+    });
+    const { r } = await runWith(http);
+    assert.equal(r.ok, true, (r as { detail?: string }).detail);
+    const p1 = submitCalls(http).map((c) => JSON.parse(String(c.body))).filter((b) => b.partId === "p1");
+    assert.equal(p1.length, 1);
+  });
+
+  test("4021 and the server moved to another paper → nothing re-sent, paper fails with the reason", async () => {
+    let status = 0;
+    const inner = scenario({ submit: () => busy });
+    const http = mockHttp(async (call) => {
+      if (call.url.includes("getUserStatus") && ++status > 1) {
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { type: "train", taskId: "777", ansVersion: 1, status: 1 } }) };
+      }
+      return inner.request(call);
+    });
+    const { r } = await runWith(http);
+    assert.equal(r.ok, false);
+    assert.match((r as { detail: string }).detail, /4021.*不重交.*已变/);
+    assert.equal(submitCalls(http).length, 1);
+  });
+
+  test("4021 every time → bounded retries, then the paper fails", async () => {
+    const http = scenario({ submit: () => busy });
+    const { r } = await runWith(http, { UNIPUS_CONCURRENT_RETRIES: "2" });
+    assert.equal(r.ok, false);
+    assert.match((r as { detail: string }).detail, /4021.*已重试 2 次/);
+    assert.equal(submitCalls(http).length, 3);
+  });
+});

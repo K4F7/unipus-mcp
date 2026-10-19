@@ -409,6 +409,23 @@ test("AI dialog: reply without server audio falls back to local TTS for the AI l
   assert.equal(synthCount(), 2);
 });
 
+test("AI dialog: local TTS fallback for the AI line retries with backoff and logs the failure (#98)", async () => {
+  const { ports, events } = appLikePorts([[
+    { asr: "", text: "What happened?" },
+    { asr: "I had a flu.", text: "How long?", audio: pcm(4) },
+  ]], { UNIPUS_AI_TURN_MIN_MS: "0" });
+  let calls = 0;
+  const synth = ports.synthesizeLocalWav;
+  ports.synthesizeLocalWav = async (t: string, wav: string) => {
+    if (++calls <= 2) throw new Error("kokoro crashed");
+    return synth(t, wav);
+  };
+  const r = await runFlow(ports as never, { ...input, userTurns: 1 });
+  assert.equal(r.isError, false, r.message);
+  const backoff = events.filter((e) => e === "sleep:3000" || e === "sleep:6000");
+  assert.deepEqual(backoff, ["sleep:3000", "sleep:6000"], events.join(","));
+});
+
 test("AI dialog: deadline passed between turns → error, no stop, socket closed", async () => {
   const { ports, http, events } = appLikePorts([[
     { asr: "", text: "What happened?", audio: pcm(4) },

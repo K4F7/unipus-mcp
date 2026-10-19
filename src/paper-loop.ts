@@ -1,0 +1,156 @@
+/**
+ * Per-paper failure policy for the listen / speak grind loops (#98).
+ *
+ * A failed or timed-out paper is reported and skipped; the account only stops on
+ * failures nothing later can fix (refusal / no LLM, login or auth) or after
+ * UNIPUS_MAX_CONSECUTIVE_FAILURES papers fail in a row. There is no server-side
+ * "skip" API: an unsubmitted paper stays the current one, so the next round
+ * retries it from a fresh loadPaper — the streak cap keeps that bounded.
+ */
+import { resolveConcurrentRetry, resolveMaxConsecutiveFailures } from "./limits.js";
+import { classifyError, toError, type ErrorClass } from "./retry.js";
+
+/** part/submit / submitAnswer 4021「请勿多设备同时作答」: another session reloaded the paper token. */
+export function isConcurrentAnswerError(message: string | undefined): boolean {
+  return /4021|多设备同时作答/.test(String(message ?? ""));
+}
+
+/** Login / auth failures: every later request would fail the same way. */
+export function isAuthFailure(detail: string, errorClass?: ErrorClass): boolean {
+  return errorClass === "FORBIDDEN" || /no jwt|AUTH_REQUIRED|AUTH_FAILED|\b401\b|JWT 无效|未登录|登录(已)?(过期|失效)/.test(detail);
+}
+
+/** Round cap: the week's need plus at most `need` skipped papers (never below the streak cap). */
+export function defaultMaxRounds(need: number, env?: NodeJS.ProcessEnv): number {
+  return need + Math.max(need, resolveMaxConsecutiveFailures(env));
+}
+
+/** Counts papers failed in a row; `fail` returns the stop reason once the cap is hit. */
+export function createFailureStreak(env?: NodeJS.ProcessEnv) {
+  const max = resolveMaxConsecutiveFailures(env);
+  let reasons: string[] = [];
+  return {
+    fail(detail: string): string | null {
+      reasons.push(detail);
+      return reasons.length >= max ? `连续 ${reasons.length} 张失败，停号：${reasons.join(" | ")}` : null;
+    },
+    ok() {
+      reasons = [];
+    },
+  };
+}
+
+/**
+ * Bounded 4021 handling: wait, let `reload` re-check the paper is still ours and
+ * unsubmitted (it takes a fresh token or says why not to resend), then resend.
+ * `note` explains a final failure for the JSONL ("" when 4021 never happened).
+ */
+export async function retryOnConcurrent<R extends { isError: boolean; message?: string }>(
+  first: R,
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    sleep: (ms: number) => Promise<void>;
+    label: string;
+    reload: () => Promise<{ ok: true } | { ok: false; detail: string }>;
+    resubmit: () => Promise<R>;
+  },
+): Promise<{ result: R; note: string }> {
+  const { retries, waitMs } = resolveConcurrentRetry(opts.env);
+  let result = first;
+  let retried = 0;
+  while (result.isError && isConcurrentAnswerError(result.message) && retried < retries) {
+    retried++;
+    console.error(`[4021] ${opts.label} 多设备作答，${waitMs}ms 后第 ${retried}/${retries} 次重试`);
+    await opts.sleep(waitMs);
+    const fresh = await opts.reload();
+    if (!fresh.ok) return { result, note: `；4021 后不重交：${fresh.detail}` };
+    result = await opts.resubmit();
+  }
+  return { result, note: retried > 0 ? `（4021 已重试 ${retried} 次）` : "" };
+}
+
+/** What one paper round reports back to the loop (listen / speak round results fit). */
+export type PaperRound =
+  | { ok: true; taskId: string }
+  | { ok: false; taskId: string | null; detail: string; refused?: boolean; errorClass?: ErrorClass };
+
+/** A round that threw (e.g. NETWORK) — fails that paper only. */
+export type ThrownRound = { ok: false; taskId: null; detail: string; errorClass: ErrorClass; refused?: undefined };
+
+export type PaperLoopResult = {
+  completed: number;
+  taskIds: string[];
+  stoppedReason?: string;
+  errorClass?: ErrorClass;
+  /** A paper was refused for lack of a valid LLM answer; the account must stop. */
+  refused?: boolean;
+  /** Papers skipped after a failure. */
+  warnings?: string[];
+};
+
+/**
+ * Shared listen / speak grind loop (#98): run papers until `need` are submitted,
+ * report every round, skip a failed paper, stop on refusal / auth failure, after
+ * the failure streak cap, or when the server still shows the same paper after a
+ * successful submit.
+ */
+export async function runPaperLoop<R extends PaperRound>(opts: {
+  skill: "听" | "说";
+  need: number;
+  maxRounds: number;
+  env?: NodeJS.ProcessEnv;
+  /** Current server paper (null when not logged in); compared before / after a submit. */
+  status: () => Promise<Record<string, unknown> | null>;
+  /** Status read after a submit; default `status`. */
+  statusAfter?: () => Promise<Record<string, unknown> | null>;
+  completeOne: () => Promise<R>;
+  report: (r: R | ThrownRound) => Promise<void>;
+  onSubmitted?: (r: Extract<R, { ok: true }>) => void;
+}): Promise<PaperLoopResult> {
+  const taskIds: string[] = [];
+  const warnings: string[] = [];
+  const streak = createFailureStreak(opts.env);
+  let errorClass: ErrorClass | undefined;
+  const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
+    completed: taskIds.length,
+    taskIds,
+    ...(warnings.length ? { warnings } : {}),
+    ...(errorClass ? { errorClass } : {}),
+    ...extra,
+  });
+  for (let round = 1; round <= opts.maxRounds && taskIds.length < opts.need; round++) {
+    let result: R | ThrownRound;
+    let before: Record<string, unknown> | null = null;
+    try {
+      before = await opts.status();
+      result = await opts.completeOne();
+    } catch (error) {
+      const err = toError(error);
+      const cls = classifyError(err);
+      result = { ok: false, taskId: null, detail: `${cls}: ${err.message}`, errorClass: cls };
+    }
+    await opts.report(result).catch(() => {});
+    if (!result.ok) {
+      errorClass ??= result.errorClass;
+      if (result.refused) return done({ stoppedReason: result.detail, refused: true });
+      if (isAuthFailure(result.detail, result.errorClass)) return done({ stoppedReason: result.detail });
+      const stop = streak.fail(result.detail);
+      if (stop) return done({ stoppedReason: stop });
+      warnings.push(`跳过 ${result.taskId ?? "?"}：${result.detail}`);
+      console.error(`[grind] ${opts.skill} 第 ${round} 轮失败，跳过本张继续：${result.detail}`);
+      continue;
+    }
+    streak.ok();
+    taskIds.push(result.taskId);
+    opts.onSubmitted?.(result as Extract<R, { ok: true }>);
+    try {
+      const after = await (opts.statusAfter ?? opts.status)();
+      if (after?.taskId != null && before?.taskId != null && String(after.taskId) === String(before.taskId) && after.status === before.status) {
+        return done({ stoppedReason: "same taskId+status after submit" });
+      }
+    } catch (error) {
+      warnings.push(`交卷后状态检查失败：${toError(error).message}`);
+    }
+  }
+  return done();
+}

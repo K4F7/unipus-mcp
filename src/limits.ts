@@ -48,6 +48,24 @@ export function resolveTtsRetryMaxMs(env: NodeJS.ProcessEnv = process.env): numb
   return envNumber(env, "UNIPUS_TTS_RETRY_MAX_MS", 600_000, 10_000);
 }
 
+/** Cap on one Clio scoring request; Clio needs ≈2.2× the audio length (94 s audio → 215 s, #98). */
+export function resolveClioMaxMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_CLIO_MAX_MS", 360_000, 45_000);
+}
+
+/** Papers failed in a row before the account stops (a single failure only skips that paper, #98). */
+export function resolveMaxConsecutiveFailures(env: NodeJS.ProcessEnv = process.env): number {
+  return Math.round(envNumber(env, "UNIPUS_MAX_CONSECUTIVE_FAILURES", 2, 1, 50));
+}
+
+/** 4021 (another session took the paper token): wait, then retry this many times (#98). */
+export function resolveConcurrentRetry(env: NodeJS.ProcessEnv = process.env): { retries: number; waitMs: number } {
+  return {
+    retries: Math.round(envNumber(env, "UNIPUS_CONCURRENT_RETRIES", 2, 0, 10)),
+    waitMs: envNumber(env, "UNIPUS_CONCURRENT_RETRY_MS", 60_000, 0),
+  };
+}
+
 /** One speak part (answer build or the whole AI dialog) before its part/submit. */
 export function resolvePartMaxMs(env: NodeJS.ProcessEnv = process.env): number {
   return envNumber(env, "UNIPUS_PART_MAX_MS", 900_000, 60_000);
@@ -77,11 +95,13 @@ export function resolveFreeTalkTtsSpeed(env: NodeJS.ProcessEnv = process.env): n
 export function describeLimits(env: NodeJS.ProcessEnv = process.env): string {
   const s = resolveScorePoll(env);
   const r = resolveAiReportPoll(env);
+  const c = resolveConcurrentRetry(env);
   return (
     `App 分轮询 ${s.pollMs}ms/上限 ${s.maxMs}ms；part-report 轮询 ${r.pollMs}ms/上限 ${r.maxMs}ms；` +
     `TTS 重试总 ${resolveTtsRetryMaxMs(env)}ms；单 part ${resolvePartMaxMs(env)}ms；整卷 ${resolvePaperMaxMs(env)}ms；` +
     `AI 每轮 ≥${resolveAiTurnMinMs(env)}ms；自由表达 ≥${resolveFreeTalkMinSec(env)}s 语速 ${resolveFreeTalkTtsSpeed(env)}；` +
-    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}`
+    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}；Clio 单次 ≤${resolveClioMaxMs(env)}ms；` +
+    `连续失败 ${resolveMaxConsecutiveFailures(env)} 张停号；4021 等 ${c.waitMs}ms 重试 ${c.retries} 次`
   );
 }
 

@@ -88,7 +88,7 @@ Speak grind synthesises answer audio locally and silently: unset `UNIPUS_TTS_ENG
 
 stdout is JSONL: one `{"event":"paper",…}` line per paper as soon as it is done (`note`, `skill` 听/说, `taskId`, `ansVersion`, `score`, `scoreIsOut`, `status` = `ok|low_score|grading|failed|skipped_existing`, `error`; speak lines also carry `parts` = per-part `{partId, score, status: ok|pending|failed|error, words?, sec?}` from part-report and `flags` ⊆ `ai_report_missing|free_talk_below_80|free_talk_short`; accounts by note only), then a final `{"event":"summary",…}` line (per-account `note`, masked `account_id` like `139****5678`, `status`, `errors`, `error_class`, `totals`; phone numbers in error text are masked too). Paper lines are appended to `UNIPUS_RESULTS_FILE` (default `~/.config/unipus-mcp/results.jsonl`); a paper already recorded there as submitted is never submitted again. Exit 0 = any account succeeded/skipped, 1 = all targeted accounts errored, 2 = usage / no targets, 3 = stall watchdog (`{"event":"fatal","error_code":"STALL"}` after `UNIPUS_STALL_MINUTES`, default 15, without any log line or stage advance; 0 disables).
 
-Timeouts run on the wall clock so they still fire right after the box VM resumes: `UNIPUS_ORAL_WS_TIMEOUT_MS` (oral WS no-data timeout, default 60000, reset by every frame), `UNIPUS_ORAL_WS_TURN_MAX_MS` (one dialog turn incl. reconnects, default 240000), `UNIPUS_HTTP_TIMEOUT_MS` (default 60000), `UNIPUS_UPLOAD_TIMEOUT_MS`, Clio and ffmpeg (60s hard kill; binary via `UNIPUS_FFMPEG_BIN`).
+Timeouts run on the wall clock so they still fire right after the box VM resumes: `UNIPUS_ORAL_WS_TIMEOUT_MS` (oral WS no-data timeout, default 60000, reset by every frame), `UNIPUS_ORAL_WS_TURN_MAX_MS` (one dialog turn incl. reconnects, default 240000), `UNIPUS_HTTP_TIMEOUT_MS` (default 60000), `UNIPUS_UPLOAD_TIMEOUT_MS`, ffmpeg (60s hard kill; binary via `UNIPUS_FFMPEG_BIN`), and one Clio request (30s + 3× the audio length, 45s up to `UNIPUS_CLIO_MAX_MS`; `UNIPUS_CLIO_TIMEOUT_MS` pins a fixed value).
 
 Speak/listen budgets (#92, all wall clock; `npx tsx scripts/doctor.ts` prints the effective values):
 
@@ -96,7 +96,10 @@ Speak/listen budgets (#92, all wall clock; `npx tsx scripts/doctor.ts` prints th
 |---|---|---|
 | `UNIPUS_SCORE_POLL_MS` / `UNIPUS_SCORE_MAX_MS` | 5000 / 180000 | after submit, poll App history until `scoreIsOut`, then write the final score to the JSONL (listen + speak) |
 | `UNIPUS_AI_REPORT_POLL_MS` / `UNIPUS_AI_REPORT_MAX_MS` | 30000 / 600000 | speak: poll `part-report` for every part; still 500 at the end → `ai_report_missing` (`MAX=0` reads once) |
-| `UNIPUS_TTS_RETRY_MAX_MS` | 600000 | total time for TTS/Clio/upload retries of one recording |
+| `UNIPUS_TTS_RETRY_MAX_MS` | 600000 | total time for TTS/Clio/upload retries of one recording (≤4 attempts, backoff 3s→6s→12s, each failure logged with its stage; the wav is synthesised once) |
+| `UNIPUS_CLIO_MAX_MS` | 360000 | cap on one Clio scoring request (Clio needs ≈2.2× the audio length) |
+| `UNIPUS_MAX_CONSECUTIVE_FAILURES` | 2 | a failed / timed-out paper is written to the JSONL and skipped; this many failures in a row stop the account (refusal, missing LLM config and login/auth failures stop at once) |
+| `UNIPUS_CONCURRENT_RETRIES` / `UNIPUS_CONCURRENT_RETRY_MS` | 2 / 60000 | `4021 请勿多设备同时作答`: wait, confirm the paper is still the current unsubmitted one (ledger, getUserStatus, listen history / speak part/get), reload a fresh token and resend; still 4021 → skip this paper |
 | `UNIPUS_PART_MAX_MS` | 900000 | building the answers of one part |
 | `UNIPUS_PAPER_MAX_MS` | 2400000 | one whole paper; past it no further part is submitted |
 | `UNIPUS_AI_TURN_MIN_MS` | 55000 | AI dialogue pacing: minimum time between saves, like a human turn |
