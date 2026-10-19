@@ -40,6 +40,7 @@ import {
   runAiDialogFlow,
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
+import { defaultMaxRounds, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
 import { markProgress, withWallTimeout } from "./watchdog.js";
@@ -245,16 +246,63 @@ async function partSubmittedOnServer(
   partId: string,
 ): Promise<boolean> {
   try {
-    const body = (await adaptiveGet(
-      ports,
-      `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
-      jwt,
-    )) as Record<string, unknown>;
-    return parsePartList(body?.value ?? body).some(
-      (p) => p.partId === partId && p.submitted === true,
-    );
+    return (await readPartSubmitted(ports, jwt, taskId, ansVersion, partId)) === true;
   } catch {
     return false;
+  }
+}
+
+/** part/get: is this part submitted? null when the check is inconclusive (request failed / part missing). */
+async function readPartSubmitted(
+  ports: GrindSpeakPorts,
+  jwt: string,
+  taskId: string,
+  ansVersion: number,
+  partId: string,
+): Promise<boolean | null> {
+  const body = (await adaptiveGet(
+    ports,
+    `/api/uls/part/get?taskId=${encodeURIComponent(taskId)}&ansVersion=${ansVersion}`,
+    jwt,
+  )) as Record<string, unknown>;
+  const part = parsePartList(body?.value ?? body).find((p) => p.partId === partId);
+  return part == null ? null : part.submitted === true;
+}
+
+/**
+ * Before re-sending a part after 4021 (#98): the rejected request stored nothing
+ * ("请重新加载试卷"), but another session may have moved on. Re-send only while the
+ * ledger and getUserStatus still show this exact paper and part/get conclusively
+ * shows the part unsubmitted; only then take a fresh loadPaper token (taking one
+ * earlier would knock out the other session for nothing).
+ */
+async function reloadForResubmit(
+  ports: GrindSpeakPorts,
+  jwt: string,
+  loadPath: string,
+  taskId: string,
+  ansVersion: number,
+  partId: string,
+): Promise<{ ok: true; partSubmitted: true } | { ok: true; partSubmitted: false; token: string } | { ok: false; detail: string }> {
+  if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
+    return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
+  }
+  try {
+    const statusBody = (await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=speak", jwt)) as Record<string, unknown>;
+    const now = (statusBody?.value as Record<string, unknown> | undefined) ?? null;
+    if (now?.type !== "train" || String(now.taskId) !== taskId || Number(now.ansVersion || 1) !== ansVersion) {
+      return { ok: false, detail: `当前卷已变为 ${JSON.stringify(now)}（可能已被另一会话交卷）` };
+    }
+    const submitted = await readPartSubmitted(ports, jwt, taskId, ansVersion, partId);
+    if (submitted == null) return { ok: false, detail: "part/get 无法确认该 part 状态，保守不重交" };
+    if (submitted) return { ok: true, partSubmitted: true };
+    const loadRes = (await adaptivePost(ports, loadPath, jwt, { taskId, ansVersion })) as Record<string, unknown>;
+    const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<string, unknown>;
+    const token = isOkApiCode(loadRes.code) ? String(data.token || "") : "";
+    if (!token) return { ok: false, detail: `重新 loadPaper 失败：${JSON.stringify(loadRes).slice(0, 200)}` };
+    return { ok: true, partSubmitted: false, token };
+  } catch (error) {
+    return { ok: false, detail: `复核失败，保守不重交：${toError(error).message}` };
   }
 }
 
@@ -403,7 +451,7 @@ export async function completeOneSpeak(
     string,
     unknown
   >;
-  const paperToken = String(data.token || "");
+  let paperToken = String(data.token || "");
   const paper = extractParsedPaperJson(data);
   if (!paperToken || paper == null) {
     return { ok: false, taskId, detail: "missing token/paper" };
@@ -565,32 +613,50 @@ export async function completeOneSpeak(
     /** 4110 + part/get shows the part submitted → the server already closed it (#84). */
     const serverClosed = async (r: { message?: string }) =>
       isAlreadySubmittedError(r.message) && (await partSubmittedOnServer(ports, jwt, taskId, ansVersion, part.partId));
-    // D4: the App submits AI口语对话 once (no snapshot, no instStatus).
-    if (!isAi) {
-      const snap = await submitPart("snapshot", userDataSnap);
-      if (snap.isError) {
-        if (await serverClosed(snap)) {
-          console.error(`[part/submit] ${label} 4110 服务端已交，跳过本 part 续交后续 part`);
-          doneParts.push(`${label}(服务端已交,跳过)`);
-          continue;
+    type PartSend = { isError: false; note: string } | { isError: true; message?: string; detail: string };
+    const sendPart = async (): Promise<PartSend> => {
+      // D4: the App submits AI口语对话 once (no snapshot, no instStatus).
+      if (!isAi) {
+        const snap = await submitPart("snapshot", userDataSnap);
+        if (snap.isError) {
+          if (await serverClosed(snap)) {
+            console.error(`[part/submit] ${label} 4110 服务端已交，跳过本 part 续交后续 part`);
+            return { isError: false, note: `${label}(服务端已交,跳过)` };
+          }
+          return { isError: true, message: snap.message, detail: `part/submit snapshot ${label}: ${snap.code} ${snap.message}` };
         }
-        return { ok: false, taskId, detail: `part/submit snapshot ${label}: ${snap.code} ${snap.message}${doneSuffix()}` };
       }
-    }
-    const sub = await submitPart(
-      "submit",
-      // instStatus=1 marks each instance finished; without it 范例学习 stays processing.
-      userDataSnap.map((u) => ({ ...u, context: { state: "done" as const }, ...(isAi ? {} : { instStatus: 1 }) })),
-    );
-    if (sub.isError) {
-      if (await serverClosed(sub)) {
-        console.error(`[part/submit] ${label} submit 4110 但 part/get 已交，视为已交`);
-        doneParts.push(`${label}(服务端已交)`);
-        continue;
+      const sub = await submitPart(
+        "submit",
+        // instStatus=1 marks each instance finished; without it 范例学习 stays processing.
+        userDataSnap.map((u) => ({ ...u, context: { state: "done" as const }, ...(isAi ? {} : { instStatus: 1 }) })),
+      );
+      if (sub.isError) {
+        if (await serverClosed(sub)) {
+          console.error(`[part/submit] ${label} submit 4110 但 part/get 已交，视为已交`);
+          return { isError: false, note: `${label}(服务端已交)` };
+        }
+        return { isError: true, message: sub.message, detail: `part/submit submit ${label}: ${sub.code} ${sub.message}` };
       }
-      return { ok: false, taskId, detail: `part/submit submit ${label}: ${sub.code} ${sub.message}${doneSuffix()}` };
-    }
-    doneParts.push(part.partName || part.partId);
+      return { isError: false, note: label };
+    };
+    let serverHasPart = false;
+    const out = await retryOnConcurrent(await sendPart(), {
+      env: ports.env,
+      sleep: ports.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+      label: `说 ${taskId} ${label}`,
+      reload: async () => {
+        const fresh = await reloadForResubmit(ports, jwt, loadPath, taskId, ansVersion, part.partId);
+        if (fresh.ok && fresh.partSubmitted) serverHasPart = true;
+        else if (fresh.ok) paperToken = fresh.token;
+        return fresh;
+      },
+      // The part landed meanwhile (part/get) → never send it twice.
+      resubmit: async (): Promise<PartSend> => (serverHasPart ? { isError: false, note: `${label}(4021 后服务端已交)` } : sendPart()),
+    });
+    const sent = out.result;
+    if (sent.isError) return { ok: false, taskId, detail: `${sent.detail}${out.note}${doneSuffix()}` };
+    doneParts.push(sent.note);
   }
 
   const sleep =
@@ -728,106 +794,42 @@ export function speakPaperResult(r: GrindSpeakRoundResult): PaperResult {
   };
 }
 
-export type GrindSpeakGapsResult = {
-  completed: number;
-  taskIds: string[];
+export type GrindSpeakGapsResult = PaperLoopResult & {
   /** App 历史显示分，与 taskIds 对齐 (#63). */
   appScores?: number[];
-  stoppedReason?: string;
-  errorClass?: ErrorClass;
-  /** A paper was refused for lack of a valid LLM answer; the account must stop. */
-  refused?: boolean;
 };
 
+/**
+ * Submit speak papers until `need` completions or the account must stop (see runPaperLoop):
+ * a failed, timed-out, low-score or still-grading paper is reported and skipped (#98).
+ */
 export async function grindSpeakGaps(
   ports: GrindSpeakPorts,
   need: number,
-  // Never cap below the requested count.
-  maxRounds = Math.max(5, need),
+  maxRounds = defaultMaxRounds(need, ports.env),
 ): Promise<GrindSpeakGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
-  const taskIds: string[] = [];
   try {
     if (!ports.llmAsk) resolveLlmAsk(ports.env ?? process.env);
   } catch (error) {
     // No LLM config: refuse before loading any paper.
-    return { completed: 0, taskIds, stoppedReason: toError(error).message, refused: true };
+    return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
   }
-  try {
-    return await grindSpeakLoop(ports, need, maxRounds, taskIds);
-  } catch (error) {
-    // Keep already-submitted tasks in the count even if a later call throws.
-    const err = toError(error);
-    const errorClass = classifyError(err);
-    await ports.results?.report({
-      skill: "说", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
-      status: "failed", error: `${errorClass}: ${err.message}`,
-    }).catch(() => {});
-    return {
-      completed: taskIds.length,
-      taskIds,
-      stoppedReason: `${errorClass}: ${err.message}`,
-      errorClass,
-    };
-  }
-}
-
-async function grindSpeakLoop(
-  ports: GrindSpeakPorts,
-  need: number,
-  maxRounds: number,
-  taskIds: string[],
-): Promise<GrindSpeakGapsResult> {
   const appScores: number[] = [];
-  for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
-    const jwt = await ports.credentials.getJwt();
-    if (!jwt) {
-      return { completed: taskIds.length, taskIds, appScores, stoppedReason: "no jwt" };
-    }
-    const beforeBody = (await adaptiveGet(
-      ports,
-      "/api/uls/user/getUserStatus?flowType=speak",
-      jwt,
-    )) as Record<string, unknown>;
-    const before =
-      (beforeBody?.value as Record<string, unknown> | undefined) ?? null;
-    const beforeTask = before?.taskId != null ? String(before.taskId) : null;
-    const beforeStatus = before?.status;
-
-    const result = await completeOneSpeak(ports);
-    await ports.results?.report(speakPaperResult(result));
-    if (!result.ok) {
-      return {
-        completed: taskIds.length, appScores,
-        taskIds,
-        stoppedReason: result.detail,
-        errorClass: result.errorClass,
-        refused: result.refused,
-      };
-    }
-    taskIds.push(result.taskId);
-    appScores.push(result.appScore ?? 0);
-
-    const afterBody = (await adaptiveGet(
-      ports,
-      "/api/uls/user/getUserStatus?flowType=speak",
-      jwt,
-    )) as Record<string, unknown>;
-    const after =
-      (afterBody?.value as Record<string, unknown> | undefined) ?? null;
-    const afterTask = after?.taskId != null ? String(after.taskId) : null;
-    if (
-      afterTask &&
-      beforeTask &&
-      afterTask === beforeTask &&
-      after?.status === beforeStatus
-    ) {
-      return {
-        completed: taskIds.length, appScores,
-        taskIds,
-        stoppedReason: "same taskId+status after submit",
-      };
-    }
-  }
-  return { completed: taskIds.length, taskIds, appScores };
+  const r = await runPaperLoop({
+    skill: "说",
+    need,
+    maxRounds,
+    env: ports.env,
+    status: async () => {
+      const jwt = await ports.credentials.getJwt();
+      if (!jwt) return null;
+      const body = (await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=speak", jwt)) as Record<string, unknown>;
+      return (body?.value as Record<string, unknown> | undefined) ?? null;
+    },
+    completeOne: () => completeOneSpeak(ports),
+    report: async (round) => { await ports.results?.report(speakPaperResult(round)); },
+    onSubmitted: (round) => appScores.push(round.appScore ?? 0),
+  });
+  return { ...r, appScores };
 }

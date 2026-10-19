@@ -22,6 +22,7 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
+import { defaultMaxRounds, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import {
   buildVocabAnswer,
   buildVoicedAnswer,
@@ -36,7 +37,7 @@ import {
   type FetchText,
   type LlmAsk,
 } from "./choice-solver.js";
-import { classifyError, toError, type ErrorClass } from "./retry.js";
+import { toError, type ErrorClass } from "./retry.js";
 import { findHistoryTrainingTask } from "./history-training-tasks.js";
 import { MIN_APP_SCORE, statusFromScore, type PaperReporter } from "./paper-result.js";
 import { markProgress } from "./watchdog.js";
@@ -77,6 +78,7 @@ export type GrindListenRoundResult =
       skippedExisting?: boolean;
       /** No LLM answer → not submitted. */
       refused?: boolean;
+      errorClass?: ErrorClass;
     };
 
 async function adaptiveGet(
@@ -273,23 +275,9 @@ export async function completeOneListen(
     }
   })();
 
-  const loadRes = (await adaptivePost(ports, loadPath, jwt, {
-    taskId,
-    ansVersion,
-  })) as Record<string, unknown>;
-  if (!isOkApiCode(loadRes.code)) {
-    return {
-      ok: false,
-      taskId,
-      detail: `loadPaper failed: ${JSON.stringify(loadRes).slice(0, 400)}`,
-    };
-  }
-  const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<string, unknown>;
-  const paperToken = String(data.token || "");
-  const paper = extractParsedPaperJson(data);
-  if (!paperToken || paper == null) {
-    return { ok: false, taskId, detail: "missing token or paperJson" };
-  }
+  const loaded = await loadListenPaper(ports, jwt, loadPath, taskId, ansVersion);
+  if (!loaded.ok) return { ok: false, taskId, detail: loaded.detail };
+  const { paper } = loaded;
 
   const leaves = walkPaperLeaves(paper);
   const answers: string[] = [];
@@ -313,7 +301,8 @@ export async function completeOneListen(
     return { ok: false, taskId, detail: finalized.detail };
   }
 
-  const sub = await submitAnswer(ports, {
+  let paperToken = loaded.token;
+  const submit = () => submitAnswer(ports, {
     taskId,
     paperToken,
     ansVersion,
@@ -321,14 +310,79 @@ export async function completeOneListen(
     userData: finalized.userData,
     wrapAudioUrl: false,
   });
+  const out = await retryOnConcurrent(await submit(), {
+    env: ports.env,
+    sleep: ports.sleep ?? defaultSleep,
+    label: `听 ${taskId}`,
+    reload: async () => {
+      const fresh = await reloadForResubmit(ports, jwt, loadPath, taskId, ansVersion, leaves);
+      if (fresh.ok) paperToken = fresh.token;
+      return fresh;
+    },
+    resubmit: submit,
+  });
+  const sub = out.result;
   if (sub.isError) {
-    return {
-      ok: false,
-      taskId,
-      detail: `submit error: ${sub.code} ${sub.message}`,
-    };
+    return { ok: false, taskId, ansVersion, detail: `submit error: ${sub.code} ${sub.message}${out.note}` };
   }
   return { ok: true, taskId, ansVersion };
+}
+
+async function loadListenPaper(
+  ports: GrindListenPorts,
+  jwt: string,
+  loadPath: string,
+  taskId: string,
+  ansVersion: number,
+): Promise<{ ok: true; token: string; paper: unknown } | { ok: false; detail: string }> {
+  const loadRes = (await adaptivePost(ports, loadPath, jwt, { taskId, ansVersion })) as Record<string, unknown>;
+  if (!isOkApiCode(loadRes.code)) {
+    return { ok: false, detail: `loadPaper failed: ${JSON.stringify(loadRes).slice(0, 400)}` };
+  }
+  const data = (loadRes.value ?? loadRes.data ?? loadRes) as Record<string, unknown>;
+  const token = String(data.token || "");
+  const paper = extractParsedPaperJson(data);
+  if (!token || paper == null) return { ok: false, detail: "missing token or paperJson" };
+  return { ok: true, token, paper };
+}
+
+/**
+ * Before resubmitting after 4021 (#98): the 4021 submit was rejected ("请重新加载试卷"),
+ * so it stored nothing — but another session may have submitted meanwhile. Resubmit
+ * only when the ledger, getUserStatus and App history all still show this exact
+ * paper unsubmitted, then take a fresh token (same questions → same answers).
+ */
+async function reloadForResubmit(
+  ports: GrindListenPorts,
+  jwt: string,
+  loadPath: string,
+  taskId: string,
+  ansVersion: number,
+  leaves: GrindLeaf[],
+): Promise<{ ok: true; token: string } | { ok: false; detail: string }> {
+  if (ports.results?.isSubmitted("听", taskId, ansVersion)) {
+    return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
+  }
+  try {
+    const now = statusValue(await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=listen", jwt));
+    if (!isTrainReady(now) || String(now!.taskId) !== taskId || Number(now!.ansVersion || 1) !== ansVersion) {
+      return { ok: false, detail: `当前卷已变为 ${formatListenStatusDetail(now)}（可能已被另一会话交卷）` };
+    }
+    const hist = await findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 3 });
+    if (hist.isError) return { ok: false, detail: `历史查询失败，保守不重交：${hist.message}` };
+    if (hist.task != null && (hist.task.ansVersion == null || hist.task.ansVersion === ansVersion)) {
+      return { ok: false, detail: `历史已有 ${taskId} v${hist.task.ansVersion ?? "?"}（已被交过）` };
+    }
+    const loaded = await loadListenPaper(ports, jwt, loadPath, taskId, ansVersion);
+    if (!loaded.ok) return loaded;
+    const ids = (ls: GrindLeaf[]) => ls.map((l) => l.instanceId).join(",");
+    if (ids(walkPaperLeaves(loaded.paper)) !== ids(leaves)) {
+      return { ok: false, detail: "重新加载的试卷题目与已作答的不一致" };
+    }
+    return { ok: true, token: loaded.token };
+  } catch (error) {
+    return { ok: false, detail: `复核失败，保守不重交：${toError(error).message}` };
+  }
 }
 
 /**
@@ -389,94 +443,40 @@ async function reportListen(ports: GrindListenPorts, r: GrindListenRoundResult):
   });
 }
 
-export type GrindListenGapsResult = {
-  completed: number;
-  taskIds: string[];
-  stoppedReason?: string;
-  errorClass?: ErrorClass;
-  /** A paper was refused for lack of a valid LLM answer; the account must stop. */
-  refused?: boolean;
-};
+export type GrindListenGapsResult = PaperLoopResult;
 
 /**
- * Submit listen papers until `need` completions or blocked.
+ * Submit listen papers until `need` completions or the account must stop (see runPaperLoop).
  * Caller decides need from week progress (listen_total - listen_done).
- * Between papers, completeOneListen polls through train_profile.
  */
 export async function grindListenGaps(
   ports: GrindListenPorts,
   need: number,
-  // Never cap below the week's need (a 12-paper account stopped at 8).
-  maxRounds = Math.max(8, need),
+  maxRounds = defaultMaxRounds(need, ports.env),
 ): Promise<GrindListenGapsResult> {
   if (need <= 0) return { completed: 0, taskIds: [] };
-  const taskIds: string[] = [];
   try {
     resolveAsk(ports);
   } catch (error) {
     // No LLM config: refuse before loading any paper.
-    return { completed: 0, taskIds, stoppedReason: toError(error).message, refused: true };
+    return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
   }
-  for (let round = 1; round <= maxRounds && taskIds.length < need; round++) {
-    // A throw in one round (e.g. NETWORK) keeps earlier completions and its errorClass.
-    try {
-      const before = statusValue(
-        await (async () => {
-          const jwt = await requireJwt(ports);
-          if (!jwt) return null;
-          return adaptiveGet(
-            ports,
-            "/api/uls/user/getUserStatus?flowType=listen",
-            jwt,
-          );
-        })(),
-      );
-      const beforeTask = before?.taskId != null ? String(before.taskId) : null;
-      const beforeStatus = before?.status;
-
-      const result = await completeOneListen(ports);
-      await reportListen(ports, result);
-      if (!result.ok) {
-        return {
-          completed: taskIds.length,
-          taskIds,
-          stoppedReason: result.detail,
-          refused: result.refused,
-        };
-      }
-      taskIds.push(result.taskId);
-
+  const status = async () => {
+    const jwt = await requireJwt(ports);
+    return jwt ? statusValue(await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=listen", jwt)) : null;
+  };
+  return runPaperLoop({
+    skill: "听",
+    need,
+    maxRounds,
+    env: ports.env,
+    status,
+    // Brief wait so post-submit train_profile can flip before the same-task check.
+    statusAfter: async () => {
       const jwt = await requireJwt(ports);
-      if (!jwt) break;
-      // Brief wait so post-submit train_profile can flip before same-task check.
-      const after = (await waitForListenTrain(ports, jwt)).status;
-      const afterTask = after?.taskId != null ? String(after.taskId) : null;
-      if (
-        afterTask &&
-        beforeTask &&
-        afterTask === beforeTask &&
-        after?.status === beforeStatus
-      ) {
-        return {
-          completed: taskIds.length,
-          taskIds,
-          stoppedReason: "same taskId+status after submit",
-        };
-      }
-    } catch (error) {
-      const err = toError(error);
-      const errorClass = classifyError(err);
-      await ports.results?.report({
-        skill: "听", taskId: null, ansVersion: null, score: null, scoreIsOut: null,
-        status: "failed", error: `${errorClass}: ${err.message}`,
-      }).catch(() => {});
-      return {
-        completed: taskIds.length,
-        taskIds,
-        stoppedReason: `${errorClass}: ${err.message}`,
-        errorClass,
-      };
-    }
-  }
-  return { completed: taskIds.length, taskIds };
+      return jwt ? (await waitForListenTrain(ports, jwt)).status : null;
+    },
+    completeOne: () => completeOneListen(ports),
+    report: (r) => reportListen(ports, r),
+  });
 }

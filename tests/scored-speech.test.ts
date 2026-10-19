@@ -55,15 +55,21 @@ describe("scored-speech", () => {
   test("upload failure throws", async () => {
     const b = createScoredSpeechRecordBuilder(ports, deps({
       upload: async () => toolError("UPSTREAM_ERROR", "qiniu down"),
+      retryDelayMs: 1, sleep: async () => {}, log: () => {},
     }));
     await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), /upload fail: qiniu down/);
   });
 });
 
-test("clioTimeoutMs scales with audio length (#78)", async () => {
+test("clioTimeoutMs ≈ 30s + 3×audio s, clamped to [45s, UNIPUS_CLIO_MAX_MS] (#78, #98)", async () => {
   const { clioTimeoutMs } = await import("../src/scored-speech.js");
-  assert.equal(clioTimeoutMs("x", {}, () => 44 + 32000 * 10), 120_000);
-  assert.equal(clioTimeoutMs("x", {}, () => 44 + 32000 * 60), 300_000);
+  const sec = (s: number) => () => 44 + 32000 * s;
+  // Probe: Clio took 3–5s for 3s audio, 41s for 20s, 215s for 94s (≈2.2× audio).
+  assert.equal(clioTimeoutMs("x", {}, sec(3)), 45_000);
+  assert.equal(clioTimeoutMs("x", {}, sec(20)), 90_000);
+  assert.equal(clioTimeoutMs("x", {}, sec(94)), 312_000);
+  assert.equal(clioTimeoutMs("x", {}, sec(200)), 360_000);
+  assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_MAX_MS: "200000" }, sec(94)), 200_000);
   assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_TIMEOUT_MS: "90000" }, () => 0), 90_000);
 });
 
@@ -131,10 +137,65 @@ describe("free-talk duration gate (#92)", () => {
 
 test("voiced record retries stop at UNIPUS_TTS_RETRY_MAX_MS wall budget", async () => {
   let n = 0;
+  let t = 0;
   const b = createScoredSpeechRecordBuilder(
     { ...(ports as object), env: { UNIPUS_TTS_RETRY_MAX_MS: "10000" } } as never,
-    deps({ retryDelayMs: 0, now: (() => { let t = 0; return () => (t += 6000); })(), synthesize: async () => { n++; throw new Error("kokoro boom"); } }),
+    deps({ retryDelayMs: 1000, now: () => t, sleep: async (ms) => void (t += ms), log: () => {}, synthesize: async () => { n++; t += 6000; throw new Error("kokoro boom"); } }),
   );
   await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), /kokoro boom/);
   assert.ok(n < 4, `attempts ${n}`);
+});
+
+describe("voiced record retries (#98)", () => {
+  test("Clio failure → retried with backoff, logged with the stage, audio synthesised once", async () => {
+    let synth = 0;
+    let scored = 0;
+    const sleeps: number[] = [];
+    const logs: string[] = [];
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      retryDelayMs: 3000, sleep: async (ms) => void sleeps.push(ms), log: (l) => logs.push(l),
+      synthesize: async () => { synth++; return { wavPath: "/tmp/x.wav", cleanup: async () => {} }; },
+      score: async () => {
+        if (++scored < 3) throw new Error("Clio WSS 超时 (45000ms)");
+        return { overall: 90, total: 90, audioUrl: CLIO, raw: {}, result: { total: 90, accuracy: 90, completeness: 100, fluency: { overall: 90 }, details: [] } };
+      },
+    }));
+    const rec = await b("hi", "speak-7-0", "EN_SENT_SCORE");
+    assert.equal(rec.url, CDN);
+    assert.equal(synth, 1);
+    assert.equal(scored, 3);
+    assert.deepEqual(sleeps, [3000, 6000]);
+    assert.equal(logs.length, 2);
+    assert.match(logs[0]!, /speak-7-0 第 1\/4 次失败.*Clio 评分失败：Clio WSS 超时/);
+  });
+
+  test("Clio gets min(scaled timeout, remaining budget)", async () => {
+    const timeouts: number[] = [];
+    const b = createScoredSpeechRecordBuilder(
+      { ...(ports as object), env: { UNIPUS_TTS_RETRY_MAX_MS: "20000" } } as never,
+      deps({ score: async (input) => { timeouts.push(input.timeoutMs!); throw new Error("Clio WSS 超时"); }, retryDelayMs: 1, sleep: async () => {}, log: () => {} }),
+    );
+    await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), /Clio 评分失败/);
+    assert.ok(timeouts.length >= 1);
+    assert.ok(timeouts.every((ms) => ms <= 20_000), String(timeouts));
+  });
+
+  test("final error names the failed stage and keeps the TIMEOUT class", async () => {
+    const { classifyError } = await import("../src/retry.js");
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      upload: async () => { throw new Error("The operation was aborted due to timeout (60000ms)"); },
+      retryDelayMs: 1, sleep: async () => {}, log: () => {},
+    }));
+    await assert.rejects(b("hi", "t", "EN_SENT_SCORE"), (e: Error) => /上传失败/.test(e.message) && /4 次均失败/.test(e.message) && classifyError(e) === "TIMEOUT");
+  });
+
+  test("synthesis failure is retried, then the record succeeds", async () => {
+    let synth = 0;
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      retryDelayMs: 1, sleep: async () => {}, log: () => {},
+      synthesize: async () => { if (++synth === 1) throw new Error("kokoro crashed"); return { wavPath: "/tmp/x.wav", cleanup: async () => {} }; },
+    }));
+    assert.equal((await b("hi", "t", "EN_SENT_SCORE")).url, CDN);
+    assert.equal(synth, 2);
+  });
 });
