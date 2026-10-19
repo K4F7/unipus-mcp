@@ -348,8 +348,9 @@ async function loadListenPaper(
 /**
  * Before resubmitting after 4021 (#98): the 4021 submit was rejected ("请重新加载试卷"),
  * so it stored nothing — but another session may have submitted meanwhile. Resubmit
- * only when the ledger, getUserStatus and App history all still show this exact
- * paper unsubmitted, then take a fresh token (same questions → same answers).
+ * only when getUserStatus and App history both still show this exact paper
+ * unsubmitted, then take a fresh token (same questions → same answers). The server
+ * decides, not the ledger: a stale ledger row was already overruled (#100).
  */
 async function reloadForResubmit(
   ports: GrindListenPorts,
@@ -359,9 +360,6 @@ async function reloadForResubmit(
   ansVersion: number,
   leaves: GrindLeaf[],
 ): Promise<{ ok: true; token: string } | { ok: false; detail: string }> {
-  if (ports.results?.isSubmitted("听", taskId, ansVersion)) {
-    return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
-  }
   try {
     const now = statusValue(await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=listen", jwt));
     if (!isTrainReady(now) || String(now!.taskId) !== taskId || Number(now!.ansVersion || 1) !== ansVersion) {

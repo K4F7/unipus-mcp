@@ -120,7 +120,10 @@ test("installProcessStallWatchdog: writes count as progress; stall exits EXIT_ST
 test("createStallClock: active time excludes a process freeze, keeps normal time (#100)", () => {
   let t = 1_000_000;
   const logs: string[] = [];
-  const clock = createStallClock({ now: () => t, thresholdMs: 15_000, tickMs: 1000, log: (l) => logs.push(l) });
+  // The log re-reads the clock, like installProcessStallWatchdog's stderr hook does.
+  const clock: ReturnType<typeof createStallClock> = createStallClock({
+    now: () => t, thresholdMs: 15_000, tickMs: 1000, log: (l) => (logs.push(l), clock.now()),
+  });
   try {
     const a0 = clock.now();
     t += 10_000; // slow but alive: counts
@@ -129,6 +132,7 @@ test("createStallClock: active time excludes a process freeze, keeps normal time
     assert.equal(clock.now() - a0, 10_000 + 1000, "freeze counted as one tick");
     assert.equal(clock.stalledMs(), 899_000);
     assert.match(logs.join("\n"), /冻结约 900s/);
+    assert.equal(logs.length, 1);
     t += 5000;
     assert.equal(clock.now() - a0, 16_000);
   } finally {

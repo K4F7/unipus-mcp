@@ -45,11 +45,12 @@ export function createStallClock(opts: {
   const observe = () => {
     const t = wall();
     const gap = t - last;
+    // Move the heartbeat first: the log goes through the stall watchdog's stderr hook, which reads this clock again.
+    last = t;
     if (gap > thresholdMs) {
       stalled += gap - tickMs;
       log(`[stall] 进程冻结约 ${Math.round(gap / 1000)}s（VM 暂停/宿主卡顿/事件循环阻塞），超时与预算不计这段`);
     }
-    last = t;
     return t;
   };
   const timer = setInterval(observe, tickMs);

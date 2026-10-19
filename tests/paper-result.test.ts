@@ -110,3 +110,21 @@ test("repeated failures of the same paper are all written; only submitted outcom
   const lines = (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l).status);
   assert.deepEqual(lines, ["failed", "failed", "ok"]);
 });
+
+test("ledger identity is a salted account key: same / missing notes never share rows, legacy rows still count (#100)", async () => {
+  const file = await tmpFile();
+  const a = await createPaperReporter({ note: null, accountId: "acct-a", file, print: () => {} });
+  const printed: string[] = [];
+  const b = await createPaperReporter({ note: null, accountId: "acct-b", file, print: (l) => printed.push(l) });
+  await a.report(ok);
+  assert.equal(b.isSubmitted("说", ok.taskId!, 1), false, "both are (无备注) but different accounts");
+  assert.equal((await createPaperReporter({ note: "renamed", accountId: "acct-a", file, print: () => {} })).isSubmitted("说", ok.taskId!, 1), true);
+  await b.report({ ...ok, taskId: "200000000000000002" });
+  const line = JSON.parse(printed[0]!);
+  assert.match(line.account, /^[0-9a-f]{16}$/);
+  assert.doesNotMatch(printed[0]!, /acct-b/);
+  // a row written before #100 has no account key: it still counts for the same note
+  await writeFile(file, `${JSON.stringify({ event: "paper", note: "hjs", ...ok, taskId: "300000000000000003" })}\n`, { flag: "a" });
+  const hjs = await createPaperReporter({ note: "hjs", accountId: "acct-h", file, print: () => {} });
+  assert.equal(hjs.isSubmitted("说", "300000000000000003", 1), true);
+});

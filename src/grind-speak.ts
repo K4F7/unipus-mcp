@@ -273,8 +273,8 @@ async function readPartSubmitted(
 
 /**
  * Before re-sending a part after 4021 (#98): the rejected request stored nothing
- * ("请重新加载试卷"), but another session may have moved on. Re-send only while the
- * ledger and getUserStatus still show this exact paper and part/get conclusively
+ * ("请重新加载试卷"), but another session may have moved on. Re-send only while
+ * getUserStatus still shows this exact paper and part/get conclusively
  * shows the part unsubmitted; only then take a fresh loadPaper token (taking one
  * earlier would knock out the other session for nothing).
  */
@@ -286,9 +286,6 @@ async function reloadForResubmit(
   ansVersion: number,
   partId: string,
 ): Promise<{ ok: true; partSubmitted: true } | { ok: true; partSubmitted: false; token: string } | { ok: false; detail: string }> {
-  if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
-    return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
-  }
   try {
     const statusBody = (await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=speak", jwt)) as Record<string, unknown>;
     const now = (statusBody?.value as Record<string, unknown> | undefined) ?? null;

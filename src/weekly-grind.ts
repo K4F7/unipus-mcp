@@ -132,7 +132,7 @@ export type WeeklyGrindPorts = AccountFs & {
    * Per-account result reporter (#88): one JSON line per paper on stdout + JSONL
    * status file. CLI passes createPaperReporter; omitted → no per-paper lines.
    */
-  resultsFor?: (note: string | null) => Promise<PaperReporter>;
+  resultsFor?: (note: string | null, accountId: string) => Promise<PaperReporter>;
 };
 
 type SideResult = {
@@ -650,7 +650,7 @@ export async function grindOneAccount(
     credentials,
     http,
     env: ports.env,
-    results: ports.resultsFor ? await ports.resultsFor(base.note) : undefined,
+    results: ports.resultsFor ? await ports.resultsFor(base.note, base.account_id) : undefined,
     llmAsk,
   };
 

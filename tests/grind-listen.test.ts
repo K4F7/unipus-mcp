@@ -332,6 +332,16 @@ describe("grind-listen 4021 (#98)", () => {
     assert.deepEqual(tokens, ["tok1", "tok2"]);
   });
 
+  test("stale ledger row (App history lacks the paper) does not block the 4021 resubmit (#100)", async () => {
+    let n = 0;
+    const h = serverHttp({ submit: () => (++n === 1 ? busy : { code: 1 }) });
+    const { r } = await grind(h, 1, {
+      results: { report: async () => {}, isSubmitted: () => true },
+    });
+    assert.equal(r.completed, 1);
+    assert.equal(calls(h, "submitAnswer"), 2);
+  });
+
   test("4021 every time → UNIPUS_CONCURRENT_RETRIES retries, then only this paper is skipped", async () => {
     const h = serverHttp({ submit: () => busy });
     const { r, lines } = await grind(h, 1, { env: { UNIPUS_CONCURRENT_RETRIES: "1", UNIPUS_CONCURRENT_RETRY_MS: "5000" } });
