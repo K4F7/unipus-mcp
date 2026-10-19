@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createFailureStreak, defaultMaxRounds, isAuthFailure, isConcurrentAnswerError } from "../src/paper-loop.js";
+import { createFailureStreak, defaultMaxRounds, isAuthFailure, isConcurrentAnswerError, runPaperLoop } from "../src/paper-loop.js";
 
 test("isAuthFailure: login/auth stops the account; TTS / 4021 / business errors do not (#98)", () => {
   assert.equal(isAuthFailure("no jwt"), true);
@@ -32,4 +32,16 @@ test("failure streak stops at UNIPUS_MAX_CONSECUTIVE_FAILURES and resets on succ
 test("defaultMaxRounds leaves room for skipped papers", () => {
   assert.equal(defaultMaxRounds(12, {}), 24);
   assert.equal(defaultMaxRounds(1, {}), 3);
+});
+
+test("runPaperLoop: a results-file write failure stops the loop (ledger must not be skipped)", async () => {
+  let rounds = 0;
+  const r = await runPaperLoop({
+    skill: "听", need: 3, maxRounds: 6, env: {},
+    status: async () => ({ taskId: String(rounds) }),
+    completeOne: async () => ({ ok: true as const, taskId: String(++rounds) }),
+    report: async () => { throw new Error("ENOSPC"); },
+  });
+  assert.equal(rounds, 1);
+  assert.match(String(r.stoppedReason), /结果写入失败.*ENOSPC/);
 });

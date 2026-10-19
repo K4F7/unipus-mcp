@@ -129,7 +129,12 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       const cls = classifyError(err);
       result = { ok: false, taskId: null, detail: `${cls}: ${err.message}`, errorClass: cls };
     }
-    await opts.report(result).catch(() => {});
+    try {
+      await opts.report(result);
+    } catch (error) {
+      // The JSONL is also the idempotency ledger: never go on without it.
+      return done({ stoppedReason: `结果写入失败，停号：${toError(error).message}` });
+    }
     if (!result.ok) {
       errorClass ??= result.errorClass;
       if (result.refused) return done({ stoppedReason: result.detail, refused: true });
