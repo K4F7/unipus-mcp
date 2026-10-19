@@ -33,6 +33,35 @@ describe("scored-speech", () => {
     assert.deepEqual(rec.specificScores, rec.specific_scores);
   });
 
+  test("a built record logs its TTS / Clio / upload durations (#100)", async () => {
+    let t = 0;
+    const logs: string[] = [];
+    const tick = <T>(ms: number, v: T) => async () => { t += ms; return v; };
+    const base = deps();
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      now: () => t, log: (l) => logs.push(l),
+      synthesize: async (...a) => { t += 1200; return base.synthesize!(...a); },
+      score: async (...a) => { t += 3400; return base.score!(...a); },
+      upload: async (...a) => { t += 800; return base.upload!(...a); },
+      convertToMp3: tick(100, "/tmp/x.mp3"),
+    }));
+    await b("hi", "vocab-1-0", "EN_SENT_SCORE");
+    assert.deepEqual(logs, ["vocab-1-0 用时 TTS 合成 1.2s / Clio 评分 3.4s / mp3 转码 0.1s / 上传 0.8s（共 5.5s）"]);
+  });
+
+  test("the Clio result wait is capped by the enclosing budget (#100)", async () => {
+    const { withDeadline, activeNow } = await import("../src/watchdog.js");
+    const timeouts: number[] = [];
+    const base = deps();
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      log: () => {},
+      score: async (input, p) => { timeouts.push(input.timeoutMs!); return base.score!(input, p); },
+    }));
+    await withDeadline(activeNow() + 20_000, () => b("hi", "t", "EN_SENT_SCORE"));
+    assert.equal(timeouts.length, 1);
+    assert.ok(timeouts[0]! <= 20_000 && timeouts[0]! > 19_000, String(timeouts[0]));
+  });
+
   test("EN_PRED_SCORE keeps the same score blocks", async () => {
     const rec = await createScoredSpeechRecordBuilder(ports, deps())("hi", "t", "EN_PRED_SCORE");
     assert.equal(rec.type, "EN_PRED_SCORE");
@@ -165,8 +194,9 @@ describe("voiced record retries (#98)", () => {
     assert.equal(synth, 1);
     assert.equal(scored, 3);
     assert.deepEqual(sleeps, [3000, 6000]);
-    assert.equal(logs.length, 2);
+    assert.equal(logs.length, 3, "two failures + the success timing line");
     assert.match(logs[0]!, /speak-7-0 第 1\/4 次失败.*Clio 评分失败：Clio WSS 超时/);
+    assert.match(logs[2]!, /speak-7-0 用时 TTS 合成 .*Clio 评分 .*上传 /);
   });
 
   test("Clio gets min(scaled timeout, remaining budget)", async () => {

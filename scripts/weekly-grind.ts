@@ -86,7 +86,7 @@ async function main(): Promise<void> {
     await runWeeklyGrind(parsed.mode, {
       grindOverride: parsed.grindOverride,
       skipPlacement: parsed.skipPlacement,
-      resultsFor: (note) => createPaperReporter({ note }),
+      resultsFor: (note, accountId) => createPaperReporter({ note, accountId }),
     }),
   );
   console.log(JSON.stringify({ event: "summary", ...summary }));

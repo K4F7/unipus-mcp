@@ -75,6 +75,49 @@ describe("retryWithinBudget (#98)", () => {
     return { now: () => t, advance: (ms: number) => void (t += ms), tick: () => (t += step) };
   };
 
+  test("a VM freeze during an attempt does not spend the budget: the next attempt runs (#100)", async () => {
+    const { retryWithinBudget } = await import("../src/retry.js");
+    const { createStallClock } = await import("../src/watchdog.js");
+    let t = 0;
+    const stall = createStallClock({ now: () => t, log: () => {} });
+    const logs: string[] = [];
+    let n = 0;
+    try {
+      const out = await retryWithinBudget(
+        async () => {
+          n++;
+          if (n === 1) {
+            t += 1_033_000; // frozen ~17 min mid-request; socket dead on resume
+            throw new Error("Clio WSS 超时 (45000ms)");
+          }
+          return "ok";
+        },
+        {
+          label: "vocab-3", budgetMs: 600_000, attempts: 4,
+          now: stall.now, sleep: async (ms) => void (t += ms), log: (l) => logs.push(l),
+        },
+      );
+      assert.equal(out, "ok");
+      assert.equal(n, 2);
+      assert.match(logs[0]!, /已用 1000ms.*3000ms 后重试/);
+    } finally {
+      stall.stop();
+    }
+  });
+
+  test("the retry budget is hard-capped by an enclosing part / paper budget (#100)", async () => {
+    const { retryWithinBudget } = await import("../src/retry.js");
+    const { withDeadline } = await import("../src/watchdog.js");
+    const t = 5_000_000;
+    const seen: number[] = [];
+    await withDeadline(t + 120_000, () =>
+      retryWithinBudget(async (remainingMs) => void seen.push(remainingMs), {
+        label: "speak-1", budgetMs: 600_000, now: () => t, log: () => {},
+      }),
+    );
+    assert.deepEqual(seen, [120_000]);
+  });
+
   test("backs off exponentially with a cap and logs every failed attempt", async () => {
     const { retryWithinBudget } = await import("../src/retry.js");
     const clock = fakeClock();

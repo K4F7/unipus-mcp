@@ -1,12 +1,16 @@
 /**
- * Wall-clock timeouts + process stall watchdog (#88).
+ * Wall-clock timeouts + process stall watchdog (#88), freeze-aware (#100).
  *
- * Node timers run on the monotonic clock, which stops while the box VM is
- * suspended: a 60s `setTimeout` was observed firing after 713s–2057s of wall
- * time, and one grind sat silent ~10h on a half-dead TLS socket. Everything here
- * checks `Date.now()` on a short tick, so a deadline fires within one tick of
- * the VM resuming instead of a full timeout later.
+ * The box VM gets paused by its host (dmesg: "virtual machine fork", systemd
+ * "Watchdog timeout (limit 3min)"). While paused nothing runs but the wall clock
+ * keeps going, so on resume every pending deadline is already past: a 45s Clio
+ * timeout fired after 1033s and the retry budget was spent before a second try.
+ * Timers here tick on `activeNow()` — wall time minus detected freezes — so a
+ * freeze neither fires a deadline nor eats a budget, while a live-but-silent
+ * socket still times out on schedule.
  */
+
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export type Clock = { now?: () => number; tickMs?: number };
 
@@ -14,9 +18,86 @@ export type Clock = { now?: () => number; tickMs?: number };
 export const EXIT_STALL = 3;
 export const DEFAULT_STALL_MINUTES = 15;
 
-/** Call `onFire` once `ms` of wall time has passed. Returns cancel (always call it on settle). */
+export type StallClock = {
+  /** Wall time minus every detected freeze (ms, Date.now scale). */
+  now: () => number;
+  /** Total frozen time detected so far. */
+  stalledMs: () => number;
+  stop: () => void;
+};
+
+/**
+ * Detect process freezes: a `tickMs` heartbeat that arrives more than
+ * `thresholdMs` late means the event loop could not run (VM paused / host
+ * starved); that gap, minus one tick, is excluded from `now()`. `now()` checks
+ * the gap itself, so a caller resumed before the heartbeat still sees it.
+ */
+export function createStallClock(opts: {
+  now?: () => number;
+  tickMs?: number;
+  thresholdMs?: number;
+  log?: (line: string) => void;
+} = {}): StallClock {
+  const wall = opts.now ?? Date.now;
+  const tickMs = opts.tickMs ?? 1000;
+  const thresholdMs = opts.thresholdMs ?? 15_000;
+  const log = opts.log ?? ((line: string) => console.error(line));
+  let last = wall();
+  let stalled = 0;
+  const observe = () => {
+    const t = wall();
+    const gap = t - last;
+    // Move the heartbeat first: the log goes through the stall watchdog's stderr hook, which reads this clock again.
+    last = t;
+    if (gap > thresholdMs) {
+      stalled += gap - tickMs;
+      log(`[stall] 进程冻结约 ${Math.round(gap / 1000)}s（VM 暂停/宿主卡顿/事件循环阻塞），超时与预算不计这段`);
+    }
+    return t;
+  };
+  const timer = setInterval(observe, tickMs);
+  timer.unref?.();
+  return {
+    now: () => observe() - stalled,
+    stalledMs: () => (observe(), stalled),
+    stop: () => clearInterval(timer),
+  };
+}
+
+let processClock: StallClock | null = null;
+
+/** Process-wide freeze-aware clock (lazy): the default for every timer and budget. */
+export function activeNow(): number {
+  processClock ??= createStallClock();
+  return processClock.now();
+}
+
+/** Innermost budget deadline (activeNow scale) of the current async call chain. */
+const budgetScope = new AsyncLocalStorage<number>();
+
+/**
+ * Run `fn` under a budget ending at `deadlineAt` (activeNow scale, #100). Nested
+ * scopes keep the tighter deadline, so a part / paper cap bounds every step below
+ * it; steps read it with `capToBudget`.
+ */
+export function withDeadline<T>(deadlineAt: number, fn: () => Promise<T>): Promise<T> {
+  return budgetScope.run(Math.min(deadlineAt, budgetScope.getStore() ?? Infinity), fn);
+}
+
+/** Time left in the current budget scope (Infinity outside any scope). */
+export function remainingBudgetMs(now: () => number = activeNow): number {
+  const deadline = budgetScope.getStore();
+  return deadline == null ? Infinity : Math.max(0, deadline - now());
+}
+
+/** A step timeout hard-capped by the remaining budget (≥1ms). */
+export function capToBudget(ms: number, now?: () => number): number {
+  return Math.max(1, Math.min(ms, remainingBudgetMs(now)));
+}
+
+/** Call `onFire` once `ms` of active time (`activeNow`) has passed. Returns cancel (always call it on settle). */
 export function wallClockTimer(ms: number, onFire: () => void, clock: Clock = {}): () => void {
-  const now = clock.now ?? Date.now;
+  const now = clock.now ?? activeNow;
   const deadline = now() + ms;
   const timer = setInterval(() => {
     if (now() < deadline) return;
@@ -63,13 +144,13 @@ export type StallWatchdog = {
   stop(): void;
 };
 
-/** Fires `onStall` once when no `touch()` happened for `stallMs` wall time. */
+/** Fires `onStall` once when no `touch()` happened for `stallMs` active time (a VM freeze is not a hang). */
 export function createStallWatchdog(
   stallMs: number,
   onStall: (info: { idleMs: number; stage: string }) => void,
   clock: Clock = {},
 ): StallWatchdog {
-  const now = clock.now ?? Date.now;
+  const now = clock.now ?? activeNow;
   let last = now();
   let stage = "start";
   const timer = setInterval(() => {

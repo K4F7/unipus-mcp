@@ -88,3 +88,43 @@ test("unwritable ledger → report throws (run must stop instead of losing idemp
   assert.equal(r.isSubmitted("说", ok.taskId!, 1), false);
   assert.equal(printed.length, 1, "stdout line still printed");
 });
+
+test("ledger is per account: another account's submit of the same shared taskId is not ours (#100)", async () => {
+  const file = await tmpFile();
+  const hjs = await createPaperReporter({ note: "hjs", file, print: () => {} });
+  await hjs.report({ ...ok, skill: "听", taskId: "120539330959117144" });
+  const wb = await createPaperReporter({ note: "wb", file, print: () => {} });
+  assert.equal(wb.isSubmitted("听", "120539330959117144", 1), false);
+  const hjsAgain = await createPaperReporter({ note: "hjs", file, print: () => {} });
+  assert.equal(hjsAgain.isSubmitted("听", "120539330959117144", 1), true);
+});
+
+test("repeated failures of the same paper are all written; only submitted outcomes dedupe (#100)", async () => {
+  const file = await tmpFile();
+  const r = await createPaperReporter({ note: "一个月", file, print: () => {} });
+  const failed: PaperResult = { ...ok, score: null, scoreIsOut: null, status: "failed", error: "Clio WSS 超时" };
+  await r.report(failed);
+  await r.report(failed);
+  await r.report(ok);
+  await r.report(ok);
+  const lines = (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l).status);
+  assert.deepEqual(lines, ["failed", "failed", "ok"]);
+});
+
+test("ledger identity is a salted account key: same / missing notes never share rows, legacy rows still count (#100)", async () => {
+  const file = await tmpFile();
+  const a = await createPaperReporter({ note: null, accountId: "acct-a", file, print: () => {} });
+  const printed: string[] = [];
+  const b = await createPaperReporter({ note: null, accountId: "acct-b", file, print: (l) => printed.push(l) });
+  await a.report(ok);
+  assert.equal(b.isSubmitted("说", ok.taskId!, 1), false, "both are (无备注) but different accounts");
+  assert.equal((await createPaperReporter({ note: "renamed", accountId: "acct-a", file, print: () => {} })).isSubmitted("说", ok.taskId!, 1), true);
+  await b.report({ ...ok, taskId: "200000000000000002" });
+  const line = JSON.parse(printed[0]!);
+  assert.match(line.account, /^[0-9a-f]{16}$/);
+  assert.doesNotMatch(printed[0]!, /acct-b/);
+  // a row written before #100 has no account key: it still counts for the same note
+  await writeFile(file, `${JSON.stringify({ event: "paper", note: "hjs", ...ok, taskId: "300000000000000003" })}\n`, { flag: "a" });
+  const hjs = await createPaperReporter({ note: "hjs", accountId: "acct-h", file, print: () => {} });
+  assert.equal(hjs.isSubmitted("说", "300000000000000003", 1), true);
+});

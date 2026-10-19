@@ -40,10 +40,10 @@ import {
   runAiDialogFlow,
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
-import { defaultMaxRounds, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
+import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
-import { markProgress, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, withDeadline, withWallTimeout } from "./watchdog.js";
 import {
   budgetFromTries,
   pollWithin,
@@ -81,7 +81,7 @@ export type GrindSpeakPorts = AuthPorts & {
   speechRecord?: SpeechRecordBuilder;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
-  /** Test seam for the paper wall cap; default Date.now. */
+  /** Test seam for the paper cap; default activeNow (freezes excluded, #100). */
   clockMs?: () => number;
   /** History scoreIsOut poll after submit; default UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS. */
   appReadyPollMs?: number;
@@ -113,8 +113,10 @@ export type GrindSpeakRoundResult =
       detail: string;
       errorClass?: ErrorClass;
       ansVersion?: number;
-      /** Set when every part was submitted (or the ledger says so) — see paper-result.ts. */
-      outcome?: "low_score" | "grading" | "skipped_existing";
+      /** Set when every part was submitted — see paper-result.ts. */
+      outcome?: "low_score" | "grading";
+      /** Ledger + App history say this paper is already submitted (#100). */
+      skippedExisting?: boolean;
       appScore?: number;
       scoreIsOut?: boolean;
       /** No LLM answer for a part → that part (and everything not yet submitted) refused. */
@@ -271,8 +273,8 @@ async function readPartSubmitted(
 
 /**
  * Before re-sending a part after 4021 (#98): the rejected request stored nothing
- * ("请重新加载试卷"), but another session may have moved on. Re-send only while the
- * ledger and getUserStatus still show this exact paper and part/get conclusively
+ * ("请重新加载试卷"), but another session may have moved on. Re-send only while
+ * getUserStatus still shows this exact paper and part/get conclusively
  * shows the part unsubmitted; only then take a fresh loadPaper token (taking one
  * earlier would knock out the other session for nothing).
  */
@@ -284,9 +286,6 @@ async function reloadForResubmit(
   ansVersion: number,
   partId: string,
 ): Promise<{ ok: true; partSubmitted: true } | { ok: true; partSubmitted: false; token: string } | { ok: false; detail: string }> {
-  if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
-    return { ok: false, detail: `状态文件已记录 ${taskId} v${ansVersion} 已交` };
-  }
   try {
     const statusBody = (await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=speak", jwt)) as Record<string, unknown>;
     const now = (statusBody?.value as Record<string, unknown> | undefined) ?? null;
@@ -413,16 +412,17 @@ export async function completeOneSpeak(
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
   if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
-    return {
-      ok: false,
+    const skip = await ledgerSkipReason(
+      () => findHistoryTrainingTask(ports, { taskId, flowType: "speak", pageSize: 20, maxPages: 5 }),
       taskId,
       ansVersion,
-      outcome: "skipped_existing",
-      detail: `状态文件已记录 ${taskId} v${ansVersion} 已交，跳过不重复交`,
-    };
+    );
+    if (skip != null) {
+      return { ok: false, taskId, ansVersion, skippedExisting: true, detail: skip };
+    }
   }
   markProgress(`speak:load ${taskId}`);
-  const clock = ports.clockMs ?? Date.now;
+  const clock = ports.clockMs ?? activeNow;
   const paperMaxMs = resolvePaperMaxMs(ports.env);
   const partMaxMs = resolvePartMaxMs(ports.env);
   const paperDeadline = clock() + paperMaxMs;
@@ -511,7 +511,8 @@ export async function completeOneSpeak(
       answers.set(
         leaf.instanceId,
         await withWallTimeout(
-          buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta),
+          // Every step below (LLM, TTS, Clio, upload) is capped by this part's remaining budget (#100).
+          withDeadline(partDeadlines.get(part)!, () => buildLeafAnswer(leaf, speech, ask, ports.env, freeTalkMeta)),
           Math.max(1, partDeadlines.get(part)! - clock()),
           `口语答案 ${leaf.name || leaf.instanceId} 单 part / 整卷上限`,
         ),
@@ -558,14 +559,25 @@ export async function completeOneSpeak(
       if (qi == null) {
         return { ok: false, taskId, detail: `AI part ${part.partId} 无 questionInstanceId${doneSuffix()}` };
       }
-      const flow = await runAiDialogFlow({ ...ports, llmAsk: ask }, {
-        taskId,
-        questionId: qi,
-        partId: part.partId,
-        ansVersion,
-        openId,
-        taskText: leafTaskText(byId.get(qi)!),
-        deadlineAt: clock() + Math.min(partMaxMs, paperDeadline - clock()),
+      const deadlineAt = clock() + Math.min(partMaxMs, paperDeadline - clock());
+      // Same hard cap as the other parts: every LLM / TTS / upload / save step inside sees this budget (#100).
+      const flow = await withWallTimeout(
+        withDeadline(deadlineAt, () =>
+          runAiDialogFlow({ ...ports, llmAsk: ask }, {
+            taskId,
+            questionId: qi,
+            partId: part.partId,
+            ansVersion,
+            openId,
+            taskText: leafTaskText(byId.get(qi)!),
+            deadlineAt,
+          }),
+        ),
+        Math.max(1, deadlineAt - clock()),
+        `AI对话 ${part.partName} 单 part / 整卷上限`,
+      ).catch((error: unknown) => {
+        const err = toError(error);
+        return { isError: true, code: classifyError(err), message: err.message, answer: null } as const;
       });
       if (flow.isError || flow.answer == null) {
         return {
@@ -788,7 +800,7 @@ export function speakPaperResult(r: GrindSpeakRoundResult): PaperResult {
     ...base,
     score: r.appScore ?? null,
     scoreIsOut: r.scoreIsOut ?? null,
-    status: r.outcome ?? "failed",
+    status: r.skippedExisting ? "skipped_existing" : (r.outcome ?? "failed"),
     error: r.detail,
     ...report,
   };

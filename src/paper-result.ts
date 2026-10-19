@@ -4,12 +4,14 @@
  * After every paper attempt the grind prints one fixed-shape JSON line on stdout
  * (immediately, not at the end) and appends the same line to a JSONL status file
  * (`UNIPUS_RESULTS_FILE`, default ~/.config/unipus-mcp/results.jsonl). Accounts
- * appear only by note; phone numbers and jwt-shaped strings are redacted.
- * The file doubles as an idempotency ledger: a taskId+ansVersion recorded as
- * submitted (ok / low_score / grading) is never submitted again; if the
+ * appear only by note (+ an opaque salted `account` key); phone numbers and
+ * jwt-shaped strings are redacted. The file doubles as an idempotency ledger:
+ * a taskId+ansVersion this account recorded as submitted (ok / low_score /
+ * grading) is checked against App history before it is answered again; if the
  * file cannot be written, report() throws and the grind stops.
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { createHmac, randomBytes } from "node:crypto";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { defaultConfigDir } from "./accounts.js";
 
@@ -20,6 +22,8 @@ export type PaperResultLine = {
   event: "paper";
   at: string;
   note: string;
+  /** Salted HMAC of the account id (#100): stable ledger identity, not reversible to a phone number. */
+  account?: string;
   skill: PaperSkill;
   taskId: string | null;
   ansVersion: number | null;
@@ -33,11 +37,11 @@ export type PaperResultLine = {
   flags?: string[];
 };
 
-export type PaperResult = Omit<PaperResultLine, "event" | "at" | "note">;
+export type PaperResult = Omit<PaperResultLine, "event" | "at" | "note" | "account">;
 
 export type PaperReporter = {
   report(result: PaperResult): Promise<void>;
-  /** True when the ledger already has this paper as fully submitted. */
+  /** True when the ledger has this paper as submitted by this account (taskIds are shared across accounts, #100). */
   isSubmitted(skill: PaperSkill, taskId: string, ansVersion: number): boolean;
 };
 
@@ -61,7 +65,25 @@ export function statusFromScore(scoreIsOut: boolean | null, score: number | null
   return (score ?? 0) >= min ? "ok" : "low_score";
 }
 
-const ledgerKey = (skill: PaperSkill, taskId: string, ansVersion: number) => `${skill}|${taskId}|${ansVersion}`;
+/**
+ * One JSONL holds every account and taskIds are shared papers (#100): rows key by
+ * the salted account key; rows written before it existed fall back to the note.
+ */
+const identity = (r: { account?: string; note: string }) => (r.account ? `a:${r.account}` : `n:${r.note}`);
+const ledgerKey = (who: string, skill: PaperSkill, taskId: string, ansVersion: number) =>
+  JSON.stringify([who, skill, taskId, ansVersion]);
+
+/** HMAC of the account id with a per-install random salt kept next to the ledger. */
+async function accountKey(accountId: string, file: string): Promise<string> {
+  const saltFile = join(dirname(file), "results.salt");
+  let salt = await readFile(saltFile, "utf8").catch(() => "");
+  if (!salt) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(saltFile, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 }).catch(() => {});
+    salt = await readFile(saltFile, "utf8");
+  }
+  return createHmac("sha256", salt.trim()).update(accountId).digest("hex").slice(0, 16);
+}
 
 async function readLedger(file: string): Promise<PaperResultLine[]> {
   let text: string;
@@ -84,6 +106,8 @@ async function readLedger(file: string): Promise<PaperResultLine[]> {
 
 export async function createPaperReporter(opts: {
   note: string | null | undefined;
+  /** Stable account id (never written; only its salted key is). */
+  accountId?: string;
   env?: NodeJS.ProcessEnv;
   /** Default resolveResultsFile(env). */
   file?: string;
@@ -95,29 +119,35 @@ export async function createPaperReporter(opts: {
   const note = redactSecrets(opts.note?.trim() || "(无备注)");
   const print = opts.print ?? ((line: string) => void process.stdout.write(`${line}\n`));
   const now = opts.now ?? (() => new Date());
+  const account = opts.accountId ? await accountKey(opts.accountId, file) : undefined;
+  // Ours: rows with our account key, plus pre-#100 rows (no key) under our note.
+  const mine = [identity({ account, note }), identity({ note })];
   const submitted = new Set<string>();
   const seen = new Set<string>();
+  const outcomeKey = (r: PaperResultLine) =>
+    JSON.stringify([identity(r), r.skill, r.taskId, r.ansVersion, r.status, r.score, r.scoreIsOut]);
   const remember = (r: PaperResultLine) => {
-    seen.add(JSON.stringify([r.note, r.skill, r.taskId, r.ansVersion, r.status, r.score, r.scoreIsOut]));
-    if (r.taskId != null && SUBMITTED.has(r.status)) submitted.add(ledgerKey(r.skill, r.taskId, r.ansVersion ?? 1));
+    if (r.taskId == null || !SUBMITTED.has(r.status)) return;
+    seen.add(outcomeKey(r));
+    submitted.add(ledgerKey(identity(r), r.skill, r.taskId, r.ansVersion ?? 1));
   };
   for (const r of await readLedger(file)) remember(r);
 
   return {
-    isSubmitted: (skill, taskId, ansVersion) => submitted.has(ledgerKey(skill, taskId, ansVersion)),
+    isSubmitted: (skill, taskId, ansVersion) => mine.some((who) => submitted.has(ledgerKey(who, skill, taskId, ansVersion))),
     async report(result) {
       const line: PaperResultLine = {
         event: "paper",
         at: now().toISOString(),
         note,
+        ...(account ? { account } : {}),
         ...result,
         error: result.error == null ? null : redactSecrets(result.error).slice(0, 500),
       };
       const json = JSON.stringify(line);
       print(json);
-      const dupKey = JSON.stringify([line.note, line.skill, line.taskId, line.ansVersion, line.status, line.score, line.scoreIsOut]);
-      // Re-runs that reach the same outcome reuse the existing ledger row.
-      if (seen.has(dupKey) && line.taskId != null) return;
+      // A re-run reaching the same submitted outcome reuses its row; every failure is its own event.
+      if (seen.has(outcomeKey(line))) return;
       try {
         await mkdir(dirname(file), { recursive: true });
         await appendFile(file, `${json}\n`);

@@ -2,7 +2,7 @@ import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 
 import WebSocket from "ws";
-import { wallClockTimer } from "./watchdog.js";
+import { capToBudget, wallClockTimer } from "./watchdog.js";
 
 import {
   DEFAULT_CLIO_APPLICATION_ID,
@@ -116,10 +116,12 @@ export async function scoreEnSent(
     };
   const wssUrl = input.wssUrl?.trim() || resolveClioWssUrl(env);
   const userId = input.userId?.trim() || "unipus-mcp";
-  const timeoutMs =
+  // The result wait is hard-capped by the enclosing budget (#100).
+  const timeoutMs = capToBudget(
     input.timeoutMs != null && Number.isFinite(input.timeoutMs)
       ? Math.max(1_000, Number(input.timeoutMs))
-      : 30_000;
+      : 30_000,
+  );
 
   const nowMs = (ports.nowMs ?? Date.now)();
   const timestamp = clioTimestampFromNowMs(nowMs);
@@ -397,9 +399,20 @@ type ParsedClioMessage =
 export function parseClioScoreMessage(data: unknown): ParsedClioMessage | null {
   const text = messageToString(data);
   if (text == null || text.length === 0) return null;
-  const parsed = JSON.parse(text) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // Clio sends `{"code":1006, "msg":audio overflow}` (unquoted) when it gives up on a long clip (#100).
+    const m = /"code"\s*:\s*(\d+)\s*,\s*"msg"\s*:\s*"?([^"}]*)/.exec(text);
+    if (m) return { kind: "error", message: `Clio 评分失败：code=${m[1]} ${m[2]!.trim()}` };
+    throw new Error(`Clio 返回无法解析：${text.slice(0, 120)}`);
+  }
   const code = parsed.code;
   if (code !== 0 && code !== "0") {
+    if (typeof parsed.msg === "string") {
+      return { kind: "error", message: `Clio 评分失败：code=${String(code)} ${parsed.msg}` };
+    }
     if (
       parsed.finalResult == null &&
       parsed.message == null &&

@@ -12,6 +12,7 @@ import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 import { resolveClioMaxMs, resolveTtsRetryMaxMs } from "./limits.js";
 import { retryWithinBudget, toError } from "./retry.js";
+import { activeNow } from "./watchdog.js";
 import { join } from "node:path";
 import { mkdtemp, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -70,7 +71,7 @@ export type ScoredSpeechDeps = {
   convertToMp3?: (wavPath: string) => Promise<string>;
   /** First retry backoff (doubles per retry, capped at 30 s); default 3000. */
   retryDelayMs?: number;
-  /** Wall clock for the retry budget (tests). */
+  /** Clock for the retry budget and step timings; default activeNow (tests inject). */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   /** Per-attempt failure log; default stderr. */
@@ -96,16 +97,27 @@ function isFatalSpeechError(e: Error): boolean {
   return e instanceof SpeechTooShortError || e instanceof AnswerRefusedError || /Clio 未返回有效分数/.test(e.message);
 }
 
-/** Prefix the failing step so the log / JSONL says where a record died (#98). */
-async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
+/** Step name → duration (ms) of one record's latest attempt. */
+type StepTimings = Map<string, number>;
+
+/**
+ * Prefix the failing step so the log / JSONL says where a record died (#98), and
+ * time it so a built record logs where its time went (#100).
+ */
+async function step<T>(timings: StepTimings, now: () => number, name: string, run: () => Promise<T>): Promise<T> {
+  const start = now();
   try {
     return await run();
   } catch (e) {
     const err = toError(e);
     if (isFatalSpeechError(err)) throw err;
     throw new Error(`${name}失败：${err.message}`, { cause: err });
+  } finally {
+    timings.set(name, now() - start);
   }
 }
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 
 export function createScoredSpeechRecordBuilder(
   ports: UploadAnswerAudioPorts,
@@ -115,6 +127,8 @@ export function createScoredSpeechRecordBuilder(
   const score = deps.score ?? scoreEnSent;
   const upload = deps.upload ?? uploadAnswerAudio;
   const convertToMp3 = deps.convertToMp3 ?? ((w) => wavToMp3(w, ports.env));
+  const now = deps.now ?? activeNow;
+  const log = deps.log ?? ((line: string) => console.error(`[speech] ${line}`));
   const synthesizeLongEnough = async (text: string, opts: SpeechOptions = {}) => {
     let spoken = await synthesize({ text, speed: opts.speed, pauseSec: opts.pauseSec }, { env: ports.env });
     if (!opts.minSec) return spoken;
@@ -139,16 +153,23 @@ export function createScoredSpeechRecordBuilder(
   };
   type Spoken = Awaited<ReturnType<typeof synthesizeLongEnough>>;
   /** Clio → mp3 → upload for an already synthesised wav. */
-  const scoreAndUpload = async (spoken: Spoken, text: string, tag: string, type: SpeechRecordType, remainingMs: number) => {
+  const scoreAndUpload = async (
+    timings: StepTimings,
+    spoken: Spoken,
+    text: string,
+    tag: string,
+    type: SpeechRecordType,
+    remainingMs: number,
+  ) => {
     const timeoutMs = Math.min(clioTimeoutMs(spoken.wavPath, ports.env), remainingMs);
-    const scored = await step("Clio 评分", () => score({ transcript: text, wavPath: spoken.wavPath, timeoutMs }, { env: ports.env }));
+    const scored = await step(timings, now, "Clio 评分", () => score({ transcript: text, wavPath: spoken.wavPath, timeoutMs }, { env: ports.env }));
     const reviewScores = mapClioResultToReviewScores(scored.result);
     if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
     // App 2.8.7 uploads mp3 (SOE/Clio path); wav CDN URLs leave 范例学习 processing.
-    const mp3Path = await step("mp3 转码", () => convertToMp3(spoken.wavPath));
+    const mp3Path = await step(timings, now, "mp3 转码", () => convertToMp3(spoken.wavPath));
     let url: string;
     try {
-      url = await step("上传", async () => {
+      url = await step(timings, now, "上传", async () => {
         const up = await upload(ports, { filePath: mp3Path, fileName: `${tag}.mp3` });
         if (up.isError || !("cdn_url" in up) || !up.cdn_url) {
           throw new Error(`upload fail: ${up.message || up.code}`);
@@ -180,22 +201,27 @@ export function createScoredSpeechRecordBuilder(
   // retry within one wall budget with backoff; the wav is synthesised once and reused (#92, #98).
   return async (text, tag, type, opts) => {
     let spoken: Spoken | undefined;
+    const timings: StepTimings = new Map();
+    const start = now();
     try {
-      return await retryWithinBudget(
+      const record = await retryWithinBudget(
         async (remainingMs) => {
-          spoken ??= await step("TTS 合成", () => synthesizeLongEnough(text, opts));
-          return scoreAndUpload(spoken, text, tag, type, remainingMs);
+          spoken ??= await step(timings, now, "TTS 合成", () => synthesizeLongEnough(text, opts));
+          return scoreAndUpload(timings, spoken, text, tag, type, remainingMs);
         },
         {
           label: tag,
           budgetMs: resolveTtsRetryMaxMs(ports.env),
           baseDelayMs: deps.retryDelayMs ?? 3000,
           isFatal: isFatalSpeechError,
-          now: deps.now,
+          now,
           sleep: deps.sleep,
-          log: deps.log ?? ((line) => console.error(`[speech] ${line}`)),
+          log,
         },
       );
+      const parts = [...timings].map(([name, ms]) => `${name} ${seconds(ms)}`).join(" / ");
+      log(`${tag} 用时 ${parts}（共 ${seconds(now() - start)}）`);
+      return record;
     } finally {
       await spoken?.cleanup?.();
     }

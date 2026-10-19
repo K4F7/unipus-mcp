@@ -583,7 +583,26 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
     assert.equal(grading.lines[0]!.scoreIsOut, false);
   });
 
-  test("taskId+ansVersion already in the ledger → skipped_existing, nothing loaded or submitted", async () => {
+  test("ledger hit but App history lacks the paper → answered, not skipped (#100)", async () => {
+    let historyCalls = 0;
+    const http = scenario({ history: () => (historyCalls++ === 0 ? null : { taskId: "555", scoreIsOut: true, score: 90, ansVersion: 1 }) });
+    const results = recorder(["说|555|1"]);
+    const r = await grindSpeakGaps(ports(http, { results }) as never, 1, 1);
+    assert.equal(r.completed, 1);
+    assert.equal(results.lines[0]!.status, "ok");
+  });
+
+  test("every answer step runs inside its part budget: LLM / TTS / Clio / upload see ≤ UNIPUS_PART_MAX_MS left (#100)", async () => {
+    const { remainingBudgetMs } = await import("../src/watchdog.js");
+    const left: number[] = [];
+    const speechRecord = async (t: string, g: string, type: SpeechRecordType) => (left.push(remainingBudgetMs()), okSpeech(t, g, type));
+    const llmAsk = async () => (left.push(remainingBudgetMs()), okAsk());
+    await grindSpeakGaps(ports(scenario({}), { env: { UNIPUS_PART_MAX_MS: "60000" }, speechRecord, llmAsk }) as never, 1, 1);
+    assert.ok(left.length > 0);
+    for (const ms of left) assert.ok(ms > 0 && ms <= 60_000, String(ms));
+  });
+
+  test("taskId+ansVersion already in the ledger and App history → skipped_existing, nothing loaded or submitted", async () => {
     const http = scenario({});
     const results = recorder(["说|555|1"]);
     const r = await grindSpeakGaps(ports(http, { results }) as never, 1, 1);
@@ -765,6 +784,22 @@ describe("#92 speak paper", () => {
     const p1 = subs.filter((x) => x.b.partId === "p1");
     assert.deepEqual(p1.map((x) => x.b.action), ["snapshot", "submit"]);
     assert.equal(p1[1]!.b.userData[0].instStatus, 1);
+  });
+
+  test("AI dialog LLM calls run inside the part budget (#100)", async () => {
+    const { remainingBudgetMs } = await import("../src/watchdog.js");
+    const dialogLeft: number[] = [];
+    const r = await aiRun(aiScenario({ aiReportOut: true }), {
+      env: { UNIPUS_AI_TURN_MIN_MS: "0", UNIPUS_PART_MAX_MS: "60000" },
+      llmAsk: async (p: string) => {
+        if (!/AI just said/.test(p)) return FREE_TALK;
+        dialogLeft.push(remainingBudgetMs());
+        return dialogReply;
+      },
+    });
+    assert.equal(r.ok, true, (r as { detail?: string }).detail);
+    assert.ok(dialogLeft.length > 0);
+    for (const ms of dialogLeft) assert.ok(ms > 0 && ms <= 60_000, String(ms));
   });
 
   test("part-report scores of all three parts land in the result; AI report never out → ai_report_missing", async () => {

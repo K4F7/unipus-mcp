@@ -144,6 +144,11 @@ describe("LLM request budget (#92: reasoning models think ~60s, a 230-word scrip
     assert.equal(resolveLlmMaxTokens({}), 1024);
     assert.equal(resolveLlmTimeoutMs({ UNIPUS_LLM_TIMEOUT_MS: "90000" }), 90_000);
     assert.equal(resolveLlmMaxTokens({ UNIPUS_LLM_MAX_TOKENS: "2048" }), 2048);
+    const { resolveLlmFirstByteMs, resolveLlmIdleMs } = await import("../src/limits.js");
+    assert.equal(resolveLlmFirstByteMs({}), 30_000);
+    assert.equal(resolveLlmIdleMs({}), 60_000);
+    assert.equal(resolveLlmFirstByteMs({ UNIPUS_LLM_FIRST_BYTE_MS: "45000" }), 45_000);
+    assert.equal(resolveLlmIdleMs({ UNIPUS_LLM_IDLE_MS: "junk" }), 60_000);
     const seen: Array<Record<string, unknown>> = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (_u: string, init: { body: string }) => {
@@ -196,4 +201,78 @@ describe("LLM streaming (#92: the grok gateway 504s a non-streamed reply after 6
     const { ask } = await capture(() => new Response(JSON.stringify({ choices: [{ message: { content: "B" } }] }), { headers: { "content-type": "application/json" } }));
     assert.equal(await ask("hi"), "B");
   });
+});
+
+describe("LLM first-byte / idle / total timeouts (#100)", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const delta = (t: string) => enc(`data: {"choices":[{"delta":{"content":"${t}"}}]}\n\n`);
+  const sseResponse = (pull: (c: ReadableStreamDefaultController<Uint8Array>) => void | Promise<void>) =>
+    new Response(new ReadableStream({ pull }), { headers: { "content-type": "text/event-stream" } });
+  const make = async (respond: () => Response, limits: Record<string, number>) => {
+    const { createLlmAsk } = await import("../src/choice-solver.js");
+    return createLlmAsk({ baseUrl: "https://x/v1", model: "m", apiKey: "k", ...limits }, (async () => respond()) as never);
+  };
+  const never = () => new Promise<void>(() => {});
+
+  test("headers but no body byte → 首包超时", async () => {
+    const ask = await make(() => sseResponse(never), { firstByteMs: 30, idleMs: 1000, timeoutMs: 5000 });
+    await assert.rejects(ask("hi"), /LLM 首包超时 \(30ms\)/);
+  });
+
+  test("stream stalls mid-way → 空闲超时 with bytes received", async () => {
+    let n = 0;
+    const ask = await make(() => sseResponse(async (c) => {
+      if (n++ < 2) c.enqueue(delta("a"));
+      else await never();
+    }), { firstByteMs: 1000, idleMs: 40, timeoutMs: 5000 });
+    await assert.rejects(ask("hi"), /LLM 流空闲超时 \(40ms 无数据，已收 \d+ 字节\)/);
+  });
+
+  test("a slow but steady stream is not cut by the idle timer; the total cap still applies", async () => {
+    let n = 0;
+    const steady = await make(() => sseResponse(async (c) => {
+      await new Promise((r) => setTimeout(r, 15));
+      if (n++ < 6) c.enqueue(delta("x"));
+      else c.close();
+    }), { firstByteMs: 1000, idleMs: 60, timeoutMs: 5000 });
+    assert.equal(await steady("hi"), "xxxxxx");
+    const endless = await make(() => sseResponse(async (c) => {
+      await new Promise((r) => setTimeout(r, 10));
+      c.enqueue(delta("y"));
+    }), { firstByteMs: 1000, idleMs: 1000, timeoutMs: 80 });
+    await assert.rejects(endless("hi"), /LLM 总时长超时 \(80ms/);
+  });
+});
+
+describe("LLM limits are hard-capped by the remaining budget (#100)", () => {
+  const enc = (t: string) => new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"${t}"}}]}\n\n`);
+  const sse = (pull: (c: ReadableStreamDefaultController<Uint8Array>) => void | Promise<void>) =>
+    new Response(new ReadableStream({ pull }), { headers: { "content-type": "text/event-stream" } });
+  const never = () => new Promise<void>(() => {});
+  /** Configured limits (60s / 60s / 180s) all far beyond the 100ms budget. */
+  const runInBudget = async (budgetMs: number, respond: () => Response) => {
+    const { createLlmAsk } = await import("../src/choice-solver.js");
+    const { withDeadline, activeNow } = await import("../src/watchdog.js");
+    const ask = createLlmAsk(
+      { baseUrl: "https://x/v1", model: "m", apiKey: "k", firstByteMs: 60_000, idleMs: 60_000, timeoutMs: 180_000 },
+      (async () => respond()) as never,
+    );
+    const t0 = Date.now();
+    const err = (await withDeadline(activeNow() + budgetMs, () => ask("hi")).then(() => null, (e: Error) => e))!;
+    const limit = Number(/超时 \((\d+)ms/.exec(err?.message ?? "")?.[1]);
+    return { err, limit, took: Date.now() - t0 };
+  };
+  const cases: Array<[string, () => Response]> = [
+    ["no first byte", () => sse(never)],
+    ["stalls after the first chunk (idle)", () => { let n = 0; return sse(async (c) => { if (n++ === 0) c.enqueue(enc("a")); else await never(); }); }],
+    ["steady endless stream (total)", () => sse(async (c) => { await new Promise((r) => setTimeout(r, 10)); c.enqueue(enc("y")); })],
+  ];
+  for (const [name, respond] of cases) {
+    test(`${name}: aborted within the budget, reported limit ≤ budget`, async () => {
+      const { err, limit, took } = await runInBudget(100, respond);
+      assert.match(String(err?.message), /^LLM (首包|流空闲|总时长)超时/);
+      assert.ok(limit > 0 && limit <= 100, `limit ${limit}`);
+      assert.ok(took < 3_000, `took ${took}ms`);
+    });
+  }
 });

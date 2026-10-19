@@ -160,12 +160,30 @@ describe("grind-listen per-paper results (#88)", () => {
     assert.match(String(lines[0]!.error), /timeout/);
   });
 
-  test("ledger hit → skipped_existing, no submitAnswer", async () => {
-    const h = withHistory(null);
+  test("ledger hit + App history has it → skipped_existing, nothing loaded or submitted", async () => {
+    const h = withHistory({ ansVersion: 2, score: 100, scoreIsOut: true });
     const { r, lines } = await run(h, ["听|100000000000000001|2"]);
     assert.equal(r.completed, 0);
     assert.equal(lines[0]!.status, "skipped_existing");
-    assert.equal(h.calls.filter((c) => c.url.includes("submitAnswer")).length, 0);
+    assert.match(String(lines[0]!.error), /App 历史都显示/);
+    assert.equal(h.calls.filter((c) => c.url.includes("loadPaper") || c.url.includes("submitAnswer")).length, 0);
+  });
+
+  test("ledger hit but App history lacks the paper → stale ledger, answered once (#100)", async () => {
+    let historyCalls = 0;
+    const base = withHistory(null);
+    const h = mockHttp(async (c) => {
+      if (c.url.includes("getHistoryTrainingTasks") && historyCalls++ > 0) {
+        // after the submit the score shows up
+        const list = [{ taskId: "100000000000000001", ansVersion: 2, score: 96, scoreIsOut: true }];
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { page: 1, pageSize: 20, total: 1, totalPages: 1, list } }) };
+      }
+      return base.request(c as never);
+    });
+    const { r, lines } = await run(h, ["听|100000000000000001|2"]);
+    assert.equal(r.completed, 1);
+    assert.equal(h.calls.filter((c) => c.url.includes("submitAnswer")).length, 1);
+    assert.equal(lines[0]!.status, "ok");
   });
 });
 
@@ -312,6 +330,16 @@ describe("grind-listen 4021 (#98)", () => {
     assert.ok(sleeps.includes(60_000), String(sleeps));
     const tokens = h.calls.filter((c) => c.url.includes("submitAnswer")).map((c) => JSON.parse(c.body!).token);
     assert.deepEqual(tokens, ["tok1", "tok2"]);
+  });
+
+  test("stale ledger row (App history lacks the paper) does not block the 4021 resubmit (#100)", async () => {
+    let n = 0;
+    const h = serverHttp({ submit: () => (++n === 1 ? busy : { code: 1 }) });
+    const { r } = await grind(h, 1, {
+      results: { report: async () => {}, isSubmitted: () => true },
+    });
+    assert.equal(r.completed, 1);
+    assert.equal(calls(h, "submitAnswer"), 2);
   });
 
   test("4021 every time → UNIPUS_CONCURRENT_RETRIES retries, then only this paper is skipped", async () => {

@@ -32,7 +32,7 @@ test("doctor flags missing ffmpeg / tts script and never echoes the LLM key", ()
 test("doctor lists the #92 wall-clock budgets and flags a synth.py without speed/pause support", () => {
   const r = doctorReport({ PATH: "/usr/bin", UNIPUS_AI_REPORT_MAX_MS: "300000" }, "linux", all, () => "#!/py\n# usage: synth.py <engine> <voice> <out.wav> [speed] [sentence_pause_sec]\n");
   const t = r.checks.find((c) => c.name === "timeouts")!.detail;
-  for (const s of ["App 分轮询 5000ms/上限 180000ms", "part-report 轮询 30000ms/上限 300000ms", "TTS 重试总 600000ms", "单 part 900000ms", "整卷 2400000ms", "AI 每轮 ≥55000ms", "自由表达 ≥90s 语速 0.85", "LLM 单次 180000ms/max_tokens 1024", "Clio 单次 ≤360000ms", "连续失败 2 张停号", "4021 等 60000ms 重试 2 次"]) {
+  for (const s of ["App 分轮询 5000ms/上限 180000ms", "part-report 轮询 30000ms/上限 300000ms", "TTS 重试总 600000ms", "单 part 900000ms", "整卷 2400000ms", "AI 每轮 ≥55000ms", "自由表达 ≥90s 语速 0.85", "LLM 单次 180000ms/首包 30000ms/空闲 60000ms/max_tokens 1024", "Clio 单次 ≤360000ms", "连续失败 2 张停号", "4021 等 60000ms 重试 2 次"]) {
     assert.ok(t.includes(s), `${s} in ${t}`);
   }
   assert.equal(tts(r).ok, true);

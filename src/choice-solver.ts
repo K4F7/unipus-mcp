@@ -9,14 +9,14 @@
  * the caller must not submit (Sein: 没答案不要交).
  */
 import { stripHtml } from "./grind-paper.js";
-import { wallClockSignal } from "./watchdog.js";
-import { resolveLlmMaxTokens, resolveLlmTimeoutMs } from "./limits.js";
+import { capToBudget, wallClockSignal, wallClockTimer } from "./watchdog.js";
+import { resolveLlmFirstByteMs, resolveLlmIdleMs, resolveLlmMaxTokens, resolveLlmTimeoutMs } from "./limits.js";
 
 export type LlmAsk = (prompt: string) => Promise<string>;
 
 export type ChoiceSolverConfig = { baseUrl: string; apiKey: string; model: string };
-/** Per-request budget; defaults from UNIPUS_LLM_TIMEOUT_MS / UNIPUS_LLM_MAX_TOKENS. */
-export type LlmRequestLimits = { timeoutMs?: number; maxTokens?: number };
+/** Per-request limits; defaults from UNIPUS_LLM_TIMEOUT_MS / _FIRST_BYTE_MS / _IDLE_MS / _MAX_TOKENS. */
+export type LlmRequestLimits = { timeoutMs?: number; firstByteMs?: number; idleMs?: number; maxTokens?: number };
 
 export type ChoiceQuestion = {
   question: string;
@@ -54,6 +54,8 @@ export function resolveLlmAsk(env: NodeJS.ProcessEnv = process.env): LlmAsk {
   return createLlmAsk({
     ...resolveChoiceSolverConfig(env),
     timeoutMs: resolveLlmTimeoutMs(env),
+    firstByteMs: resolveLlmFirstByteMs(env),
+    idleMs: resolveLlmIdleMs(env),
     maxTokens: resolveLlmMaxTokens(env),
   });
 }
@@ -72,12 +74,35 @@ export async function probeLlm(ask: LlmAsk, attempts = 2): Promise<void> {
   throw new AnswerRefusedError(`LLM 探活失败（${attempts} 次），本账号不登录、不交卷：${last}`);
 }
 
+/**
+ * Streamed chat completion with three limits (#100): no body byte within
+ * `firstByteMs` (dead gateway), a silent stream for `idleMs` (stalled mid-way),
+ * and `timeoutMs` overall, each hard-capped by the enclosing budget
+ * (`withDeadline`). Each error names its stage and the limit actually used.
+ */
 export function createLlmAsk(
   config: ChoiceSolverConfig & LlmRequestLimits,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): LlmAsk {
   return async (prompt) => {
-    const deadline = wallClockSignal(config.timeoutMs ?? resolveLlmTimeoutMs({}));
+    const totalMs = capToBudget(config.timeoutMs ?? resolveLlmTimeoutMs({}));
+    const idleLimitMs = config.idleMs ?? resolveLlmIdleMs({});
+    const ctl = new AbortController();
+    let received = 0;
+    const abort = (message: string) => {
+      const err = new Error(message);
+      err.name = "TimeoutError";
+      ctl.abort(err);
+    };
+    const cancelTotal = wallClockTimer(totalMs, () => abort(`LLM 总时长超时 (${totalMs}ms，已收 ${received} 字节)`));
+    const firstByteMs = capToBudget(config.firstByteMs ?? resolveLlmFirstByteMs({}));
+    let cancelIdle = wallClockTimer(firstByteMs, () => abort(`LLM 首包超时 (${firstByteMs}ms)`));
+    const onBytes = (n: number) => {
+      received += n;
+      cancelIdle();
+      const idleMs = capToBudget(idleLimitMs);
+      cancelIdle = wallClockTimer(idleMs, () => abort(`LLM 流空闲超时 (${idleMs}ms 无数据，已收 ${received} 字节)`));
+    };
     try {
       const res = await fetchImpl(`${config.baseUrl}/chat/completions`, {
         method: "POST",
@@ -93,24 +118,47 @@ export function createLlmAsk(
             { role: "user", content: prompt },
           ],
         }),
-        signal: deadline.signal,
+        signal: ctl.signal,
       });
       if (!res.ok) throw new Error(`llm solver HTTP ${res.status}`);
+      const text = await readBody(res, ctl.signal, onBytes);
       if (!/event-stream/.test(res.headers.get("content-type") ?? "")) {
-        const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const body = JSON.parse(text) as { choices?: Array<{ message?: { content?: string } }> };
         return body.choices?.[0]?.message?.content ?? "";
       }
-      return await readSseContent(res);
+      return sseContent(text);
     } finally {
-      deadline.clear();
+      cancelTotal();
+      cancelIdle();
     }
   };
 }
 
-/** Join `choices[0].delta.content` of an OpenAI-style SSE body. */
-async function readSseContent(res: Response): Promise<string> {
+/** Read the body chunk by chunk (each chunk feeds the idle timer); an abort ends the read with its reason. */
+async function readBody(res: Response, signal: AbortSignal, onBytes: (n: number) => void): Promise<string> {
+  if (res.body == null) return "";
+  const reader = res.body.getReader();
+  const stop = () => void reader.cancel(signal.reason).catch(() => {});
+  signal.addEventListener("abort", stop, { once: true });
+  const decoder = new TextDecoder();
   let out = "";
-  for (const line of (await res.text()).split("\n")) {
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal.aborted) throw signal.reason;
+      if (done) return out + decoder.decode();
+      onBytes(value.byteLength);
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    signal.removeEventListener("abort", stop);
+  }
+}
+
+/** Join `choices[0].delta.content` of an OpenAI-style SSE body. */
+function sseContent(text: string): string {
+  let out = "";
+  for (const line of text.split("\n")) {
     const data = line.startsWith("data:") ? line.slice(5).trim() : "";
     if (!data || data === "[DONE]") continue;
     const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };

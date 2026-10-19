@@ -31,7 +31,7 @@ import {
 } from "./upload-answer-audio.js";
 import { toolError, type ToolResult } from "./result.js";
 import { retryWithinBudget } from "./retry.js";
-import { markProgress, wallClockTimer, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, wallClockTimer, withWallTimeout } from "./watchdog.js";
 import { resolveAiTurnMinMs, resolveTtsRetryMaxMs } from "./limits.js";
 
 const BOT_AVATAR =
@@ -64,7 +64,7 @@ export type AiDialogFlowPorts = AuthPorts &
     llmAsk?: LlmAsk;
     /** Injected for tests; default opens wss://oral.unipus.cn/oral_api/ws//{cid}. */
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
-    /** Test seams (pacing / durations); default setTimeout / Date.now. */
+    /** Test seams (pacing / durations / deadlines); default setTimeout / Date.now (duration, pacing) + activeNow (deadlines). */
     sleep?: (ms: number) => Promise<void>;
     clockMs?: () => number;
   };
@@ -479,7 +479,9 @@ export async function runAiDialogFlow(
   let userTurns = Math.max(1, Math.min(10, input.userTurns ?? 3));
   const role = (input.role ?? "B").trim() || "B";
   const sleep = ports.sleep ?? defaultSleep;
-  const now = ports.clockMs ?? Date.now;
+  // Deadlines / turn budgets skip VM freezes (#100); the server-facing duration and pacing stay on the wall clock.
+  const now = ports.clockMs ?? activeNow;
+  const wallNow = ports.clockMs ?? Date.now;
   const deadlineAt = input.deadlineAt ?? Infinity;
 
   const bizExt = {
@@ -515,9 +517,9 @@ export async function runAiDialogFlow(
       : toolError("BUSINESS_ERROR", "conversation/create 未返回 conversationId");
   }
   const cid = created.conversation_id;
-  const t0 = now();
+  const t0 = wallNow();
   /** D2: App save/submit duration = wall seconds since the conversation was created. */
-  const elapsedSec = () => Math.max(1, Math.round((now() - t0) / 1000));
+  const elapsedSec = () => Math.max(1, Math.round((wallNow() - t0) / 1000));
 
   // App order: create → chat/info → ebcp/speakers → WS → save. Best-effort.
   const info = (await conversationChatInfo(ports, { conversationId: cid, openId })) as { data?: unknown };
@@ -627,7 +629,7 @@ export async function runAiDialogFlow(
     const openerMedia = await botAudioUpload(ports, openerReply, opener, openId, sleep);
     await save({ text: opener, ...openerMedia });
     pushTurn("bot", opener, openerMedia);
-    let lastSaveAt = now();
+    let lastSaveAt = wallNow();
     let lastBot = opener;
     for (let i = 0; i < userTurns; i++) {
       checkDeadline(`turn${i}`);
@@ -640,7 +642,7 @@ export async function runAiDialogFlow(
         const wav = await readFile(spoken.wavPath);
         const url = await uploadWav(ports, spoken.wavPath, `ai-dialog-${Date.now()}.wav`, openId, sleep);
         // D9: a person listens, thinks and holds-to-talk; App saves land 58–72 s apart.
-        const wait = turnMinMs - (now() - lastSaveAt);
+        const wait = turnMinMs - (wallNow() - lastSaveAt);
         if (wait > 0) {
           checkDeadline(`turn${i} 节奏等待`, wait);
           await sleep(wait);
@@ -653,7 +655,7 @@ export async function runAiDialogFlow(
       const botText = reply.text || DEFAULT_BOT_OPENERS[(i + 1) % DEFAULT_BOT_OPENERS.length]!;
       const botMedia = await botAudioUpload(ports, reply, botText, openId, sleep);
       await save({ text: botText, ...botMedia }, user);
-      lastSaveAt = now();
+      lastSaveAt = wallNow();
       pushTurn("cos", user.text, user);
       pushTurn("bot", botText, botMedia);
       lastBot = botText;
