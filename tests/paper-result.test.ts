@@ -88,3 +88,25 @@ test("unwritable ledger → report throws (run must stop instead of losing idemp
   assert.equal(r.isSubmitted("说", ok.taskId!, 1), false);
   assert.equal(printed.length, 1, "stdout line still printed");
 });
+
+test("ledger is per account: another account's submit of the same shared taskId is not ours (#100)", async () => {
+  const file = await tmpFile();
+  const hjs = await createPaperReporter({ note: "hjs", file, print: () => {} });
+  await hjs.report({ ...ok, skill: "听", taskId: "120539330959117144" });
+  const wb = await createPaperReporter({ note: "wb", file, print: () => {} });
+  assert.equal(wb.isSubmitted("听", "120539330959117144", 1), false);
+  const hjsAgain = await createPaperReporter({ note: "hjs", file, print: () => {} });
+  assert.equal(hjsAgain.isSubmitted("听", "120539330959117144", 1), true);
+});
+
+test("repeated failures of the same paper are all written; only submitted outcomes dedupe (#100)", async () => {
+  const file = await tmpFile();
+  const r = await createPaperReporter({ note: "一个月", file, print: () => {} });
+  const failed: PaperResult = { ...ok, score: null, scoreIsOut: null, status: "failed", error: "Clio WSS 超时" };
+  await r.report(failed);
+  await r.report(failed);
+  await r.report(ok);
+  await r.report(ok);
+  const lines = (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l).status);
+  assert.deepEqual(lines, ["failed", "failed", "ok"]);
+});

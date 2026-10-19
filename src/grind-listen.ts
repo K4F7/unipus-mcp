@@ -22,7 +22,7 @@ import {
 import { summarizeHttpErrorBody } from "./http.js";
 import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-json.js";
 import { submitAnswer } from "./submit-answer.js";
-import { defaultMaxRounds, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
+import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import {
   buildVocabAnswer,
   buildVoicedAnswer,
@@ -256,13 +256,12 @@ export async function completeOneListen(
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
   if (ports.results?.isSubmitted("听", taskId, ansVersion)) {
-    return {
-      ok: false,
+    const skip = await ledgerSkipReason(
+      () => findHistoryTrainingTask(ports, { taskId, flowType: "listen", pageSize: 20, maxPages: 5 }),
       taskId,
       ansVersion,
-      skippedExisting: true,
-      detail: `状态文件已记录 ${taskId} v${ansVersion} 已交，跳过不重复交`,
-    };
+    );
+    if (skip != null) return { ok: false, taskId, ansVersion, skippedExisting: true, detail: skip };
   }
   markProgress(`listen:load ${taskId}`);
 

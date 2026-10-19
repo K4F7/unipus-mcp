@@ -583,7 +583,16 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
     assert.equal(grading.lines[0]!.scoreIsOut, false);
   });
 
-  test("taskId+ansVersion already in the ledger → skipped_existing, nothing loaded or submitted", async () => {
+  test("ledger hit but App history lacks the paper → answered, not skipped (#100)", async () => {
+    let historyCalls = 0;
+    const http = scenario({ history: () => (historyCalls++ === 0 ? null : { taskId: "555", scoreIsOut: true, score: 90, ansVersion: 1 }) });
+    const results = recorder(["说|555|1"]);
+    const r = await grindSpeakGaps(ports(http, { results }) as never, 1, 1);
+    assert.equal(r.completed, 1);
+    assert.equal(results.lines[0]!.status, "ok");
+  });
+
+  test("taskId+ansVersion already in the ledger and App history → skipped_existing, nothing loaded or submitted", async () => {
     const http = scenario({});
     const results = recorder(["说|555|1"]);
     const r = await grindSpeakGaps(ports(http, { results }) as never, 1, 1);

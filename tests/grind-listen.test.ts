@@ -160,12 +160,30 @@ describe("grind-listen per-paper results (#88)", () => {
     assert.match(String(lines[0]!.error), /timeout/);
   });
 
-  test("ledger hit → skipped_existing, no submitAnswer", async () => {
-    const h = withHistory(null);
+  test("ledger hit + App history has it → skipped_existing, nothing loaded or submitted", async () => {
+    const h = withHistory({ ansVersion: 2, score: 100, scoreIsOut: true });
     const { r, lines } = await run(h, ["听|100000000000000001|2"]);
     assert.equal(r.completed, 0);
     assert.equal(lines[0]!.status, "skipped_existing");
-    assert.equal(h.calls.filter((c) => c.url.includes("submitAnswer")).length, 0);
+    assert.match(String(lines[0]!.error), /App 历史都显示/);
+    assert.equal(h.calls.filter((c) => c.url.includes("loadPaper") || c.url.includes("submitAnswer")).length, 0);
+  });
+
+  test("ledger hit but App history lacks the paper → stale ledger, answered once (#100)", async () => {
+    let historyCalls = 0;
+    const base = withHistory(null);
+    const h = mockHttp(async (c) => {
+      if (c.url.includes("getHistoryTrainingTasks") && historyCalls++ > 0) {
+        // after the submit the score shows up
+        const list = [{ taskId: "100000000000000001", ansVersion: 2, score: 96, scoreIsOut: true }];
+        return { statusCode: 200, body: JSON.stringify({ code: 1, value: { page: 1, pageSize: 20, total: 1, totalPages: 1, list } }) };
+      }
+      return base.request(c as never);
+    });
+    const { r, lines } = await run(h, ["听|100000000000000001|2"]);
+    assert.equal(r.completed, 1);
+    assert.equal(h.calls.filter((c) => c.url.includes("submitAnswer")).length, 1);
+    assert.equal(lines[0]!.status, "ok");
   });
 });
 

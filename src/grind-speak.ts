@@ -40,10 +40,10 @@ import {
   runAiDialogFlow,
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
-import { defaultMaxRounds, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
+import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import { generateFreeTalk, leafTaskText } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
-import { markProgress, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, withWallTimeout } from "./watchdog.js";
 import {
   budgetFromTries,
   pollWithin,
@@ -81,7 +81,7 @@ export type GrindSpeakPorts = AuthPorts & {
   speechRecord?: SpeechRecordBuilder;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
-  /** Test seam for the paper wall cap; default Date.now. */
+  /** Test seam for the paper cap; default activeNow (freezes excluded, #100). */
   clockMs?: () => number;
   /** History scoreIsOut poll after submit; default UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS. */
   appReadyPollMs?: number;
@@ -113,8 +113,10 @@ export type GrindSpeakRoundResult =
       detail: string;
       errorClass?: ErrorClass;
       ansVersion?: number;
-      /** Set when every part was submitted (or the ledger says so) — see paper-result.ts. */
-      outcome?: "low_score" | "grading" | "skipped_existing";
+      /** Set when every part was submitted — see paper-result.ts. */
+      outcome?: "low_score" | "grading";
+      /** Ledger + App history say this paper is already submitted (#100). */
+      skippedExisting?: boolean;
       appScore?: number;
       scoreIsOut?: boolean;
       /** No LLM answer for a part → that part (and everything not yet submitted) refused. */
@@ -413,16 +415,17 @@ export async function completeOneSpeak(
   const taskId = String(status.taskId);
   const ansVersion = Number(status.ansVersion || 1);
   if (ports.results?.isSubmitted("说", taskId, ansVersion)) {
-    return {
-      ok: false,
+    const skip = await ledgerSkipReason(
+      () => findHistoryTrainingTask(ports, { taskId, flowType: "speak", pageSize: 20, maxPages: 5 }),
       taskId,
       ansVersion,
-      outcome: "skipped_existing",
-      detail: `状态文件已记录 ${taskId} v${ansVersion} 已交，跳过不重复交`,
-    };
+    );
+    if (skip != null) {
+      return { ok: false, taskId, ansVersion, skippedExisting: true, detail: skip };
+    }
   }
   markProgress(`speak:load ${taskId}`);
-  const clock = ports.clockMs ?? Date.now;
+  const clock = ports.clockMs ?? activeNow;
   const paperMaxMs = resolvePaperMaxMs(ports.env);
   const partMaxMs = resolvePartMaxMs(ports.env);
   const paperDeadline = clock() + paperMaxMs;
@@ -788,7 +791,7 @@ export function speakPaperResult(r: GrindSpeakRoundResult): PaperResult {
     ...base,
     score: r.appScore ?? null,
     scoreIsOut: r.scoreIsOut ?? null,
-    status: r.outcome ?? "failed",
+    status: r.skippedExisting ? "skipped_existing" : (r.outcome ?? "failed"),
     error: r.detail,
     ...report,
   };

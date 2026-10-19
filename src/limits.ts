@@ -1,9 +1,11 @@
 /**
- * Wall-clock budgets so no stage can wedge the grind (#92). Defaults follow the
+ * Active-time budgets (wall time minus VM freezes, #100) so no stage can wedge the grind (#92). Defaults follow the
  * App capture (AI turn 58–72 s, score out ≈10–20 s after submit, AI report
  * generated within minutes when it is generated at all). Invalid or too-small
  * env values fall back to the default.
  */
+import { activeNow } from "./watchdog.js";
+
 function envNumber(env: NodeJS.ProcessEnv, name: string, def: number, min: number, max = Infinity): number {
   const raw = env[name]?.trim();
   const n = raw ? Number(raw) : NaN;
@@ -18,9 +20,19 @@ export function budgetFromTries(tries: number, pollMs: number): PollBudget {
   return { pollMs, maxMs: (Math.max(1, tries) - 1) * pollMs };
 }
 
-/** One LLM request (wall clock). Reasoning models (grok-4.5) think ~60s on a free-talk script. */
+/** Total cap of one LLM request. grok-4.5 free-talk scripts take 23–74s end to end (#100 probe). */
 export function resolveLlmTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   return envNumber(env, "UNIPUS_LLM_TIMEOUT_MS", 180_000, 5_000);
+}
+
+/** No response body byte this long after the request → give up (gateway answers in 2–4s, #100). */
+export function resolveLlmFirstByteMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_LLM_FIRST_BYTE_MS", 30_000, 1_000);
+}
+
+/** Streamed body silent this long → stalled (reasoning streams pause up to ~21s, #100). */
+export function resolveLlmIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_LLM_IDLE_MS", 60_000, 1_000);
 }
 
 /** max_tokens per LLM request; 300 truncated 200+-word free-talk scripts on non-reasoning models. */
@@ -100,14 +112,14 @@ export function describeLimits(env: NodeJS.ProcessEnv = process.env): string {
     `App 分轮询 ${s.pollMs}ms/上限 ${s.maxMs}ms；part-report 轮询 ${r.pollMs}ms/上限 ${r.maxMs}ms；` +
     `TTS 重试总 ${resolveTtsRetryMaxMs(env)}ms；单 part ${resolvePartMaxMs(env)}ms；整卷 ${resolvePaperMaxMs(env)}ms；` +
     `AI 每轮 ≥${resolveAiTurnMinMs(env)}ms；自由表达 ≥${resolveFreeTalkMinSec(env)}s 语速 ${resolveFreeTalkTtsSpeed(env)}；` +
-    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}；Clio 单次 ≤${resolveClioMaxMs(env)}ms；` +
+    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/首包 ${resolveLlmFirstByteMs(env)}ms/空闲 ${resolveLlmIdleMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}；Clio 单次 ≤${resolveClioMaxMs(env)}ms；` +
     `连续失败 ${resolveMaxConsecutiveFailures(env)} 张停号；4021 等 ${c.waitMs}ms 重试 ${c.retries} 次`
   );
 }
 
 /**
  * Bounded poll: call `attempt` until it returns a value, at most 1 + maxMs/pollMs
- * times and never past maxMs of wall time (whichever comes first).
+ * times and never past maxMs of active time (whichever comes first).
  */
 export async function pollWithin<T>(
   budget: PollBudget,
@@ -115,7 +127,7 @@ export async function pollWithin<T>(
   opts: { sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
 ): Promise<T | undefined> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const now = opts.now ?? Date.now;
+  const now = opts.now ?? activeNow;
   const start = now();
   const tries = 1 + Math.floor(budget.maxMs / budget.pollMs);
   for (let i = 0; i < tries; i++) {

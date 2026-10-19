@@ -423,3 +423,16 @@ describe("clioToEnSentScoreFields", () => {
     assert.equal(mapped.record.url, "https://birdflock.unipus.cn/ans-prod/u/a.mp3");
   });
 });
+
+test("parseClioScoreMessage: Clio's malformed `audio overflow` frame (94s clip, ~250s) is an error, not a JSON crash (#100)", async () => {
+  const { parseClioScoreMessage } = await import("../src/clio-speech.js");
+  assert.deepEqual(parseClioScoreMessage('{"code":1006, "msg":audio overflow}'), {
+    kind: "error",
+    message: "Clio 评分失败：code=1006 audio overflow",
+  });
+  assert.deepEqual(parseClioScoreMessage('{"code":1006,"msg":"audio overflow"}'), {
+    kind: "error",
+    message: "Clio 评分失败：code=1006 audio overflow",
+  });
+  assert.throws(() => parseClioScoreMessage("garbage"), /Clio 返回无法解析/);
+});

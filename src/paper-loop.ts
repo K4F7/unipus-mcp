@@ -8,6 +8,7 @@
  * retries it from a fresh loadPaper — the streak cap keeps that bounded.
  */
 import { resolveConcurrentRetry, resolveMaxConsecutiveFailures } from "./limits.js";
+import type { FindHistoryTrainingTaskResult } from "./history-training-tasks.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 
 /** part/submit / submitAnswer 4021「请勿多设备同时作答」: another session reloaded the paper token. */
@@ -69,13 +70,56 @@ export async function retryOnConcurrent<R extends { isError: boolean; message?: 
   return { result, note: retried > 0 ? `（4021 已重试 ${retried} 次）` : "" };
 }
 
+/**
+ * The ledger says this account already submitted the current paper (#100); App
+ * history decides. Listed → skip; lookup failed → skip conservatively; not listed
+ * while the server still offers the paper → the ledger row is stale, answer it.
+ * Returns the skip reason, or null to answer.
+ */
+export async function ledgerSkipReason(
+  lookup: () => Promise<FindHistoryTrainingTaskResult>,
+  taskId: string,
+  ansVersion: number,
+): Promise<string | null> {
+  const paper = `${taskId} v${ansVersion}`;
+  const lookupFailed = (why: string) => `状态文件记录 ${paper} 已交，App 历史查询失败，保守跳过：${why}`;
+  let found: FindHistoryTrainingTaskResult;
+  try {
+    found = await lookup();
+  } catch (error) {
+    return lookupFailed(toError(error).message);
+  }
+  if (found.isError) return lookupFailed(found.message);
+  const task = found.task;
+  if (task != null && (task.ansVersion == null || task.ansVersion === ansVersion)) {
+    return `状态文件与 App 历史都显示 ${paper} 已交，跳过不重复交`;
+  }
+  console.error(`[ledger] 状态文件记录 ${paper} 已交，但 App 历史没有这张、服务器仍在出它：按服务器重新作答`);
+  return null;
+}
+
 /** What one paper round reports back to the loop (listen / speak round results fit). */
 export type PaperRound =
   | { ok: true; taskId: string }
-  | { ok: false; taskId: string | null; detail: string; refused?: boolean; errorClass?: ErrorClass };
+  | {
+      ok: false;
+      taskId: string | null;
+      detail: string;
+      refused?: boolean;
+      errorClass?: ErrorClass;
+      /** Already submitted (ledger + App history): skipped, never a failure (#100). */
+      skippedExisting?: boolean;
+    };
 
 /** A round that threw (e.g. NETWORK) — fails that paper only. */
-export type ThrownRound = { ok: false; taskId: null; detail: string; errorClass: ErrorClass; refused?: undefined };
+export type ThrownRound = {
+  ok: false;
+  taskId: null;
+  detail: string;
+  errorClass: ErrorClass;
+  refused?: undefined;
+  skippedExisting?: undefined;
+};
 
 export type PaperLoopResult = {
   completed: number;
@@ -110,6 +154,7 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   const taskIds: string[] = [];
   const warnings: string[] = [];
   const streak = createFailureStreak(opts.env);
+  let lastSkipped: string | null | undefined;
   let errorClass: ErrorClass | undefined;
   const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
     completed: taskIds.length,
@@ -135,6 +180,16 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       // The JSONL is also the idempotency ledger: never go on without it.
       return done({ stoppedReason: `结果写入失败，停号：${toError(error).message}` });
     }
+    if (!result.ok && result.skippedExisting) {
+      // No skip API: the server offers the same submitted paper again, so a repeat ends the skill.
+      if (lastSkipped === result.taskId) {
+        return done({ stoppedReason: `服务器仍在出已交的 ${result.taskId}，停止本项（不计失败）：${result.detail}` });
+      }
+      lastSkipped = result.taskId;
+      warnings.push(`跳过 ${result.taskId ?? "?"}：${result.detail}`);
+      continue;
+    }
+    lastSkipped = undefined;
     if (!result.ok) {
       errorClass ??= result.errorClass;
       if (result.refused) return done({ stoppedReason: result.detail, refused: true });

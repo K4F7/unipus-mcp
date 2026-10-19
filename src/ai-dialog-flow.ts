@@ -31,7 +31,7 @@ import {
 } from "./upload-answer-audio.js";
 import { toolError, type ToolResult } from "./result.js";
 import { retryWithinBudget } from "./retry.js";
-import { markProgress, wallClockTimer, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, wallClockTimer, withWallTimeout } from "./watchdog.js";
 import { resolveAiTurnMinMs, resolveTtsRetryMaxMs } from "./limits.js";
 
 const BOT_AVATAR =
@@ -64,7 +64,7 @@ export type AiDialogFlowPorts = AuthPorts &
     llmAsk?: LlmAsk;
     /** Injected for tests; default opens wss://oral.unipus.cn/oral_api/ws//{cid}. */
     openDialogSocket?: (o: { conversationId: string; sceneId: string; token: string }) => DialogSocket;
-    /** Test seams (pacing / durations); default setTimeout / Date.now. */
+    /** Test seams (pacing / durations); default setTimeout / activeNow. */
     sleep?: (ms: number) => Promise<void>;
     clockMs?: () => number;
   };
@@ -479,7 +479,7 @@ export async function runAiDialogFlow(
   let userTurns = Math.max(1, Math.min(10, input.userTurns ?? 3));
   const role = (input.role ?? "B").trim() || "B";
   const sleep = ports.sleep ?? defaultSleep;
-  const now = ports.clockMs ?? Date.now;
+  const now = ports.clockMs ?? activeNow;
   const deadlineAt = input.deadlineAt ?? Infinity;
 
   const bizExt = {

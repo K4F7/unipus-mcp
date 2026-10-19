@@ -37,7 +37,7 @@ export type PaperResult = Omit<PaperResultLine, "event" | "at" | "note">;
 
 export type PaperReporter = {
   report(result: PaperResult): Promise<void>;
-  /** True when the ledger already has this paper as fully submitted. */
+  /** True when the ledger has this paper as submitted by this account (taskIds are shared across accounts, #100). */
   isSubmitted(skill: PaperSkill, taskId: string, ansVersion: number): boolean;
 };
 
@@ -61,7 +61,9 @@ export function statusFromScore(scoreIsOut: boolean | null, score: number | null
   return (score ?? 0) >= min ? "ok" : "low_score";
 }
 
-const ledgerKey = (skill: PaperSkill, taskId: string, ansVersion: number) => `${skill}|${taskId}|${ansVersion}`;
+/** One JSONL holds every account and taskIds are shared papers: the account note is part of the key (#100). */
+const ledgerKey = (note: string, skill: PaperSkill, taskId: string, ansVersion: number) =>
+  JSON.stringify([note, skill, taskId, ansVersion]);
 
 async function readLedger(file: string): Promise<PaperResultLine[]> {
   let text: string;
@@ -97,14 +99,17 @@ export async function createPaperReporter(opts: {
   const now = opts.now ?? (() => new Date());
   const submitted = new Set<string>();
   const seen = new Set<string>();
+  const outcomeKey = (r: PaperResultLine) =>
+    JSON.stringify([r.note, r.skill, r.taskId, r.ansVersion, r.status, r.score, r.scoreIsOut]);
   const remember = (r: PaperResultLine) => {
-    seen.add(JSON.stringify([r.note, r.skill, r.taskId, r.ansVersion, r.status, r.score, r.scoreIsOut]));
-    if (r.taskId != null && SUBMITTED.has(r.status)) submitted.add(ledgerKey(r.skill, r.taskId, r.ansVersion ?? 1));
+    if (r.taskId == null || !SUBMITTED.has(r.status)) return;
+    seen.add(outcomeKey(r));
+    submitted.add(ledgerKey(r.note, r.skill, r.taskId, r.ansVersion ?? 1));
   };
   for (const r of await readLedger(file)) remember(r);
 
   return {
-    isSubmitted: (skill, taskId, ansVersion) => submitted.has(ledgerKey(skill, taskId, ansVersion)),
+    isSubmitted: (skill, taskId, ansVersion) => submitted.has(ledgerKey(note, skill, taskId, ansVersion)),
     async report(result) {
       const line: PaperResultLine = {
         event: "paper",
@@ -115,9 +120,8 @@ export async function createPaperReporter(opts: {
       };
       const json = JSON.stringify(line);
       print(json);
-      const dupKey = JSON.stringify([line.note, line.skill, line.taskId, line.ansVersion, line.status, line.score, line.scoreIsOut]);
-      // Re-runs that reach the same outcome reuse the existing ledger row.
-      if (seen.has(dupKey) && line.taskId != null) return;
+      // A re-run reaching the same submitted outcome reuses its row; every failure is its own event.
+      if (seen.has(outcomeKey(line))) return;
       try {
         await mkdir(dirname(file), { recursive: true });
         await appendFile(file, `${json}\n`);
