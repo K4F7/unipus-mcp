@@ -786,6 +786,22 @@ describe("#92 speak paper", () => {
     assert.equal(p1[1]!.b.userData[0].instStatus, 1);
   });
 
+  test("AI dialog LLM calls run inside the part budget (#100)", async () => {
+    const { remainingBudgetMs } = await import("../src/watchdog.js");
+    const dialogLeft: number[] = [];
+    const r = await aiRun(aiScenario({ aiReportOut: true }), {
+      env: { UNIPUS_AI_TURN_MIN_MS: "0", UNIPUS_PART_MAX_MS: "60000" },
+      llmAsk: async (p: string) => {
+        if (!/AI just said/.test(p)) return FREE_TALK;
+        dialogLeft.push(remainingBudgetMs());
+        return dialogReply;
+      },
+    });
+    assert.equal(r.ok, true, (r as { detail?: string }).detail);
+    assert.ok(dialogLeft.length > 0);
+    for (const ms of dialogLeft) assert.ok(ms > 0 && ms <= 60_000, String(ms));
+  });
+
   test("part-report scores of all three parts land in the result; AI report never out → ai_report_missing", async () => {
     const lines: Array<Record<string, unknown>> = [];
     const results = { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false };

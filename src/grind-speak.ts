@@ -559,14 +559,25 @@ export async function completeOneSpeak(
       if (qi == null) {
         return { ok: false, taskId, detail: `AI part ${part.partId} 无 questionInstanceId${doneSuffix()}` };
       }
-      const flow = await runAiDialogFlow({ ...ports, llmAsk: ask }, {
-        taskId,
-        questionId: qi,
-        partId: part.partId,
-        ansVersion,
-        openId,
-        taskText: leafTaskText(byId.get(qi)!),
-        deadlineAt: clock() + Math.min(partMaxMs, paperDeadline - clock()),
+      const deadlineAt = clock() + Math.min(partMaxMs, paperDeadline - clock());
+      // Same hard cap as the other parts: every LLM / TTS / upload / save step inside sees this budget (#100).
+      const flow = await withWallTimeout(
+        withDeadline(deadlineAt, () =>
+          runAiDialogFlow({ ...ports, llmAsk: ask }, {
+            taskId,
+            questionId: qi,
+            partId: part.partId,
+            ansVersion,
+            openId,
+            taskText: leafTaskText(byId.get(qi)!),
+            deadlineAt,
+          }),
+        ),
+        Math.max(1, deadlineAt - clock()),
+        `AI对话 ${part.partName} 单 part / 整卷上限`,
+      ).catch((error: unknown) => {
+        const err = toError(error);
+        return { isError: true, code: classifyError(err), message: err.message, answer: null } as const;
       });
       if (flow.isError || flow.answer == null) {
         return {
