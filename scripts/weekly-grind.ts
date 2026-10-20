@@ -10,9 +10,11 @@
  */
 import {
   parseWeeklyGrindArgs,
+  resolveTargetAccounts,
   runWeeklyGrind,
   sanitizeSummaryForStdout,
 } from "../src/weekly-grind.js";
+import { ACCOUNT_LOCKED_EXIT_CODE, AccountLockedError, acquireAccountLocks } from "../src/account-lock.js";
 import { createPaperReporter, redactSecrets } from "../src/paper-result.js";
 import { installProcessStallWatchdog } from "../src/watchdog.js";
 
@@ -61,6 +63,7 @@ Exit codes (stdout ends with the summary line when accounts were resolved):
   2  usage error or no target accounts
   3  stall watchdog: no log line / stage advance for UNIPUS_STALL_MINUTES (default 15; 0 = off)
   4  NETWORK_DOWN: network failures outlasted UNIPUS_NET_WAIT_MAX_MS (default 30 min); re-run to resume
+  5  ACCOUNT_LOCKED: another live weekly-grind already holds this account (lock by salted key, stale pid taken over)
 Network failures (fetch failed / ECONNRESET / TLS / DNS / ETIMEDOUT) wait with backoff (UNIPUS_NET_WAIT_BASE_MS 5s →
   UNIPUS_NET_WAIT_CAP_MS 60s) and retry; they never count toward UNIPUS_MAX_CONSECUTIVE_FAILURES (UNIPUS_NET_RETRIES=5 per skill).
 TTS: unset → macOS say (silent, -o file) / other platforms Kokoro; UNIPUS_TTS_ENGINE=kokoro|piper|say overrides
@@ -82,6 +85,17 @@ async function main(): Promise<void> {
   }
   if (parsed.help) {
     printHelp();
+    return;
+  }
+  // One process per account (#106): concurrent runs on one account → 4021.
+  const targetIds = (await resolveTargetAccounts(parsed.mode)).map((a) => a.account_id);
+  try {
+    await acquireAccountLocks(targetIds, { releaseOnExit: true });
+  } catch (e) {
+    if (!(e instanceof AccountLockedError)) throw e;
+    console.error(e.message);
+    console.log(JSON.stringify({ event: "fatal", error_code: "ACCOUNT_LOCKED", account: e.key, holder_pid: e.holderPid }));
+    process.exitCode = ACCOUNT_LOCKED_EXIT_CODE;
     return;
   }
   installProcessStallWatchdog("weekly-grind");

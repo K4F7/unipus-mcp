@@ -74,7 +74,7 @@ const ledgerKey = (who: string, skill: PaperSkill, taskId: string, ansVersion: n
   JSON.stringify([who, skill, taskId, ansVersion]);
 
 /** HMAC of the account id with a per-install random salt kept next to the ledger. */
-async function accountKey(accountId: string, file: string): Promise<string> {
+export async function accountKey(accountId: string, file: string): Promise<string> {
   const saltFile = join(dirname(file), "results.salt");
   let salt = await readFile(saltFile, "utf8").catch(() => "");
   if (!salt) {

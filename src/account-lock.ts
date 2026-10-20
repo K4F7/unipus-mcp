@@ -1,0 +1,99 @@
+/**
+ * Per-account exclusive lock (#106): two weekly-grind processes on one account
+ * make the server answer 4021 (多设备同时作答). Lock files live next to the
+ * results ledger and are named by the same salted account key, never the phone.
+ */
+import { readFileSync, unlinkSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { accountKey, resolveResultsFile } from "./paper-result.js";
+
+export const ACCOUNT_LOCKED_EXIT_CODE = 5;
+
+export class AccountLockedError extends Error {
+  constructor(readonly key: string, readonly holderPid: number) {
+    super(`ACCOUNT_LOCKED：账号 ${key} 已有进程 pid=${holderPid} 在跑，本进程退出（同号并发会触发 4021）`);
+  }
+}
+
+export type AccountLocks = { release(): void };
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function lockOne(path: string, key: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(path, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    const holder = Number((await readFile(path, "utf8").catch(() => "")).trim());
+    if (pidAlive(holder)) throw new AccountLockedError(key, holder);
+    console.error(`[lock] 接管陈旧锁 ${key}（pid=${holder || "?"} 已不在）`);
+    try {
+      unlinkSync(path);
+    } catch {
+      /* raced with another taker; retry wx */
+    }
+  }
+  throw new AccountLockedError(key, Number((await readFile(path, "utf8").catch(() => "")).trim()));
+}
+
+function unlinkIfOurs(path: string): void {
+  try {
+    // Sync so it also works from process "exit" handlers.
+    if (readFileSync(path, "utf8").trim() === String(process.pid)) unlinkSync(path);
+  } catch {
+    /* already gone */
+  }
+}
+
+const SIGNALS = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const;
+
+/**
+ * Lock every account up front (all-or-nothing). Throws AccountLockedError if any
+ * is held by a live process; stale locks (dead pid) are taken over.
+ * releaseOnExit: also release on process exit and SIGINT/SIGTERM/SIGHUP.
+ */
+export async function acquireAccountLocks(
+  accountIds: string[],
+  opts: { resultsFile?: string; releaseOnExit?: boolean } = {},
+): Promise<AccountLocks> {
+  const file = opts.resultsFile ?? resolveResultsFile();
+  const dir = join(dirname(file), "locks");
+  await mkdir(dir, { recursive: true });
+  const held: string[] = [];
+  const release = () => {
+    for (const p of held.splice(0)) unlinkIfOurs(p);
+  };
+  try {
+    for (const id of new Set(accountIds)) {
+      const key = await accountKey(id, file);
+      const path = join(dir, `${key}.lock`);
+      await lockOne(path, key);
+      held.push(path);
+    }
+  } catch (e) {
+    release();
+    throw e;
+  }
+  if (opts.releaseOnExit) {
+    process.once("exit", release);
+    for (const [sig, n] of Object.entries(SIGNALS)) {
+      process.once(sig, () => {
+        release();
+        process.exit(128 + n);
+      });
+    }
+  }
+  return { release };
+}
