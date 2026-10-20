@@ -7,7 +7,8 @@
  * "skip" API: an unsubmitted paper stays the current one, so the next round
  * retries it from a fresh loadPaper — the streak cap keeps that bounded.
  */
-import { resolveConcurrentRetry, resolveMaxConsecutiveFailures } from "./limits.js";
+import { resolveConcurrentRetry, resolveMaxConsecutiveFailures, resolveNetWait } from "./limits.js";
+import { isNetworkFailure, networkDownReason, type NetworkWaiter } from "./net-wait.js";
 import type { FindHistoryTrainingTaskResult } from "./history-training-tasks.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 
@@ -130,6 +131,8 @@ export type PaperLoopResult = {
   refused?: boolean;
   /** Papers skipped after a failure. */
   warnings?: string[];
+  /** Network stayed down past UNIPUS_NET_WAIT_MAX_MS (#102): resumable, not the account's fault. */
+  networkDown?: boolean;
 };
 
 /**
@@ -150,12 +153,15 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   completeOne: () => Promise<R>;
   report: (r: R | ThrownRound) => Promise<void>;
   onSubmitted?: (r: Extract<R, { ok: true }>) => void;
+  /** Network-outage wait (#102); absent → network failures count like any other. */
+  waitNetwork?: NetworkWaiter;
 }): Promise<PaperLoopResult> {
   const taskIds: string[] = [];
   const warnings: string[] = [];
   const streak = createFailureStreak(opts.env);
   let lastSkipped: string | null | undefined;
   let errorClass: ErrorClass | undefined;
+  let netRetries = resolveNetWait(opts.env).retries;
   const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
     completed: taskIds.length,
     taskIds,
@@ -190,6 +196,16 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       continue;
     }
     lastSkipped = undefined;
+    if (!result.ok && opts.waitNetwork && netRetries > 0 && isNetworkFailure(result.detail) && !isAuthFailure(result.detail, result.errorClass)) {
+      // Not this paper's fault: wait the outage out, then retry the same paper
+      // (fresh loadPaper + ledger / App-history check, so no double submit).
+      if (!(await opts.waitNetwork(`${opts.skill} 第 ${round} 轮：${result.detail}`))) {
+        return done({ stoppedReason: networkDownReason(result.detail), networkDown: true, errorClass: "NETWORK" });
+      }
+      netRetries--;
+      round--;
+      continue;
+    }
     if (!result.ok) {
       errorClass ??= result.errorClass;
       if (result.refused) return done({ stoppedReason: result.detail, refused: true });

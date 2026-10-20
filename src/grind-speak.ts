@@ -12,6 +12,7 @@
  *
  * No speakers/afplay; no /oral/train; WS oral.unipus.cn not driven.
  */
+import type { NetworkWaiter } from "./net-wait.js";
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
@@ -76,6 +77,8 @@ export type GrindSpeakPorts = AuthPorts & {
   env?: NodeJS.ProcessEnv;
   /** LLM for 自由表达 / AI对话; default from UNIPUS_LLM_* (required — no template). */
   llmAsk?: LlmAsk;
+  /** Network-outage wait between papers (#102); unset → network failures count as failures. */
+  waitNetwork?: NetworkWaiter;
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
   speechRecord?: SpeechRecordBuilder;
@@ -842,6 +845,7 @@ export async function grindSpeakGaps(
     completeOne: () => completeOneSpeak(ports),
     report: async (round) => { await ports.results?.report(speakPaperResult(round)); },
     onSubmitted: (round) => appScores.push(round.appScore ?? 0),
+    waitNetwork: ports.waitNetwork,
   });
   return { ...r, appScores };
 }

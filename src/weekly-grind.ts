@@ -45,6 +45,8 @@ import { join } from "node:path";
 import { accountDir } from "./accounts.js";
 import type { PaperReporter } from "./paper-result.js";
 import { markProgress } from "./watchdog.js";
+import { resolveNetWait } from "./limits.js";
+import { defaultNetworkWaiter, isNetworkFailure, networkDownReason, type NetworkWaiter } from "./net-wait.js";
 
 export type ProgressSnap = {
   listen_done: number | null;
@@ -83,6 +85,8 @@ export type AccountGrindSummary = {
   errors: string[];
   /** Non-fatal notes (e.g. no LLM configured, unanswered listen questions). */
   warnings?: string[];
+  /** Network stayed down past UNIPUS_NET_WAIT_MAX_MS (#102): resumable by re-running. */
+  network_down?: boolean;
   /** Set when the account run threw unexpectedly (TIMEOUT/NETWORK/FORBIDDEN/…). */
   error_class?: ErrorClass;
 };
@@ -105,6 +109,8 @@ export type WeeklyGrindPorts = AccountFs & {
    */
   skipPlacement?: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Network-outage wait (#102); default probes ucloud + LLM gateway with backoff up to UNIPUS_NET_WAIT_MAX_MS. */
+  waitNetwork?: NetworkWaiter;
   /** Override progress listing (tests). */
   listProgress?: (
     credentials: JwtCredentialStore,
@@ -143,6 +149,8 @@ type SideResult = {
   warnings?: string[];
   /** A paper was refused (no valid LLM answer): account stops, counts as failure. */
   refused?: boolean;
+  /** Network stayed down past the wait cap (#102). */
+  networkDown?: boolean;
 };
 
 export type SelectAccountsMode =
@@ -322,8 +330,11 @@ export async function ensureAccountAuth(
 
   const rt = (await readAccountRt(accountId, fsOpts)) ?? "";
   let refreshCaptcha = false;
+  // Last refresh / login failure text, kept so a network outage stays recognisable (#102).
+  const failures: string[] = [];
   if (rt.length > 0) {
     const refreshed = await refresh(rt);
+    if (!refreshed.ok) failures.push(`refresh: ${refreshed.message}`);
     if (refreshed.ok) {
       await saveLoginTokens(
         {
@@ -349,6 +360,7 @@ export async function ensureAccountAuth(
   if (username && password) {
     const result = await login({ username, password });
     if (!result.ok) {
+      failures.push(`login: ${result.message}`);
       if (result.code === "CAPTCHA_REQUIRED") {
         return {
           ok: false,
@@ -381,6 +393,18 @@ export async function ensureAccountAuth(
     };
   }
 
+  // Network failed refresh/login: do not fall back to a possibly-stale cached JWT (#102).
+  // A later 401 is not classified as network, so untilNetworkUp would never wait or re-auth.
+  if (failures.some((f) => isNetworkFailure(f))) {
+    return {
+      ok: false,
+      code: "AUTH_FAILED",
+      message:
+        (rt.length > 0 ? "refresh 失败且无可用账密/jwt" : "无 rt；无账密可回退；无本地 jwt") +
+        `（${failures.join("；")}）`,
+    };
+  }
+
   const existing = await readAccountJwt(accountId, fsOpts);
   if (existing != null) {
     return { ok: true, jwt: existing };
@@ -390,9 +414,8 @@ export async function ensureAccountAuth(
     ok: false,
     code: "AUTH_FAILED",
     message:
-      rt.length > 0
-        ? "refresh 失败且无可用账密/jwt"
-        : "无 rt；无账密可回退；无本地 jwt",
+      (rt.length > 0 ? "refresh 失败且无可用账密/jwt" : "无 rt；无账密可回退；无本地 jwt") +
+      (failures.length ? `（${failures.join("；")}）` : ""),
   };
 }
 
@@ -451,6 +474,27 @@ async function defaultListProgress(
     return { error: `${result.code}: ${result.message}`, code: result.code };
   }
   return snapFromProgress(result);
+}
+
+
+/**
+ * Re-run `step` while it fails for network reasons and the outage wait says the
+ * network is back (#102). Returns the last result plus whether the wait gave up.
+ */
+async function untilNetworkUp<T>(
+  step: () => Promise<T>,
+  failure: (r: T) => string | null,
+  wait: NetworkWaiter | undefined,
+  label: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ result: T; down: boolean }> {
+  // Bounded: a probe can pass while this step's own host stays unreachable.
+  for (let left = resolveNetWait(env).retries; ; left--) {
+    const result = await step();
+    const detail = failure(result);
+    if (detail == null || !wait || left <= 0 || !isNetworkFailure(detail)) return { result, down: false };
+    if (!(await wait(`${label}：${detail}`))) return { result, down: true };
+  }
 }
 
 /** Grind one account: auth → progress → gaps → re-check. */
@@ -519,13 +563,39 @@ export async function grindOneAccount(
   let llmAsk: LlmAsk;
   try {
     llmAsk = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
-    await probeLlm(llmAsk);
   } catch (error) {
     return { ...base, status: "error", errors: [toError(error).message] };
   }
+  const netEnv = ports.env ?? process.env;
+  // UNIPUS_NET_WAIT_MAX_MS=0 disables the wait: network failures count as before.
+  const waitNetwork = ports.waitNetwork ?? (resolveNetWait(netEnv).maxMs > 0 ? defaultNetworkWaiter(netEnv) : undefined);
+  const networkDown = (detail: string): AccountGrindSummary => ({
+    ...base,
+    status: "error",
+    errors: [...errors, networkDownReason(detail)],
+    error_class: "NETWORK",
+    network_down: true,
+  });
+  const probe = await untilNetworkUp(
+    () => probeLlm(llmAsk).then(() => null, (error: unknown) => toError(error).message),
+    (r) => r,
+    waitNetwork,
+    "LLM 探活",
+    ports.env,
+  );
+  if (probe.down) return networkDown(probe.result!);
+  if (probe.result != null) return { ...base, status: "error", errors: [probe.result] };
 
   markProgress(`account:auth ${base.note ?? "(无备注)"}`);
-  const auth = await ensureAccountAuth(account.account_id, ports);
+  const authRun = await untilNetworkUp(
+    () => ensureAccountAuth(account.account_id, ports),
+    (a) => (a.ok ? null : a.message),
+    waitNetwork,
+    "登录",
+    ports.env,
+  );
+  const auth = authRun.result;
+  if (authRun.down && !auth.ok) return networkDown(auth.message);
   if (!auth.ok) {
     if (auth.code === "CAPTCHA_REQUIRED") {
       return {
@@ -543,9 +613,16 @@ export async function grindOneAccount(
 
   const credentials = createStaticJwtStore(auth.jwt);
   const http = ports.http ?? createFetchUnipusHttp();
-  const listProgress = ports.listProgress ?? ((c) => defaultListProgress(c, ports));
+  const rawListProgress = ports.listProgress ?? ((c) => defaultListProgress(c, ports));
+  let progressDown = false;
+  const listProgress = async (c: JwtCredentialStore) => {
+    const r = await untilNetworkUp(() => rawListProgress(c), (p) => ("error" in p ? p.error : null), waitNetwork, "拉取进度", ports.env);
+    progressDown ||= r.down;
+    return r.result;
+  };
 
   const beforeRaw = await listProgress(credentials);
+  if (progressDown && "error" in beforeRaw) return networkDown(beforeRaw.error);
   if ("error" in beforeRaw) {
     const isPlacement =
       beforeRaw.code === "NEEDS_PLACEMENT" ||
@@ -585,7 +662,27 @@ export async function grindOneAccount(
             .filter((f) => !placeFlows.includes(f))
             .join("/")}）不自动定级；若它仍在定级，平台进度拿不到另一侧计数，本周需先手动完成该侧定级或改配额`
         : null;
-    const placed = await runAutoPlacement(placePorts);
+    let placed: Awaited<ReturnType<typeof runAutoPlacement>>;
+    try {
+      placed = await runAutoPlacement(placePorts);
+    } catch (error) {
+      const msg = toError(error).message;
+      if (!waitNetwork || !isNetworkFailure(msg)) throw error;
+      // Placement is a submit: never auto-retried here; the re-run re-checks progress first.
+      if (!(await waitNetwork(`定级：${msg}`))) return networkDown(`定级：${msg}`);
+      return { ...base, status: "needs_placement", errors: [...errors, `placement: ${msg}（网络已恢复，重跑续上）`], error_class: "NETWORK" };
+    }
+    const placeNet = [placed.listen, placed.speak].find((side) => side && !side.ok && isNetworkFailure(side.detail));
+    if (waitNetwork && placeNet && !placeNet.ok) {
+      if (!(await waitNetwork(`定级：${placeNet.detail}`))) return networkDown(`定级：${placeNet.detail}`);
+      // Recovered, but no submit (LLM/network blip before submit). Leave needs_placement for the re-run.
+      return {
+        ...base,
+        status: "needs_placement",
+        errors: [...errors, `placement: ${placeNet.detail}（网络已恢复，重跑续上）`],
+        error_class: "NETWORK",
+      };
+    }
     if (!placed.attempted) {
       return {
         ...base,
@@ -606,6 +703,7 @@ export async function grindOneAccount(
     }
 
     const afterPlace = await listProgress(credentials);
+    if (progressDown && "error" in afterPlace) return networkDown(afterPlace.error);
     if ("error" in afterPlace) {
       return {
         ...base,
@@ -652,6 +750,7 @@ export async function grindOneAccount(
     env: ports.env,
     results: ports.resultsFor ? await ports.resultsFor(base.note, base.account_id) : undefined,
     llmAsk,
+    waitNetwork,
   };
 
   const grindListen = ports.grindListen ?? grindListenGaps;
@@ -668,6 +767,7 @@ export async function grindOneAccount(
       if (r.stoppedReason) errors.push(`${side}: ${r.stoppedReason}`);
       if (r.errorClass) base.error_class ??= r.errorClass;
       if (r.refused) refused = true;
+      if (r.networkDown) base.network_down = true;
     } catch (error) {
       const err = toError(error);
       errors.push(`${side}: ${err.message}`);
@@ -677,10 +777,16 @@ export async function grindOneAccount(
   if (listenNeed > 0) await runSide("listen", () => grindListen(grindPorts, listenNeed));
   if (speakNeed > 0) {
     if (refused) errors.push("speak: 跳过（听力拒交，本账号停止）");
+    else if (base.network_down) errors.push("speak: 跳过（网络未恢复，重跑续上）");
     else await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
   }
 
+  if (base.network_down) {
+    // A side already waited out the cap: stop now, no second full wait on progress_after.
+    return { ...base, status: "error", errors, error_class: "NETWORK" };
+  }
   const afterRaw = await listProgress(credentials);
+  if (progressDown && "error" in afterRaw) return networkDown(afterRaw.error);
   if ("error" in afterRaw) {
     errors.push(`progress_after: ${afterRaw.error}`);
     return {
@@ -735,7 +841,12 @@ export async function runWeeklyGrind(
       continue;
     }
     try {
-      accounts.push(await grindOneAccount(account, ports));
+      const one = await grindOneAccount(account, ports);
+      accounts.push(one);
+      if (one.network_down) {
+        console.error(`[net] ${one.note ?? "(无备注)"} 网络未恢复，本轮停止，剩余 ${targets.length - accounts.length} 个号未跑；网络恢复后重跑同一命令即可续上`);
+        break;
+      }
     } catch (error) {
       // One account blowing up must not lose the JSON summary for the rest.
       const err = toError(error);

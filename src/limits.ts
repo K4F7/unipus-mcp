@@ -140,3 +140,14 @@ export async function pollWithin<T>(
   }
   return undefined;
 }
+
+/** Network outage wait (#102): total cap, first / max backoff between connectivity probes. */
+export function resolveNetWait(env: NodeJS.ProcessEnv = process.env): { maxMs: number; baseMs: number; capMs: number; retries: number } {
+  return {
+    maxMs: Math.round(envNumber(env, "UNIPUS_NET_WAIT_MAX_MS", 30 * 60_000, 0)),
+    baseMs: Math.round(envNumber(env, "UNIPUS_NET_WAIT_BASE_MS", 5_000, 100)),
+    capMs: Math.round(envNumber(env, "UNIPUS_NET_WAIT_CAP_MS", 60_000, 100)),
+    /** Network-failed papers per skill that may be retried without counting as failures. */
+    retries: Math.round(envNumber(env, "UNIPUS_NET_RETRIES", 5, 0, 100)),
+  };
+}
