@@ -30,7 +30,9 @@ export function isClioCapacityFailure(detail: unknown): boolean {
 
 /** Round cap: the week's need plus at most `need` skipped papers (never below the streak cap). */
 export function defaultMaxRounds(need: number, env?: NodeJS.ProcessEnv): number {
-  return need + Math.max(need, resolveMaxConsecutiveFailures(env));
+  // Soft Clio-1006 skips use round-- and do not burn the streak, but still give the
+  // week loop headroom if a caller forgets that (#104 / #105 Codex).
+  return need + Math.max(need, resolveMaxConsecutiveFailures(env)) + resolveClioOverflowSkips(env);
 }
 
 /** Counts papers failed in a row; `fail` returns the stop reason once the cap is hit. */

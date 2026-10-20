@@ -37,8 +37,10 @@ test("failure streak stops at UNIPUS_MAX_CONSECUTIVE_FAILURES and resets on succ
 });
 
 test("defaultMaxRounds leaves room for skipped papers", () => {
-  assert.equal(defaultMaxRounds(12, {}), 24);
-  assert.equal(defaultMaxRounds(1, {}), 3);
+  // need + max(need, consecutiveFailures) + clioOverflowSkips (default 3).
+  assert.equal(defaultMaxRounds(12, {}), 27);
+  assert.equal(defaultMaxRounds(1, {}), 6);
+  assert.equal(defaultMaxRounds(1, { UNIPUS_CLIO_OVERFLOW_SKIPS: "0" }), 3);
 });
 
 test("runPaperLoop: a results-file write failure stops the loop (ledger must not be skipped)", async () => {

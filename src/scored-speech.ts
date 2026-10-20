@@ -268,9 +268,9 @@ export function createScoredSpeechRecordBuilder(
     const freeTalk = speechOpts.minSec != null && speechOpts.minSec > 0;
     const timings: StepTimings = new Map();
     const start = now();
-    const budgetMs = freeTalk
-      ? Math.max(resolveTtsRetryMaxMs(ports.env), resolveFreeTalkTtsRetryMaxMs(ports.env))
-      : resolveTtsRetryMaxMs(ports.env);
+    // Free-talk uses its own resolver (default 900s); do not Math.max with the
+    // short-utterance cap or a lower UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS is ignored (#105 Codex).
+    const budgetMs = freeTalk ? resolveFreeTalkTtsRetryMaxMs(ports.env) : resolveTtsRetryMaxMs(ports.env);
     try {
       const record = await retryWithinBudget(
         async (remainingMs) => {
