@@ -74,15 +74,21 @@ const ledgerKey = (who: string, skill: PaperSkill, taskId: string, ansVersion: n
   JSON.stringify([who, skill, taskId, ansVersion]);
 
 /** HMAC of the account id with a per-install random salt kept next to the ledger. */
-async function accountKey(accountId: string, file: string): Promise<string> {
+export async function accountKey(accountId: string, file: string): Promise<string> {
   const saltFile = join(dirname(file), "results.salt");
-  let salt = await readFile(saltFile, "utf8").catch(() => "");
-  if (!salt) {
-    await mkdir(dirname(file), { recursive: true });
-    await writeFile(saltFile, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 }).catch(() => {});
-    salt = await readFile(saltFile, "utf8");
+  // Another process may have just created the salt and not written it yet (#106):
+  // only a complete 64-hex salt is used, else keys (and lock names) would diverge.
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const salt = (await readFile(saltFile, "utf8").catch(() => "")).trim();
+    if (/^[0-9a-f]{64}$/.test(salt)) return createHmac("sha256", salt).update(accountId).digest("hex").slice(0, 16);
+    if (attempt === 0 && !salt) {
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(saltFile, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 }).catch(() => {});
+      continue;
+    }
+    await new Promise((r) => setTimeout(r, 20));
   }
-  return createHmac("sha256", salt.trim()).update(accountId).digest("hex").slice(0, 16);
+  throw new Error("results.salt 无效或未写完，拒绝派生账号 key");
 }
 
 async function readLedger(file: string): Promise<PaperResultLine[]> {
