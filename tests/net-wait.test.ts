@@ -68,3 +68,17 @@ test("http probe: any response is up, a throw is down", async () => {
   assert.equal(await createHttpProbe(["https://a", "https://b"], (async () => new Response(null, { status: 401 })) as typeof fetch)(), true);
   assert.equal(await createHttpProbe(["https://a"], (async () => { throw new TypeError("fetch failed"); }) as typeof fetch)(), false);
 });
+
+test("network waiter: one cumulative cap across repeated outages (one waiter per account)", async () => {
+  const c = fakeClock();
+  let up = true;
+  const wait = createNetworkWaiter({
+    env: { UNIPUS_NET_WAIT_MAX_MS: "10000", UNIPUS_NET_WAIT_BASE_MS: "4000", UNIPUS_NET_WAIT_CAP_MS: "4000" },
+    now: c.now, sleep: c.sleep, probe: async () => up, log: () => {},
+  });
+  assert.equal(await wait("a"), true);
+  assert.equal(await wait("b"), true);
+  up = false;
+  assert.equal(await wait("c"), false);
+  assert.equal(c.now(), 10000, "8s already spent → only 2s more");
+});

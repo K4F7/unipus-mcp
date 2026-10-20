@@ -1392,6 +1392,23 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.equal(result.speak_completed, 3);
   });
 
+  test("placement network failure: waits, never re-submits placement, NETWORK_DOWN when still down (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("placedown", env);
+    let placements = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => false,
+      listProgress: async () => ({ error: "NEEDS_PLACEMENT: 听力仍在定级", code: "NEEDS_PLACEMENT" }),
+      http: new Proxy({}, { get: () => async () => { placements++; throw new TypeError("fetch failed"); } }) as never,
+    });
+    assert.ok(placements >= 1, "placement reached the network");
+    assert.equal(result.network_down, true);
+    assert.match(result.errors.join("\n"), /NETWORK_DOWN[\s\S]*定级/);
+  });
+
   test("real LLM refusal (empty reply) never waits for the network", async () => {
     const env = { ...LLM_ENV };
     const { home, row } = await oneRow("probe-empty", env);

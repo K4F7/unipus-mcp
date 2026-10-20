@@ -650,7 +650,20 @@ export async function grindOneAccount(
             .filter((f) => !placeFlows.includes(f))
             .join("/")}）不自动定级；若它仍在定级，平台进度拿不到另一侧计数，本周需先手动完成该侧定级或改配额`
         : null;
-    const placed = await runAutoPlacement(placePorts);
+    let placed: Awaited<ReturnType<typeof runAutoPlacement>>;
+    try {
+      placed = await runAutoPlacement(placePorts);
+    } catch (error) {
+      const msg = toError(error).message;
+      if (!waitNetwork || !isNetworkFailure(msg)) throw error;
+      // Placement is a submit: never auto-retried here; the re-run re-checks progress first.
+      if (!(await waitNetwork(`定级：${msg}`))) return networkDown(`定级：${msg}`);
+      return { ...base, status: "needs_placement", errors: [...errors, `placement: ${msg}（网络已恢复，重跑续上）`], error_class: "NETWORK" };
+    }
+    const placeNet = [placed.listen, placed.speak].find((side) => side && !side.ok && isNetworkFailure(side.detail));
+    if (waitNetwork && placeNet && !placeNet.ok && !(await waitNetwork(`定级：${placeNet.detail}`))) {
+      return networkDown(`定级：${placeNet.detail}`);
+    }
     if (!placed.attempted) {
       return {
         ...base,

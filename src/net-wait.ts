@@ -42,24 +42,30 @@ export function createNetworkWaiter(opts: {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = opts.now ?? activeNow;
   const log = opts.log ?? ((line: string) => console.error(line));
+  // One budget per waiter (one waiter per account): repeated outages share UNIPUS_NET_WAIT_MAX_MS.
+  let spentBefore = 0;
   return async (reason) => {
     const start = now();
-    log(`[net] 网络类失败，等待网络恢复（上限 ${Math.round(maxMs / 1000)}s）：${reason}`);
-    for (let attempt = 1, delay = baseMs; ; attempt++, delay = Math.min(capMs, delay * 2)) {
-      const waited = now() - start;
-      if (waited >= maxMs) {
-        log(`[net] 等了 ${Math.round(waited / 1000)}s 网络仍未恢复，放弃（可直接重跑续上）`);
-        return false;
+    const waited = () => spentBefore + now() - start;
+    log(`[net] 网络类失败，等待网络恢复（本号累计上限 ${Math.round(maxMs / 1000)}s，已用 ${Math.round(spentBefore / 1000)}s）：${reason}`);
+    try {
+      for (let attempt = 1, delay = baseMs; ; attempt++, delay = Math.min(capMs, delay * 2)) {
+        if (waited() >= maxMs) {
+          log(`[net] 本号累计等了 ${Math.round(waited() / 1000)}s 网络仍未恢复，放弃（可直接重跑续上）`);
+          return false;
+        }
+        await sleep(Math.min(delay, maxMs - waited()));
+        // Keeps the stall watchdog (UNIPUS_STALL_MINUTES) from killing a deliberate wait.
+        markProgress(`net:wait #${attempt}`);
+        const secs = Math.round((now() - start) / 1000);
+        if (await opts.probe().catch(() => false)) {
+          log(`[net] 第 ${attempt} 次探测网络已恢复（等了 ${secs}s），重试`);
+          return true;
+        }
+        log(`[net] 第 ${attempt} 次探测仍不通（已等 ${secs}s）`);
       }
-      await sleep(Math.min(delay, maxMs - waited));
-      // Keeps the stall watchdog (UNIPUS_STALL_MINUTES) from killing a deliberate wait.
-      markProgress(`net:wait #${attempt}`);
-      const secs = Math.round((now() - start) / 1000);
-      if (await opts.probe().catch(() => false)) {
-        log(`[net] 第 ${attempt} 次探测网络已恢复（等了 ${secs}s），重试`);
-        return true;
-      }
-      log(`[net] 第 ${attempt} 次探测仍不通（已等 ${secs}s）`);
+    } finally {
+      spentBefore = waited();
     }
   };
 }
