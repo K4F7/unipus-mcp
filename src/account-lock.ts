@@ -4,7 +4,7 @@
  * results ledger and are named by the same salted account key, never the phone.
  */
 import { readFileSync, unlinkSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { accountKey, resolveResultsFile } from "./paper-result.js";
 
@@ -28,24 +28,62 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-async function lockOne(path: string, key: string): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await writeFile(path, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
-      return;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
-    const holder = Number((await readFile(path, "utf8").catch(() => "")).trim());
-    if (pidAlive(holder)) throw new AccountLockedError(key, holder);
-    console.error(`[lock] 接管陈旧锁 ${key}（pid=${holder || "?"} 已不在）`);
-    try {
-      unlinkSync(path);
-    } catch {
-      /* raced with another taker; retry wx */
-    }
+const readPid = async (path: string) => Number((await readFile(path, "utf8")).trim());
+
+/** Publish a lock whose pid is already written: link() never replaces, so no reader sees an empty lock. */
+async function publish(path: string): Promise<boolean> {
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    await link(tmp, path);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    return false;
+  } finally {
+    await rm(tmp, { force: true });
   }
-  throw new AccountLockedError(key, Number((await readFile(path, "utf8").catch(() => "")).trim()));
+}
+
+const GUARD_STALE_MS = 30_000;
+
+/** Serialize stale-lock takeover so two takers can't delete each other's fresh lock. */
+async function takeOverStale(path: string, key: string, deadPid: number): Promise<boolean> {
+  const guard = `${path}.takeover`;
+  try {
+    await writeFile(guard, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    const age = Date.now() - (await stat(guard).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs;
+    if (age > GUARD_STALE_MS) await rm(guard, { force: true }); // taker crashed mid-takeover
+    return false;
+  }
+  try {
+    // Re-check under the guard: only remove the exact dead holder we saw.
+    if ((await readPid(path).catch(() => NaN)) !== deadPid) return false;
+    console.error(`[lock] 接管陈旧锁 ${key}（pid=${deadPid} 已不在）`);
+    await rm(path, { force: true });
+    return publish(path);
+  } finally {
+    await rm(guard, { force: true });
+  }
+}
+
+async function lockOne(path: string, key: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (await publish(path)) return;
+    let holder: number;
+    try {
+      holder = await readPid(path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; // released meanwhile
+      throw e; // fail closed
+    }
+    if (pidAlive(holder)) throw new AccountLockedError(key, holder);
+    if (await takeOverStale(path, key, holder)) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new AccountLockedError(key, await readPid(path).catch(() => 0));
 }
 
 function unlinkIfOurs(path: string): void {

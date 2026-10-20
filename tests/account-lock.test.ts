@@ -71,3 +71,29 @@ test("lock released on SIGTERM", async () => {
   await new Promise((r) => child.on("exit", r));
   assert.deepEqual(await readdir(join(file, "..", "locks")), []);
 });
+
+const racer = (file: string) =>
+  spawn(process.execPath, ["--import", "tsx", "-e", `
+    const { acquireAccountLocks } = await import(${JSON.stringify(new URL("../src/account-lock.ts", import.meta.url).pathname)});
+    try { await acquireAccountLocks(["${PHONE}"], { resultsFile: ${JSON.stringify(file)} }); console.log("WON"); setTimeout(() => {}, 1500); }
+    catch { console.log("LOST"); }`], { stdio: ["ignore", "pipe", "ignore"] });
+
+async function race(file: string, n: number): Promise<number> {
+  const outs = await Promise.all(Array.from({ length: n }, () => new Promise<string>((r) => {
+    const c = racer(file); let o = ""; c.stdout!.on("data", (d) => (o += d)); c.on("exit", () => r(o));
+  })));
+  return outs.filter((o) => o.includes("WON")).length;
+}
+
+test("concurrent first-time racers (fresh salt): exactly one wins", async () => {
+  assert.equal(await race(await resultsFile(), 6), 1);
+});
+
+test("concurrent stale-lock takers: exactly one wins", async () => {
+  const file = await resultsFile();
+  const first = await acquireAccountLocks([PHONE], { resultsFile: file });
+  const [name] = await readdir(join(file, "..", "locks"));
+  first.release();
+  await writeFile(join(file, "..", "locks", name!), "999999999\n");
+  assert.equal(await race(file, 6), 1);
+});

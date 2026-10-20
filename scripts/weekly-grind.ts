@@ -88,19 +88,21 @@ async function main(): Promise<void> {
     return;
   }
   // One process per account (#106): concurrent runs on one account → 4021.
+  // Resolve once and grind exactly the locked set (active-account.txt may change meanwhile).
   const targetIds = (await resolveTargetAccounts(parsed.mode)).map((a) => a.account_id);
+  const lockedMode = { kind: "ids", ids: targetIds } as const;
   try {
     await acquireAccountLocks(targetIds, { releaseOnExit: true });
   } catch (e) {
     if (!(e instanceof AccountLockedError)) throw e;
     console.error(e.message);
-    console.log(JSON.stringify({ event: "fatal", error_code: "ACCOUNT_LOCKED", account: e.key, holder_pid: e.holderPid }));
+    console.log(JSON.stringify({ event: "fatal", error_code: "ACCOUNT_LOCKED", message: e.message, account: e.key, holder_pid: e.holderPid }));
     process.exitCode = ACCOUNT_LOCKED_EXIT_CODE;
     return;
   }
   installProcessStallWatchdog("weekly-grind");
   const summary = sanitizeSummaryForStdout(
-    await runWeeklyGrind(parsed.mode, {
+    await runWeeklyGrind(lockedMode, {
       grindOverride: parsed.grindOverride,
       skipPlacement: parsed.skipPlacement,
       resultsFor: (note, accountId) => createPaperReporter({ note, accountId }),
