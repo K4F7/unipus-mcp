@@ -187,3 +187,13 @@ test("runPaperLoop: Clio 1006 soft-skips are bounded; further 1006s count toward
   });
   assert.match(String(r.stoppedReason), /连续 2 张失败/);
 });
+
+test("runPaperLoop: consecutive-failure stop is flagged streakStopped (#110)", async () => {
+  const r = await runPaperLoop({
+    skill: "说", need: 3, maxRounds: 6, env: {},
+    status: async () => null,
+    completeOne: async () => ({ ok: false as const, taskId: "X", detail: "LLM 无有效答案" }),
+    report: async () => {},
+  });
+  assert.equal(r.streakStopped, true);
+});

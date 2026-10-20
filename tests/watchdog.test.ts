@@ -81,8 +81,8 @@ test("createStallWatchdog: touch keeps alive, idle fires once with last stage", 
   wd.stop();
 });
 
-test("installProcessStallWatchdog: off when UNIPUS_STALL_MINUTES=0", () => {
-  assert.equal(installProcessStallWatchdog("x", { env: { UNIPUS_STALL_MINUTES: "0" } }), null);
+test("installProcessStallWatchdog: off when UNIPUS_STALL_MINUTES=0 and UNIPUS_IDLE_MINUTES=0", () => {
+  assert.equal(installProcessStallWatchdog("x", { env: { UNIPUS_STALL_MINUTES: "0", UNIPUS_IDLE_MINUTES: "0" } }), null);
 });
 
 test("installProcessStallWatchdog: writes count as progress; stall exits EXIT_STALL with a fatal JSON line", async () => {
@@ -186,4 +186,46 @@ test("withDeadline / remainingBudgetMs: nested scopes keep the tighter deadline;
     });
   });
   await withDeadline(t - 5, async () => assert.equal(capToBudget(45_000, now), 1, "spent budget → 1ms, never 0/negative"));
+});
+
+test("createStallClock: excluded freeze time is capped by a real wall-clock ceiling (#110)", () => {
+  let t = 0;
+  const clock = createStallClock({ now: () => t, thresholdMs: 15_000, tickMs: 1000, maxFrozenMs: 600_000, log: () => {} });
+  try {
+    const a0 = clock.now();
+    for (let i = 0; i < 5; i++) t += 300_000; // heartbeat keeps arriving late (host throttling)
+    clock.now();
+    assert.ok(clock.stalledMs() <= 600_000, "never excludes more than the ceiling");
+    assert.ok(clock.now() - a0 >= 1_500_000 - 600_000, "deadlines advance on wall time past the ceiling");
+  } finally {
+    clock.stop();
+  }
+});
+
+test("installProcessStallWatchdog: [stall] lines are not progress; wall-clock IDLE exits EXIT_IDLE (#110)", async () => {
+  const { EXIT_IDLE } = await import("../src/watchdog.js");
+  assert.ok(![1, 2, 3, 4, 5].includes(EXIT_IDLE));
+  const codes: number[] = [];
+  const out: string[] = [];
+  const stdout = { write: (s: string, cb?: () => void) => (out.push(s), setTimeout(() => cb?.(), 5), true) };
+  const stderr = { write: (_s: string) => true };
+  const wd = installProcessStallWatchdog("weekly-grind", {
+    // Active-time stall off-scale (frozen clock never advances); wall IDLE 120ms.
+    env: { UNIPUS_STALL_MINUTES: "100", UNIPUS_IDLE_MINUTES: "0.002" },
+    exit: (c) => codes.push(c),
+    stdout: stdout as never,
+    stderr: stderr as never,
+  });
+  try {
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      stderr.write("[stall] 进程冻结约 800s（VM 暂停），超时与预算不计这段\n");
+    }
+  } finally {
+    wd?.stop();
+  }
+  assert.deepEqual(codes.slice(0, 1), [EXIT_IDLE]);
+  const parsed = JSON.parse(out.join("").trim().split("\n")[0]!);
+  assert.equal(parsed.event, "fatal");
+  assert.equal(parsed.error_code, "IDLE");
 });
