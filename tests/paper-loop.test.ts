@@ -148,3 +148,39 @@ test("runPaperLoop: real failures keep the streak stop; auth is never waited on;
   assert.equal(waits, 2, "after UNIPUS_NET_RETRIES the failure counts normally");
   assert.match(String(flaky.stoppedReason), /连续 2 张失败/);
 });
+
+test("runPaperLoop: Clio 1006 soft-skips without burning the consecutive-failure streak (#104)", async () => {
+  const { isClioCapacityFailure } = await import("../src/paper-loop.js");
+  assert.equal(isClioCapacityFailure("tts/upload CLIO_CAPACITY: Clio 评分失败：code=1006 audio overflow"), true);
+  assert.equal(isClioCapacityFailure("NETWORK: fetch failed"), false);
+  const seq = [
+    { ok: false as const, taskId: "A", detail: "tts/upload CLIO_CAPACITY: Clio 评分失败：code=1006 audio overflow", errorClass: "CLIO_CAPACITY" as const },
+    { ok: false as const, taskId: "B", detail: "Clio 评分失败：code=1006 audio overflow" },
+    { ok: true as const, taskId: "C" },
+  ];
+  let i = 0;
+  const r = await runPaperLoop({
+    skill: "说", need: 1, maxRounds: 5, env: { UNIPUS_CLIO_OVERFLOW_SKIPS: "3", UNIPUS_MAX_CONSECUTIVE_FAILURES: "2" },
+    status: async () => null,
+    completeOne: async () => seq[i++]!,
+    report: async () => {},
+  });
+  assert.deepEqual(r.taskIds, ["C"]);
+  assert.equal(r.stoppedReason, undefined);
+  assert.ok((r.warnings ?? []).length >= 2);
+  assert.ok((r.warnings ?? []).every((w) => /Clio 1006|不计连续失败/.test(w)));
+});
+
+test("runPaperLoop: Clio 1006 soft-skips are bounded; further 1006s count toward the streak (#104)", async () => {
+  const r = await runPaperLoop({
+    skill: "说", need: 3, maxRounds: 8, env: { UNIPUS_CLIO_OVERFLOW_SKIPS: "1", UNIPUS_MAX_CONSECUTIVE_FAILURES: "2" },
+    status: async () => null,
+    completeOne: async () => ({
+      ok: false as const,
+      taskId: "X",
+      detail: "Clio 评分失败：code=1006 audio overflow",
+    }),
+    report: async () => {},
+  });
+  assert.match(String(r.stoppedReason), /连续 2 张失败/);
+});

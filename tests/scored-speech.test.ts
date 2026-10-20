@@ -100,6 +100,9 @@ test("clioTimeoutMs ≈ 30s + 3×audio s, clamped to [45s, UNIPUS_CLIO_MAX_MS] (
   assert.equal(clioTimeoutMs("x", {}, sec(200)), 360_000);
   assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_MAX_MS: "200000" }, sec(94)), 200_000);
   assert.equal(clioTimeoutMs("x", { UNIPUS_CLIO_TIMEOUT_MS: "90000" }, () => 0), 90_000);
+  // Free-talk uses the larger UNIPUS_FREE_TALK_CLIO_MAX_MS cap (#104).
+  assert.equal(clioTimeoutMs("x", {}, sec(200), { freeTalk: true }), 480_000);
+  assert.equal(clioTimeoutMs("x", { UNIPUS_FREE_TALK_CLIO_MAX_MS: "400000" }, sec(200), { freeTalk: true }), 400_000);
 });
 
 test("voiced / vocab items without source text → refused, never a placeholder sentence", async () => {
@@ -227,5 +230,79 @@ describe("voiced record retries (#98)", () => {
     }));
     assert.equal((await b("hi", "t", "EN_SENT_SCORE")).url, CDN);
     assert.equal(synth, 2);
+  });
+});
+
+
+describe("Clio 1006 free-talk regenerate (#104)", () => {
+  const wavOf = async (sec: number) => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const p = join(await mkdtemp(join(tmpdir(), "ss1006-")), "a.wav");
+    await writeFile(p, Buffer.alloc(44 + Math.round(sec * 32000)));
+    return p;
+  };
+
+  test("nextFreeTalkPauseAfterOverflow shortens pause but keeps ≥ minSec", async () => {
+    const { nextFreeTalkPauseAfterOverflow, sentenceGaps } = await import("../src/scored-speech.js");
+    const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");
+    const gaps = sentenceGaps(text);
+    assert.ok(gaps >= 10);
+    // 80s speech + 19×0.8 ≈ 95.2s → can tighten toward ~90.5
+    const next = nextFreeTalkPauseAfterOverflow(0.8, 80 + gaps * 0.8, gaps, 90);
+    assert.ok(next != null && next < 0.8);
+    assert.ok(80 + gaps * next! >= 90);
+    // Already at the floor → null
+    assert.equal(nextFreeTalkPauseAfterOverflow(0.1, 90.2, gaps, 90), null);
+  });
+
+  test("1006 on free-talk → regenerate with tighter pause, then score; logs [clio-1006]", async () => {
+    const { createScoredSpeechRecordBuilder } = await import("../src/scored-speech.js");
+    const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");
+    const pauses: number[] = [];
+    const logs: string[] = [];
+    let scored = 0;
+    const speechSec = 80;
+    const b = createScoredSpeechRecordBuilder(
+      { ...(ports as object), env: { UNIPUS_TTS_RETRY_MAX_MS: "60000", UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS: "60000" } } as never,
+      deps({
+        retryDelayMs: 1,
+        sleep: async () => {},
+        log: (l) => logs.push(l),
+        synthesize: async (input) => {
+          pauses.push(input.pauseSec ?? 0);
+          const gaps = text.split(/[.!?]\s+(?=\S)/).length - 1;
+          return { wavPath: await wavOf(speechSec + gaps * (input.pauseSec ?? 0)), cleanup: async () => {} };
+        },
+        score: async () => {
+          if (++scored === 1) throw new Error("Clio 评分失败：code=1006 audio overflow");
+          return { overall: 92, total: 92, audioUrl: CLIO, raw: {}, result: { total: 92, accuracy: 92, completeness: 100, fluency: { overall: 90 }, details: [] } };
+        },
+      }),
+    );
+    const rec = await b(text, "speak-x-main", "EN_PRED_SCORE", { pauseSec: 0.8, minSec: 90 });
+    assert.equal(rec.url, CDN);
+    assert.equal(scored, 2);
+    assert.ok(pauses.length >= 2, String(pauses));
+    assert.ok(pauses[0] === 0.8 || pauses[0]! > 0.5);
+    assert.ok(pauses.at(-1)! < pauses[0]!, String(pauses));
+    assert.ok(logs.some((l) => /\[clio-1006\]/.test(l) && /audio overflow/.test(l) && /非网络/.test(l)));
+  });
+
+  test("1006 without minSec (short speak) reuses the same wav", async () => {
+    let synth = 0;
+    let scored = 0;
+    const b = createScoredSpeechRecordBuilder(ports, deps({
+      retryDelayMs: 1, sleep: async () => {}, log: () => {},
+      synthesize: async () => { synth++; return { wavPath: "/tmp/x.wav", cleanup: async () => {} }; },
+      score: async () => {
+        if (++scored < 2) throw new Error("Clio 评分失败：code=1006 audio overflow");
+        return { overall: 90, total: 90, audioUrl: CLIO, raw: {}, result: { total: 90, accuracy: 90, completeness: 100, fluency: { overall: 90 }, details: [] } };
+      },
+    }));
+    await b("hi", "speak-1-0", "EN_SENT_SCORE");
+    assert.equal(synth, 1);
+    assert.equal(scored, 2);
   });
 });
