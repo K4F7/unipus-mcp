@@ -330,8 +330,11 @@ export async function ensureAccountAuth(
 
   const rt = (await readAccountRt(accountId, fsOpts)) ?? "";
   let refreshCaptcha = false;
+  // Last refresh / login failure text, kept so a network outage stays recognisable (#102).
+  const failures: string[] = [];
   if (rt.length > 0) {
     const refreshed = await refresh(rt);
+    if (!refreshed.ok) failures.push(`refresh: ${refreshed.message}`);
     if (refreshed.ok) {
       await saveLoginTokens(
         {
@@ -357,6 +360,7 @@ export async function ensureAccountAuth(
   if (username && password) {
     const result = await login({ username, password });
     if (!result.ok) {
+      failures.push(`login: ${result.message}`);
       if (result.code === "CAPTCHA_REQUIRED") {
         return {
           ok: false,
@@ -398,9 +402,8 @@ export async function ensureAccountAuth(
     ok: false,
     code: "AUTH_FAILED",
     message:
-      rt.length > 0
-        ? "refresh 失败且无可用账密/jwt"
-        : "无 rt；无账密可回退；无本地 jwt",
+      (rt.length > 0 ? "refresh 失败且无可用账密/jwt" : "无 rt；无账密可回退；无本地 jwt") +
+      (failures.length ? `（${failures.join("；")}）` : ""),
   };
 }
 
@@ -469,7 +472,7 @@ async function defaultListProgress(
 async function untilNetworkUp<T>(
   step: () => Promise<T>,
   failure: (r: T) => string | null,
-  wait: NetworkWaiter,
+  wait: NetworkWaiter | undefined,
   label: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<{ result: T; down: boolean }> {
@@ -477,7 +480,7 @@ async function untilNetworkUp<T>(
   for (let left = resolveNetWait(env).retries; ; left--) {
     const result = await step();
     const detail = failure(result);
-    if (detail == null || left <= 0 || !isNetworkFailure(detail)) return { result, down: false };
+    if (detail == null || !wait || left <= 0 || !isNetworkFailure(detail)) return { result, down: false };
     if (!(await wait(`${label}：${detail}`))) return { result, down: true };
   }
 }
@@ -551,7 +554,9 @@ export async function grindOneAccount(
   } catch (error) {
     return { ...base, status: "error", errors: [toError(error).message] };
   }
-  const waitNetwork = ports.waitNetwork ?? defaultNetworkWaiter(ports.env ?? process.env);
+  const netEnv = ports.env ?? process.env;
+  // UNIPUS_NET_WAIT_MAX_MS=0 disables the wait: network failures count as before.
+  const waitNetwork = ports.waitNetwork ?? (resolveNetWait(netEnv).maxMs > 0 ? defaultNetworkWaiter(netEnv) : undefined);
   const networkDown = (detail: string): AccountGrindSummary => ({
     ...base,
     status: "error",
@@ -666,6 +671,7 @@ export async function grindOneAccount(
     }
 
     const afterPlace = await listProgress(credentials);
+    if (progressDown && "error" in afterPlace) return networkDown(afterPlace.error);
     if ("error" in afterPlace) {
       return {
         ...base,
@@ -743,7 +749,12 @@ export async function grindOneAccount(
     else await runSide("speak", () => grindSpeak(grindPorts, speakNeed));
   }
 
+  if (base.network_down) {
+    // A side already waited out the cap: stop now, no second full wait on progress_after.
+    return { ...base, status: "error", errors, error_class: "NETWORK" };
+  }
   const afterRaw = await listProgress(credentials);
+  if (progressDown && "error" in afterRaw) return networkDown(afterRaw.error);
   if ("error" in afterRaw) {
     errors.push(`progress_after: ${afterRaw.error}`);
     return {

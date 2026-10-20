@@ -61,7 +61,7 @@ test("network waiter: gives up at UNIPUS_NET_WAIT_MAX_MS with a resumable log li
   assert.equal(c.now(), 10000, "never sleeps past the cap");
   assert.match(lines.at(-1)!, /仍未恢复.*重跑续上/);
   const zero = createNetworkWaiter({ env: { UNIPUS_NET_WAIT_MAX_MS: "0" }, ...fakeClock(), probe: async () => true, log: () => {} });
-  assert.equal(await zero("x"), false, "cap 0 = old behaviour, no wait");
+  assert.equal(await zero("x"), false, "cap 0 = no wait (callers skip the waiter entirely)");
 });
 
 test("http probe: any response is up, a throw is down", async () => {

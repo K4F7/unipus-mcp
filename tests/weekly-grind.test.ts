@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import { assistMonths, assistUntil, selfUsage } from "../src/account-usage.js";
 import {
+  accountDir,
   listAccounts,
   saveAccountTokens,
   setAccountGrind,
@@ -1324,6 +1325,71 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.equal(waits, 2);
     assert.equal(result.status, "error");
     assert.match(result.errors.join("\n"), /探活失败[\s\S]*fetch failed/);
+  });
+
+  test("rt-only account: refresh network failure keeps its detail, so auth waits for the network (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-rtnet-"));
+    await saveAccountTokens({ accountId: "rtnet", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.r", refreshToken: "rt", makeActive: false, syncLegacy: false }, { home, env });
+    await rm(join(accountDir("rtnet", env, home), "jwt"));
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: ["rtnet"] }, { home, env }))[0]!;
+    let refreshes = 0;
+    const waits: string[] = [];
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async (why: string) => { waits.push(why); return false; },
+      refreshRt: async () => { refreshes++; return { ok: false, code: "NETWORK_ERROR", message: "fetch failed" }; },
+      listProgress: progress,
+    } as never);
+    assert.equal(refreshes, 1);
+    assert.match(waits[0]!, /登录.*refresh: fetch failed/);
+    assert.equal(result.network_down, true);
+  });
+
+  test("UNIPUS_NET_WAIT_MAX_MS=0 keeps the old behaviour: no wait, no NETWORK_DOWN", async () => {
+    const env = { ...LLM_ENV, UNIPUS_NET_WAIT_MAX_MS: "0" };
+    const { home, row } = await oneRow("netoff", env);
+    const result = await grindOneAccount(row, { home, env, llmAsk: async () => { throw new Error("fetch failed"); } });
+    assert.equal(result.status, "error");
+    assert.equal(result.network_down, undefined);
+    assert.match(result.errors.join("\n"), /ANSWER_REFUSED[\s\S]*fetch failed/);
+  });
+
+  test("side NETWORK_DOWN returns at once, without another progress wait (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("sidedown", env);
+    let progressCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => false,
+      listProgress: async () => { progressCalls++; return progress(); },
+      grindListen: async () => ({ completed: 1, taskIds: ["a"], stoppedReason: "NETWORK_DOWN: x", networkDown: true }),
+    });
+    assert.equal(progressCalls, 1, "only the before-progress call");
+    assert.equal(result.network_down, true);
+    assert.equal(result.listen_completed, 1);
+  });
+
+  test("post-placement / post-grind progress outage surfaces NETWORK_DOWN (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("afterdown", env);
+    let n = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => false,
+      listProgress: async () => (++n === 1 ? progress() : { error: "NETWORK_ERROR: 拉取听力本周失败（网络）：fetch failed" }),
+      grindListen: async () => ({ completed: 3, taskIds: ["a", "b", "c"] }),
+      grindSpeak: async () => ({ completed: 3, taskIds: ["d", "e", "f"] }),
+    });
+    assert.equal(result.network_down, true);
+    assert.match(result.errors.join("\n"), /NETWORK_DOWN/);
+    assert.equal(result.speak_completed, 3);
   });
 
   test("real LLM refusal (empty reply) never waits for the network", async () => {
