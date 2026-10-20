@@ -160,7 +160,8 @@ test("runPaperLoop: Clio 1006 soft-skips without burning the consecutive-failure
   ];
   let i = 0;
   const r = await runPaperLoop({
-    skill: "说", need: 1, maxRounds: 5, env: { UNIPUS_CLIO_OVERFLOW_SKIPS: "3", UNIPUS_MAX_CONSECUTIVE_FAILURES: "2" },
+    // maxRounds=1 would exhaust before success if soft skips charged a round (Codex #105).
+    skill: "说", need: 1, maxRounds: 1, env: { UNIPUS_CLIO_OVERFLOW_SKIPS: "3", UNIPUS_MAX_CONSECUTIVE_FAILURES: "2" },
     status: async () => null,
     completeOne: async () => seq[i++]!,
     report: async () => {},

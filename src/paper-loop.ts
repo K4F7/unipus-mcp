@@ -214,13 +214,15 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       continue;
     }
     if (!result.ok && overflowSkips > 0 && isClioCapacityFailure(result.detail) && !isAuthFailure(result.detail, result.errorClass)) {
-      // Clio 1006 on free-talk: skip this paper without burning the consecutive-failure streak (#104).
+      // Clio 1006: soft-skip without burning the consecutive-failure streak or maxRounds (#104).
+      // The server will offer the same paper again; overflowSkips bounds how often we do that.
       overflowSkips--;
       errorClass ??= result.errorClass ?? "CLIO_CAPACITY";
       warnings.push(`跳过 ${result.taskId ?? "?"}（Clio 1006，不计连续失败，剩 ${overflowSkips}）：${result.detail}`);
       console.error(
-        `[clio-1006] ${opts.skill} 第 ${round} 轮失败，跳过本张（不计连续失败，剩软跳过 ${overflowSkips}）：${result.detail}`,
+        `[clio-1006] ${opts.skill} 第 ${round} 轮失败，跳过本张（不计连续失败/轮次，剩软跳过 ${overflowSkips}）：${result.detail}`,
       );
+      round--;
       continue;
     }
     if (!result.ok) {
