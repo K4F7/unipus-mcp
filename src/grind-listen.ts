@@ -10,6 +10,7 @@
  * back to type=train with a new taskId within ~1s. There is no separate
  * enter-train API in captured SPA/docs — we poll, we do not invent paths.
  */
+import type { NetworkWaiter } from "./net-wait.js";
 import type { AuthPorts } from "./auth.js";
 import { resolveLoadPaperUrl } from "./config.js";
 import {
@@ -53,6 +54,8 @@ export type GrindListenPorts = AuthPorts & {
   speechRecord?: SpeechRecordBuilder;
   /** LLM for objective / gap-fill items; default from UNIPUS_LLM_BASE_URL/MODEL/API_KEY (required). */
   llmAsk?: LlmAsk;
+  /** Network-outage wait between papers (#102); unset → network failures count as failures. */
+  waitNetwork?: NetworkWaiter;
   /** Subtitle (WebVTT) fetch for video items; default public fetch. */
   fetchText?: FetchText;
   /** Test seam between getUserStatus polls while waiting out train_profile. */
@@ -475,5 +478,6 @@ export async function grindListenGaps(
     },
     completeOne: () => completeOneListen(ports),
     report: (r) => reportListen(ports, r),
+    waitNetwork: ports.waitNetwork,
   });
 }

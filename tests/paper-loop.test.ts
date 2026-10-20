@@ -83,3 +83,68 @@ test("ledgerSkipReason: App history decides a ledger hit (#100)", async () => {
   assert.match(String(await ledgerSkipReason(async () => ({ isError: true, message: "HTTP 502" }) as never, "T", 1)), /保守跳过.*HTTP 502/);
   assert.match(String(await ledgerSkipReason(async () => { throw new Error("fetch failed"); }, "T", 1)), /保守跳过.*fetch failed/);
 });
+
+test("runPaperLoop: network failures wait and retry the same paper, never counting toward the streak (#102)", async () => {
+  const seq = [
+    { ok: false as const, taskId: "A", detail: "tts/upload UNKNOWN: Clio WSS 错误：Client network socket disconnected before secure TLS connection was established" },
+    { ok: false as const, taskId: null, detail: "NETWORK: fetch failed" },
+    { ok: false as const, taskId: "A", detail: "loadPaper getaddrinfo EAI_AGAIN ucloud.unipus.cn" },
+    { ok: true as const, taskId: "A" },
+  ];
+  let i = 0;
+  const waits: string[] = [];
+  const r = await runPaperLoop({
+    skill: "说", need: 1, maxRounds: 1, env: {},
+    status: async () => ({ taskId: String(i) }),
+    completeOne: async () => seq[i++]!,
+    report: async () => {},
+    waitNetwork: async (why) => { waits.push(why); return true; },
+  });
+  assert.equal(waits.length, 3);
+  assert.deepEqual(r.taskIds, ["A"], "network rounds do not use up maxRounds");
+  assert.equal(r.stoppedReason, undefined);
+});
+
+test("runPaperLoop: network still down after the cap → resumable NETWORK_DOWN stop (#102)", async () => {
+  const r = await runPaperLoop({
+    skill: "听", need: 3, maxRounds: 6, env: {},
+    status: async () => null,
+    completeOne: async () => ({ ok: false as const, taskId: null, detail: "NETWORK: fetch failed ECONNRESET" }),
+    report: async () => {},
+    waitNetwork: async () => false,
+  });
+  assert.equal(r.networkDown, true);
+  assert.equal(r.errorClass, "NETWORK");
+  assert.match(String(r.stoppedReason), /NETWORK_DOWN.*重跑.*fetch failed/);
+});
+
+test("runPaperLoop: real failures keep the streak stop; auth is never waited on; network retries are bounded (#102)", async () => {
+  let waits = 0;
+  const waitNetwork = async () => { waits++; return true; };
+  const real = await runPaperLoop({
+    skill: "说", need: 3, maxRounds: 6, env: {},
+    status: async () => null,
+    completeOne: async () => ({ ok: false as const, taskId: "X", detail: "LLM 无有效答案" }),
+    report: async () => {},
+    waitNetwork,
+  });
+  assert.match(String(real.stoppedReason), /连续 2 张失败/);
+  const auth = await runPaperLoop({
+    skill: "说", need: 3, maxRounds: 6, env: {},
+    status: async () => null,
+    completeOne: async () => ({ ok: false as const, taskId: "X", detail: "AUTH_REQUIRED fetch failed" }),
+    report: async () => {},
+    waitNetwork,
+  });
+  assert.match(String(auth.stoppedReason), /AUTH_REQUIRED/);
+  assert.equal(waits, 0);
+  const flaky = await runPaperLoop({
+    skill: "说", need: 1, maxRounds: 4, env: { UNIPUS_NET_RETRIES: "2" },
+    status: async () => null,
+    completeOne: async () => ({ ok: false as const, taskId: "X", detail: "NETWORK: fetch failed" }),
+    report: async () => {},
+    waitNetwork,
+  });
+  assert.equal(waits, 2, "after UNIPUS_NET_RETRIES the failure counts normally");
+  assert.match(String(flaky.stoppedReason), /连续 2 张失败/);
+});

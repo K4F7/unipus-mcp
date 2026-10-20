@@ -1267,23 +1267,105 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.equal(grindCalls, 0);
   });
 
-  test("LLM unreachable (probe fails) → error before login/progress/grind", async () => {
+  test("LLM unreachable and network never recovers → NETWORK_DOWN before login/progress/grind (#102)", async () => {
     const env = { ...LLM_ENV };
     const { home, row } = await oneRow("probe", env);
     let progressCalls = 0;
     let grindCalls = 0;
+    let waits = 0;
     const result = await grindOneAccount(row, {
       home,
       env,
+      waitNetwork: async () => { waits++; return false; },
       llmAsk: async () => { throw new Error("fetch failed"); },
       listProgress: async () => { progressCalls++; return progress(); },
       grindListen: async () => { grindCalls++; return { completed: 1, taskIds: ["l"] }; },
       grindSpeak: async () => { grindCalls++; return { completed: 1, taskIds: ["s"] }; },
     });
     assert.equal(result.status, "error");
-    assert.match(result.errors.join("\n"), /ANSWER_REFUSED[\s\S]*探活失败[\s\S]*fetch failed/);
+    assert.match(result.errors.join("\n"), /NETWORK_DOWN[\s\S]*重跑[\s\S]*探活失败[\s\S]*fetch failed/);
+    assert.equal(result.network_down, true);
+    assert.equal(result.error_class, "NETWORK");
+    assert.equal(waits, 1);
     assert.equal(progressCalls, 0);
     assert.equal(grindCalls, 0);
+  });
+
+  test("LLM probe network failure waits, then the account runs once the network is back (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("probe-back", env);
+    let asks = 0;
+    let waits = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      waitNetwork: async () => { waits++; return true; },
+      llmAsk: async () => { if (++asks <= 2) throw new Error("fetch failed"); return "OK"; },
+      listProgress: progress,
+      grindListen: async () => ({ completed: 3, taskIds: ["a", "b", "c"] }),
+      grindSpeak: async () => ({ completed: 3, taskIds: ["d", "e", "f"] }),
+    });
+    assert.equal(waits, 1, "probeLlm tries twice, then one wait, then succeeds");
+    assert.notEqual(result.status, "error");
+    assert.equal(result.network_down, undefined);
+  });
+
+  test("probe passes but the LLM host stays unreachable → bounded by UNIPUS_NET_RETRIES (#102)", async () => {
+    const env = { ...LLM_ENV, UNIPUS_NET_RETRIES: "2" };
+    const { home, row } = await oneRow("probe-loop", env);
+    let waits = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      waitNetwork: async () => { waits++; return true; },
+      llmAsk: async () => { throw new Error("fetch failed"); },
+      listProgress: progress,
+    });
+    assert.equal(waits, 2);
+    assert.equal(result.status, "error");
+    assert.match(result.errors.join("\n"), /探活失败[\s\S]*fetch failed/);
+  });
+
+  test("real LLM refusal (empty reply) never waits for the network", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("probe-empty", env);
+    let waits = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      waitNetwork: async () => { waits++; return true; },
+      llmAsk: async () => "",
+      listProgress: progress,
+    });
+    assert.equal(result.status, "error");
+    assert.match(result.errors.join("\n"), /ANSWER_REFUSED[\s\S]*empty reply/);
+    assert.equal(waits, 0);
+  });
+
+  test("listen side NETWORK_DOWN → speak skipped, run stops before the next account (#102)", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-netdown-"));
+    const env = { ...LLM_ENV };
+    for (const id of ["n1", "n2"]) {
+      await saveAccountTokens(
+        { accountId: id, jwt: `eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.${id}`, makeActive: false, syncLegacy: false },
+        { home, env },
+      );
+    }
+    let speakCalls = 0;
+    let listenCalls = 0;
+    const summary = await runWeeklyGrind({ kind: "all" }, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => false,
+      listProgress: progress,
+      grindListen: async () => { listenCalls++; return { completed: 0, taskIds: [], stoppedReason: "NETWORK_DOWN: x", networkDown: true, errorClass: "NETWORK" }; },
+      grindSpeak: async () => { speakCalls++; return { completed: 0, taskIds: [] }; },
+    });
+    assert.equal(summary.accounts.length, 1, "second account is left for the resumed run");
+    assert.equal(summary.accounts[0]!.network_down, true);
+    assert.equal(listenCalls, 1);
+    assert.equal(speakCalls, 0);
   });
 
   test("listen refused → speak not run, account status error", async () => {

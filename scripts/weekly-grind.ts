@@ -60,6 +60,9 @@ Exit codes (stdout ends with the summary line when accounts were resolved):
   1  every targeted account ended in status=error (see errors / error_class)
   2  usage error or no target accounts
   3  stall watchdog: no log line / stage advance for UNIPUS_STALL_MINUTES (default 15; 0 = off)
+  4  NETWORK_DOWN: network failures outlasted UNIPUS_NET_WAIT_MAX_MS (default 30 min); re-run to resume
+Network failures (fetch failed / ECONNRESET / TLS / DNS / ETIMEDOUT) wait with backoff (UNIPUS_NET_WAIT_BASE_MS 5s →
+  UNIPUS_NET_WAIT_CAP_MS 60s) and retry; they never count toward UNIPUS_MAX_CONSECUTIVE_FAILURES (UNIPUS_NET_RETRIES=5 per skill).
 TTS: unset → macOS say (silent, -o file) / other platforms Kokoro; UNIPUS_TTS_ENGINE=kokoro|piper|say overrides
   (edge|flite|auto legacy, deprecated). Self-check: npx tsx scripts/doctor.ts
 LLM (required, answers only from it — no template / heuristic / empty blank):
@@ -106,6 +109,11 @@ async function main(): Promise<void> {
   }
   // exitCode (not process.exit) so piped stdout JSON fully flushes.
   if (hardFail && !anyOk) process.exitCode = 1;
+  // Network outage outlasted UNIPUS_NET_WAIT_MAX_MS (#102): resumable, not an account failure.
+  if (summary.accounts.some((a) => a.network_down)) {
+    console.error("[net] NETWORK_DOWN：网络未恢复，已停止；网络恢复后重跑同一命令即可续上（已交的卷按 App 历史跳过）");
+    process.exitCode = 4;
+  }
 }
 
 main().catch((error) => {
