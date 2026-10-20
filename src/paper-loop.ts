@@ -7,7 +7,8 @@
  * "skip" API: an unsubmitted paper stays the current one, so the next round
  * retries it from a fresh loadPaper — the streak cap keeps that bounded.
  */
-import { resolveConcurrentRetry, resolveMaxConsecutiveFailures, resolveNetWait } from "./limits.js";
+import { resolveClioOverflowSkips, resolveConcurrentRetry, resolveMaxConsecutiveFailures, resolveNetWait } from "./limits.js";
+import { isClioAudioOverflow } from "./clio-speech.js";
 import { isNetworkFailure, networkDownReason, type NetworkWaiter } from "./net-wait.js";
 import type { FindHistoryTrainingTaskResult } from "./history-training-tasks.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
@@ -22,9 +23,16 @@ export function isAuthFailure(detail: string, errorClass?: ErrorClass): boolean 
   return errorClass === "FORBIDDEN" || /no jwt|AUTH_REQUIRED|AUTH_FAILED|\b401\b|JWT 无效|未登录|登录(已)?(过期|失效)/.test(detail);
 }
 
+/** Clio capacity failure on long free-talk (#104): skip soft, not a network wait. */
+export function isClioCapacityFailure(detail: unknown): boolean {
+  return isClioAudioOverflow(detail);
+}
+
 /** Round cap: the week's need plus at most `need` skipped papers (never below the streak cap). */
 export function defaultMaxRounds(need: number, env?: NodeJS.ProcessEnv): number {
-  return need + Math.max(need, resolveMaxConsecutiveFailures(env));
+  // Soft Clio-1006 skips use round-- and do not burn the streak, but still give the
+  // week loop headroom if a caller forgets that (#104 / #105 Codex).
+  return need + Math.max(need, resolveMaxConsecutiveFailures(env)) + resolveClioOverflowSkips(env);
 }
 
 /** Counts papers failed in a row; `fail` returns the stop reason once the cap is hit. */
@@ -162,6 +170,7 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   let lastSkipped: string | null | undefined;
   let errorClass: ErrorClass | undefined;
   let netRetries = resolveNetWait(opts.env).retries;
+  let overflowSkips = resolveClioOverflowSkips(opts.env);
   const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
     completed: taskIds.length,
     taskIds,
@@ -203,6 +212,18 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
         return done({ stoppedReason: networkDownReason(result.detail), networkDown: true, errorClass: "NETWORK" });
       }
       netRetries--;
+      round--;
+      continue;
+    }
+    if (!result.ok && overflowSkips > 0 && isClioCapacityFailure(result.detail) && !isAuthFailure(result.detail, result.errorClass)) {
+      // Clio 1006: soft-skip without burning the consecutive-failure streak or maxRounds (#104).
+      // The server will offer the same paper again; overflowSkips bounds how often we do that.
+      overflowSkips--;
+      errorClass ??= result.errorClass ?? "CLIO_CAPACITY";
+      warnings.push(`跳过 ${result.taskId ?? "?"}（Clio 1006，不计连续失败，剩 ${overflowSkips}）：${result.detail}`);
+      console.error(
+        `[clio-1006] ${opts.skill} 第 ${round} 轮失败，跳过本张（不计连续失败/轮次，剩软跳过 ${overflowSkips}）：${result.detail}`,
+      );
       round--;
       continue;
     }

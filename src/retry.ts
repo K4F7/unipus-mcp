@@ -7,6 +7,7 @@ export type ErrorClass =
   | "FORBIDDEN"
   | "HTTP_4XX"
   | "HTTP_5XX"
+  | "CLIO_CAPACITY"
   | "UNKNOWN";
 
 /** Normalise thrown values (node-edge-tts rejects with bare strings like 'Timed out'). */
@@ -19,6 +20,9 @@ export function classifyError(value: unknown): ErrorClass {
   const err = toError(value);
   const msg = err.message;
   const cause = (err as { cause?: { code?: string } }).cause?.code ?? "";
+  if (/code\s*[=:]\s*1006\b|audio\s*overflow/i.test(msg)) {
+    return "CLIO_CAPACITY";
+  }
   if (/timed out|timeout|超时|ETIMEDOUT/i.test(msg) || cause === "UND_ERR_CONNECT_TIMEOUT") {
     return "TIMEOUT";
   }

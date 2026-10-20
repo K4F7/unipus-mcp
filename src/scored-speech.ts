@@ -4,13 +4,18 @@ import { statSync } from "node:fs";
  * EN_PRED_SCORE record carrying recordDetail + specific_scores (what the app writes
  * after in-app SOE). Without those blocks the server shows 「评分中」 forever.
  */
-import { mapClioResultToReviewScores, scoreEnSent } from "./clio-speech.js";
+import { isClioAudioOverflow, mapClioResultToReviewScores, scoreEnSent } from "./clio-speech.js";
 import { buildEnSentScoreRecord } from "./grade-question.js";
 import { segmentSpeakText, stripHtml, type GrindLeaf } from "./grind-paper.js";
 import { AnswerRefusedError } from "./choice-solver.js";
 import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
-import { resolveClioMaxMs, resolveTtsRetryMaxMs } from "./limits.js";
+import {
+  resolveClioMaxMs,
+  resolveFreeTalkClioMaxMs,
+  resolveFreeTalkTtsRetryMaxMs,
+  resolveTtsRetryMaxMs,
+} from "./limits.js";
 import { retryWithinBudget, toError } from "./retry.js";
 import { activeNow } from "./watchdog.js";
 import { join } from "node:path";
@@ -24,6 +29,11 @@ export type SpeechOptions = {
   speed?: number;
   /** Silence between sentences (s). */
   pauseSec?: number;
+  /**
+   * Cap when stretching short recordings (#104). Defaults to MAX_SENTENCE_PAUSE_SEC.
+   * After a Clio 1006, set equal to the tightened pause so stretch cannot undo it.
+   */
+  maxPauseSec?: number;
   /** Minimum recording length (s); shorter audio is never scored or uploaded. */
   minSec?: number;
   /** Final recording length (s) of the voiced answer. */
@@ -48,9 +58,38 @@ export class SpeechTooShortError extends Error {
 /** Longest silence inserted between sentences when stretching a short recording. */
 export const MAX_SENTENCE_PAUSE_SEC = 1.2;
 
+/** How far to shrink the sentence pause after each Clio 1006 (#104). */
+export const FREE_TALK_PAUSE_TIGHTEN_STEP_SEC = 0.2;
+
 /** 16 kHz mono s16 WAV → seconds. */
 export function wavSeconds(wavPath: string, sizeOf: (p: string) => number = (p) => statSync(p).size): number {
   return Math.max(0, (sizeOf(wavPath) - 44) / 32000);
+}
+
+/** Sentence gaps used for pause stretch / tighten (same split as TTS pause insertion). */
+export function sentenceGaps(text: string): number {
+  return Math.max(0, text.split(/[.!?]\s+(?=\S)/).length - 1);
+}
+
+/**
+ * Next sentence pause after Clio `1006 audio overflow` on free-talk (#104).
+ * Keeps the speech body fixed and only shortens silence, never below the pause
+ * that still yields ≥ minSec (+0.5 s slack). Returns null when it cannot tighten.
+ */
+export function nextFreeTalkPauseAfterOverflow(
+  usedPause: number,
+  wavSec: number,
+  gaps: number,
+  minSec: number,
+  stepSec = FREE_TALK_PAUSE_TIGHTEN_STEP_SEC,
+): number | null {
+  if (gaps <= 0 || stepSec <= 0) return null;
+  const speechSec = Math.max(0, wavSec - gaps * usedPause);
+  const floor = Math.max(0, (minSec + 0.5 - speechSec) / gaps);
+  const next = Math.max(floor, usedPause - stepSec);
+  if (next >= usedPause - 0.05) return null;
+  if (speechSec + gaps * next < minSec) return null;
+  return Math.round(next * 100) / 100;
 }
 
 function wordDetails(result: Record<string, unknown>): Array<{ char: string; score: number }> {
@@ -80,16 +119,23 @@ export type ScoredSpeechDeps = {
 
 /**
  * One Clio request. Clio answers in ≈2.2× the audio length (probe #98: 3 s → 3–5 s,
- * 20 s → 41 s, 94 s → 215 s), so allow 30 s + 3× audio, within [45 s, UNIPUS_CLIO_MAX_MS].
+ * 20 s → 41 s, 94 s → 215 s), so allow 30 s + 3× audio, within [45 s, UNIPUS_CLIO_MAX_MS]
+ * (自由表达 uses UNIPUS_FREE_TALK_CLIO_MAX_MS, #104).
  * UNIPUS_CLIO_TIMEOUT_MS pins a fixed value. A Clio failure is never skipped: an
  * unscored record would land as 「评分中」 again.
  */
-export function clioTimeoutMs(wavPath: string, env?: NodeJS.ProcessEnv, sizeOf: (p: string) => number = (p) => statSync(p).size): number {
+export function clioTimeoutMs(
+  wavPath: string,
+  env?: NodeJS.ProcessEnv,
+  sizeOf: (p: string) => number = (p) => statSync(p).size,
+  opts: { freeTalk?: boolean } = {},
+): number {
   const o = Number(env?.UNIPUS_CLIO_TIMEOUT_MS);
   if (Number.isFinite(o) && o >= 5000) return o;
   let sec = 30;
   try { sec = Math.max(1, (sizeOf(wavPath) - 44) / 32000); } catch {}
-  return Math.min(resolveClioMaxMs(env ?? {}), Math.max(45_000, Math.round(30_000 + 3_000 * sec)));
+  const cap = opts.freeTalk ? resolveFreeTalkClioMaxMs(env ?? {}) : resolveClioMaxMs(env ?? {});
+  return Math.min(cap, Math.max(45_000, Math.round(30_000 + 3_000 * sec)));
 }
 
 /** Errors a retry cannot fix: rethrown as-is. */
@@ -119,6 +165,13 @@ async function step<T>(timings: StepTimings, now: () => number, name: string, ru
 
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 
+type SpokenWav = {
+  wavPath: string;
+  cleanup?: () => void | Promise<void>;
+  pauseSec: number;
+  sec: number;
+};
+
 export function createScoredSpeechRecordBuilder(
   ports: UploadAnswerAudioPorts,
   deps: ScoredSpeechDeps = {},
@@ -129,17 +182,26 @@ export function createScoredSpeechRecordBuilder(
   const convertToMp3 = deps.convertToMp3 ?? ((w) => wavToMp3(w, ports.env));
   const now = deps.now ?? activeNow;
   const log = deps.log ?? ((line: string) => console.error(`[speech] ${line}`));
-  const synthesizeLongEnough = async (text: string, opts: SpeechOptions = {}) => {
+  const synthesizeLongEnough = async (text: string, opts: SpeechOptions = {}): Promise<SpokenWav> => {
+    let pauseSec = opts.pauseSec ?? 0;
     let spoken = await synthesize({ text, speed: opts.speed, pauseSec: opts.pauseSec }, { env: ports.env });
-    if (!opts.minSec) return spoken;
+    if (!opts.minSec) {
+      // Short utterances never stretch; avoid stat'ing test mock paths.
+      return { wavPath: spoken.wavPath, cleanup: spoken.cleanup, pauseSec, sec: 0 };
+    }
     let sec = wavSeconds(spoken.wavPath);
-    const gaps = text.split(/[.!?]\s+(?=\S)/).length - 1;
+    const gaps = sentenceGaps(text);
+    const pauseCap = Math.min(
+      MAX_SENTENCE_PAUSE_SEC,
+      opts.maxPauseSec ?? MAX_SENTENCE_PAUSE_SEC,
+    );
     if (sec < opts.minSec && gaps > 0) {
       // Stretch only the pauses between sentences (speech itself unchanged), within a natural limit.
-      const pauseSec = Math.min(MAX_SENTENCE_PAUSE_SEC, (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps);
-      if (pauseSec > (opts.pauseSec ?? 0)) {
+      const stretched = Math.min(pauseCap, (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps);
+      if (stretched > (opts.pauseSec ?? 0)) {
         await spoken.cleanup?.();
-        console.error(`[speech] 录音 ${sec.toFixed(1)}s < ${opts.minSec}s，句间停顿加到 ${pauseSec.toFixed(2)}s 重合成`);
+        console.error(`[speech] 录音 ${sec.toFixed(1)}s < ${opts.minSec}s，句间停顿加到 ${stretched.toFixed(2)}s 重合成`);
+        pauseSec = stretched;
         spoken = await synthesize({ text, speed: opts.speed, pauseSec }, { env: ports.env });
         sec = wavSeconds(spoken.wavPath);
       }
@@ -149,19 +211,19 @@ export function createScoredSpeechRecordBuilder(
       throw new SpeechTooShortError(sec, opts.minSec);
     }
     opts.onAudio?.(sec);
-    return spoken;
+    return { wavPath: spoken.wavPath, cleanup: spoken.cleanup, pauseSec, sec };
   };
-  type Spoken = Awaited<ReturnType<typeof synthesizeLongEnough>>;
   /** Clio → mp3 → upload for an already synthesised wav. */
   const scoreAndUpload = async (
     timings: StepTimings,
-    spoken: Spoken,
+    spoken: SpokenWav,
     text: string,
     tag: string,
     type: SpeechRecordType,
     remainingMs: number,
+    freeTalk: boolean,
   ) => {
-    const timeoutMs = Math.min(clioTimeoutMs(spoken.wavPath, ports.env), remainingMs);
+    const timeoutMs = Math.min(clioTimeoutMs(spoken.wavPath, ports.env, undefined, { freeTalk }), remainingMs);
     const scored = await step(timings, now, "Clio 评分", () => score({ transcript: text, wavPath: spoken.wavPath, timeoutMs }, { env: ports.env }));
     const reviewScores = mapClioResultToReviewScores(scored.result);
     if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
@@ -198,20 +260,53 @@ export function createScoredSpeechRecordBuilder(
     return record;
   };
   // Box egress to Clio/七牛 drops TLS intermittently and Clio is slow on long audio:
-  // retry within one wall budget with backoff; the wav is synthesised once and reused (#92, #98).
+  // retry within one wall budget with backoff. Short utterances reuse one wav (#92, #98);
+  // free-talk regenerates with tighter pauses after Clio 1006 (#104).
   return async (text, tag, type, opts) => {
-    let spoken: Spoken | undefined;
+    let spoken: SpokenWav | undefined;
+    let speechOpts: SpeechOptions = { ...(opts ?? {}) };
+    const freeTalk = speechOpts.minSec != null && speechOpts.minSec > 0;
     const timings: StepTimings = new Map();
     const start = now();
+    // Free-talk uses its own resolver (default 900s); do not Math.max with the
+    // short-utterance cap or a lower UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS is ignored (#105 Codex).
+    const budgetMs = freeTalk ? resolveFreeTalkTtsRetryMaxMs(ports.env) : resolveTtsRetryMaxMs(ports.env);
     try {
       const record = await retryWithinBudget(
         async (remainingMs) => {
-          spoken ??= await step(timings, now, "TTS 合成", () => synthesizeLongEnough(text, opts));
-          return scoreAndUpload(timings, spoken, text, tag, type, remainingMs);
+          try {
+            spoken ??= await step(timings, now, "TTS 合成", () => synthesizeLongEnough(text, speechOpts));
+            return await scoreAndUpload(timings, spoken, text, tag, type, remainingMs, freeTalk);
+          } catch (raw) {
+            const err = toError(raw);
+            if (freeTalk && spoken && isClioAudioOverflow(err)) {
+              const next = nextFreeTalkPauseAfterOverflow(
+                spoken.pauseSec,
+                spoken.sec,
+                sentenceGaps(text),
+                speechOpts.minSec!,
+              );
+              if (next != null) {
+                log(
+                  `[clio-1006] ${tag} audio overflow（${spoken.sec.toFixed(1)}s wav，句间 ${spoken.pauseSec.toFixed(2)}s）` +
+                    `：收紧到 ${next.toFixed(2)}s 重合成（仍 ≥${speechOpts.minSec}s；非网络/freeze）`,
+                );
+                await spoken.cleanup?.();
+                spoken = undefined;
+                speechOpts = { ...speechOpts, pauseSec: next, maxPauseSec: next };
+              } else {
+                log(
+                  `[clio-1006] ${tag} audio overflow（${spoken.sec.toFixed(1)}s wav，句间 ${spoken.pauseSec.toFixed(2)}s）` +
+                    `：无法再收紧且仍 ≥${speechOpts.minSec}s，同 wav 重试（非网络/freeze）`,
+                );
+              }
+            }
+            throw err;
+          }
         },
         {
           label: tag,
-          budgetMs: resolveTtsRetryMaxMs(ports.env),
+          budgetMs,
           baseDelayMs: deps.retryDelayMs ?? 3000,
           isFatal: isFatalSpeechError,
           now,

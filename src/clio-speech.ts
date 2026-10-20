@@ -391,6 +391,17 @@ async function resolveAudioBytes(
 }
 
 
+/** Clio capacity failure on long free-talk clips (#104): not a network blip. */
+export function isClioAudioOverflow(value: unknown): boolean {
+  const msg =
+    value instanceof Error
+      ? value.message
+      : typeof value === "string"
+        ? value
+        : String(value ?? "");
+  return /code\s*[=:]\s*1006\b|\b1006\b[^\n]{0,40}audio\s*overflow|audio\s*overflow/i.test(msg);
+}
+
 type ParsedClioMessage =
   | { kind: "score"; payload: ClioScorePayload }
   | { kind: "error"; message: string };

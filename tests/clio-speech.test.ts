@@ -436,3 +436,12 @@ test("parseClioScoreMessage: Clio's malformed `audio overflow` frame (94s clip, 
   });
   assert.throws(() => parseClioScoreMessage("garbage"), /Clio 返回无法解析/);
 });
+
+test("isClioAudioOverflow: 1006 / audio overflow is capacity, not network (#104)", async () => {
+  const { isClioAudioOverflow } = await import("../src/clio-speech.js");
+  assert.equal(isClioAudioOverflow("Clio 评分失败：code=1006 audio overflow"), true);
+  assert.equal(isClioAudioOverflow(new Error("Clio 评分失败：code=1006 audio overflow")), true);
+  assert.equal(isClioAudioOverflow('{"code":1006, "msg":audio overflow}'), true);
+  assert.equal(isClioAudioOverflow("Clio WSS 超时 (302983ms)"), false);
+  assert.equal(isClioAudioOverflow("fetch failed ECONNRESET"), false);
+});

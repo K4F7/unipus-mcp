@@ -65,6 +65,21 @@ export function resolveClioMaxMs(env: NodeJS.ProcessEnv = process.env): number {
   return envNumber(env, "UNIPUS_CLIO_MAX_MS", 360_000, 45_000);
 }
 
+/** Cap on one Clio scoring request for 自由表达 (≥90 s); slower Clio needs more headroom (#104). */
+export function resolveFreeTalkClioMaxMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_FREE_TALK_CLIO_MAX_MS", 480_000, 45_000);
+}
+
+/** TTS→Clio→upload retry wall budget for 自由表达 (default above the short-utterance cap, #104). */
+export function resolveFreeTalkTtsRetryMaxMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS", 900_000, 10_000);
+}
+
+/** Soft skips for Clio 1006 papers that do not count toward consecutive-failure stop (#104). */
+export function resolveClioOverflowSkips(env: NodeJS.ProcessEnv = process.env): number {
+  return Math.round(envNumber(env, "UNIPUS_CLIO_OVERFLOW_SKIPS", 3, 0, 50));
+}
+
 /** Papers failed in a row before the account stops (a single failure only skips that paper, #98). */
 export function resolveMaxConsecutiveFailures(env: NodeJS.ProcessEnv = process.env): number {
   return Math.round(envNumber(env, "UNIPUS_MAX_CONSECUTIVE_FAILURES", 2, 1, 50));
@@ -112,8 +127,8 @@ export function describeLimits(env: NodeJS.ProcessEnv = process.env): string {
     `App 分轮询 ${s.pollMs}ms/上限 ${s.maxMs}ms；part-report 轮询 ${r.pollMs}ms/上限 ${r.maxMs}ms；` +
     `TTS 重试总 ${resolveTtsRetryMaxMs(env)}ms；单 part ${resolvePartMaxMs(env)}ms；整卷 ${resolvePaperMaxMs(env)}ms；` +
     `AI 每轮 ≥${resolveAiTurnMinMs(env)}ms；自由表达 ≥${resolveFreeTalkMinSec(env)}s 语速 ${resolveFreeTalkTtsSpeed(env)}；` +
-    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/首包 ${resolveLlmFirstByteMs(env)}ms/空闲 ${resolveLlmIdleMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}；Clio 单次 ≤${resolveClioMaxMs(env)}ms；` +
-    `连续失败 ${resolveMaxConsecutiveFailures(env)} 张停号；4021 等 ${c.waitMs}ms 重试 ${c.retries} 次`
+    `LLM 单次 ${resolveLlmTimeoutMs(env)}ms/首包 ${resolveLlmFirstByteMs(env)}ms/空闲 ${resolveLlmIdleMs(env)}ms/max_tokens ${resolveLlmMaxTokens(env)}；Clio 单次 ≤${resolveClioMaxMs(env)}ms/自由表达 ≤${resolveFreeTalkClioMaxMs(env)}ms；` +
+    `连续失败 ${resolveMaxConsecutiveFailures(env)} 张停号；Clio1006 软跳过 ${resolveClioOverflowSkips(env)}；4021 等 ${c.waitMs}ms 重试 ${c.retries} 次`
   );
 }
 

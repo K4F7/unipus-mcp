@@ -13,6 +13,8 @@ describe("classifyError", () => {
     assert.equal(classifyError(new Error("Unexpected server response: 503")), "HTTP_5XX");
     assert.equal(classifyError(new TypeError("fetch failed")), "NETWORK");
     assert.equal(classifyError(new Error("untrusted_unipus_request_target")), "UNKNOWN");
+    assert.equal(classifyError(new Error("Clio 评分失败：code=1006 audio overflow")), "CLIO_CAPACITY");
+    assert.equal(classifyError("tts/upload CLIO_CAPACITY: Clio 评分失败：code=1006 audio overflow"), "CLIO_CAPACITY");
   });
 });
 
