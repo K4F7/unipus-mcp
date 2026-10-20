@@ -11,6 +11,7 @@ import { AnswerRefusedError } from "./choice-solver.js";
 import { resolveFfmpegPath, spawnFfmpeg, synthesizeSpeechWav } from "./tts.js";
 import { uploadAnswerAudio, type UploadAnswerAudioPorts } from "./upload-answer-audio.js";
 import {
+  resolveClioMaxAudioSec,
   resolveClioMaxMs,
   resolveFreeTalkClioMaxMs,
   resolveFreeTalkTtsRetryMaxMs,
@@ -52,6 +53,18 @@ export class SpeechTooShortError extends Error {
   constructor(readonly sec: number, readonly minSec: number) {
     super(`录音 ${sec.toFixed(1)}s < ${minSec}s（已加长句间停顿仍不够）`);
     this.name = "SpeechTooShortError";
+  }
+}
+
+/**
+ * Clio 1006 on 自由表达 that a tighter pause cannot fix (or audio over UNIPUS_CLIO_MAX_AUDIO_SEC):
+ * the caller needs a shorter script (#108). Message keeps "1006 audio overflow" so the paper
+ * loop still classifies it as CLIO_CAPACITY.
+ */
+export class ClioOverflowError extends Error {
+  constructor(readonly sec: number, readonly pauseSec: number, detail: string) {
+    super(`${detail}（${sec.toFixed(1)}s wav，句间 ${pauseSec.toFixed(2)}s，需缩稿）`);
+    this.name = "ClioOverflowError";
   }
 }
 
@@ -140,7 +153,7 @@ export function clioTimeoutMs(
 
 /** Errors a retry cannot fix: rethrown as-is. */
 function isFatalSpeechError(e: Error): boolean {
-  return e instanceof SpeechTooShortError || e instanceof AnswerRefusedError || /Clio 未返回有效分数/.test(e.message);
+  return e instanceof SpeechTooShortError || e instanceof ClioOverflowError || e instanceof AnswerRefusedError || /Clio 未返回有效分数/.test(e.message);
 }
 
 /** Step name → duration (ms) of one record's latest attempt. */
@@ -209,6 +222,22 @@ export function createScoredSpeechRecordBuilder(
     if (sec < opts.minSec) {
       await spoken.cleanup?.();
       throw new SpeechTooShortError(sec, opts.minSec);
+    }
+    const maxSec = resolveClioMaxAudioSec(ports.env);
+    if (maxSec > 0 && sec > maxSec) {
+      // Over the configured Clio ceiling: shrink silence once (still ≥ minSec), else ask for a shorter script.
+      const speechSec = sec - gaps * pauseSec;
+      const fit = gaps > 0 ? Math.max((opts.minSec + 0.5 - speechSec) / gaps, (maxSec - 0.5 - speechSec) / gaps) : pauseSec;
+      if (fit >= 0 && fit < pauseSec) {
+        await spoken.cleanup?.();
+        pauseSec = Math.round(fit * 100) / 100;
+        spoken = await synthesize({ text, speed: opts.speed, pauseSec }, { env: ports.env });
+        sec = wavSeconds(spoken.wavPath);
+      }
+      if (sec > maxSec || sec < opts.minSec) {
+        await spoken.cleanup?.();
+        throw new ClioOverflowError(sec, pauseSec, `录音超过 UNIPUS_CLIO_MAX_AUDIO_SEC=${maxSec}s，未送 Clio（1006 audio overflow 预防）`);
+      }
     }
     opts.onAudio?.(sec);
     return { wavPath: spoken.wavPath, cleanup: spoken.cleanup, pauseSec, sec };
@@ -295,10 +324,12 @@ export function createScoredSpeechRecordBuilder(
                 spoken = undefined;
                 speechOpts = { ...speechOpts, pauseSec: next, maxPauseSec: next };
               } else {
+                // Same wav again just burns ~4 min of Clio per try (#108): hand back for a shorter script.
                 log(
                   `[clio-1006] ${tag} audio overflow（${spoken.sec.toFixed(1)}s wav，句间 ${spoken.pauseSec.toFixed(2)}s）` +
-                    `：无法再收紧且仍 ≥${speechOpts.minSec}s，同 wav 重试（非网络/freeze）`,
+                    `：停顿已到下限，交回缩稿（非网络/freeze）`,
                 );
+                throw new ClioOverflowError(spoken.sec, spoken.pauseSec, err.message);
               }
             }
             throw err;

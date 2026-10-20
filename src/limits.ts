@@ -75,6 +75,14 @@ export function resolveFreeTalkTtsRetryMaxMs(env: NodeJS.ProcessEnv = process.en
   return envNumber(env, "UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS", 900_000, 10_000);
 }
 
+/**
+ * Optional pre-Clio ceiling on 自由表达 audio (s); 0 = off (default). Logs show no fixed Clio cap
+ * (1006 at 90.4–96.3 s while 94–103 s passed, #108), so only set this once a real cap is measured.
+ */
+export function resolveClioMaxAudioSec(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "UNIPUS_CLIO_MAX_AUDIO_SEC", 0, 0);
+}
+
 /** Soft skips for Clio 1006 papers that do not count toward consecutive-failure stop (#104). */
 export function resolveClioOverflowSkips(env: NodeJS.ProcessEnv = process.env): number {
   return Math.round(envNumber(env, "UNIPUS_CLIO_OVERFLOW_SKIPS", 3, 0, 50));

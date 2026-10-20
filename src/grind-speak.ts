@@ -42,9 +42,9 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
-import { generateFreeTalk, leafTaskText } from "./speak-content.js";
+import { generateFreeTalk, leafTaskText, shortenFreeTalk, wordCount } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
-import { activeNow, markProgress, withDeadline, withWallTimeout } from "./watchdog.js";
+import { activeNow, markProgress, remainingBudgetMs, withDeadline, withWallTimeout } from "./watchdog.js";
 import {
   budgetFromTries,
   pollWithin,
@@ -57,7 +57,7 @@ import {
   type PollBudget,
 } from "./limits.js";
 import { pollPartReports, type PartScore } from "./part-report.js";
-import { SpeechTooShortError } from "./scored-speech.js";
+import { ClioOverflowError, SpeechTooShortError } from "./scored-speech.js";
 import { AnswerRefusedError, resolveLlmAsk, type LlmAsk } from "./choice-solver.js";
 
 /** App 范例学习 / 自由表达 part/submit go to uadaptive (same-origin WebView). */
@@ -312,12 +312,18 @@ async function reloadForResubmit(
 const FREE_TALK_PAUSE_SEC = 0.5;
 /** Scripts tried when the recording stays under the minimum length. */
 const FREE_TALK_ATTEMPTS = 3;
+/** Shorter rewrites after Clio 1006 at the pause floor (#108). */
+const FREE_TALK_OVERFLOW_REWRITES = 2;
+/** Part budget one more LLM + TTS + Clio (≈2.2× audio) + upload round needs (logs: 150–280 s, #108). */
+const FREE_TALK_ROUND_MIN_MS = 300_000;
 
 type FreeTalkMeta = { words: number; sec?: number };
 
 /**
  * 自由表达: LLM monologue on the task (EN_PRED_SCORE), voiced slower with sentence pauses and
- * a ≥UNIPUS_FREE_TALK_MIN_SEC gate (#92). Anything else here has no answer source → refuse.
+ * a ≥UNIPUS_FREE_TALK_MIN_SEC gate (#92). On a Clio 1006 the pause cannot fix, the LLM shortens
+ * the script (still 210–240 words) and it is re-voiced, while the part budget allows (#108).
+ * Anything else here has no answer source → refuse.
  */
 async function buildFreeTalk(
   leaf: GrindLeaf,
@@ -333,10 +339,13 @@ async function buildFreeTalk(
   if (!task) throw new AnswerRefusedError(`自由表达 ${leaf.name || leaf.instanceId} 缺题目文本，拒绝交卷`);
   const minSec = resolveFreeTalkMinSec(env);
   let last = "";
-  for (let i = 0; i < FREE_TALK_ATTEMPTS; i++) {
+  let next: string | undefined;
+  let rewrites = 0;
+  for (let i = 0; i < FREE_TALK_ATTEMPTS; ) {
     // #63: free talk must address the task points (server grades appropriateness).
-    const text = await generateFreeTalk(task, { ask });
-    const m: FreeTalkMeta = { words: text.split(/\s+/).filter(Boolean).length };
+    const text = next ?? (await generateFreeTalk(task, { ask }));
+    next = undefined;
+    const m: FreeTalkMeta = { words: wordCount(text) };
     try {
       const record = await speech(text, `speak-${leaf.instanceId}-main`, "EN_PRED_SCORE", {
         speed: resolveFreeTalkTtsSpeed(env),
@@ -348,9 +357,19 @@ async function buildFreeTalk(
       console.error(`[free-talk] ${leaf.instanceId} ${m.words} 词 ${m.sec ?? "?"}s`);
       return JSON.stringify({ value: [], children: [voicedChild(record)] });
     } catch (error) {
+      if (error instanceof ClioOverflowError) {
+        if (rewrites >= FREE_TALK_OVERFLOW_REWRITES || remainingBudgetMs() < FREE_TALK_ROUND_MIN_MS) throw error;
+        rewrites++;
+        // Aim just above the floor: scale words by (minSec + 1.5) / overflowing seconds; shortenFreeTalk clamps to 210–240.
+        const target = Math.min(m.words - 5, Math.floor((m.words * (minSec + 1.5)) / error.sec));
+        console.error(`[free-talk] [clio-1006] ${m.words} 词 ${error.sec.toFixed(1)}s 溢出，第 ${rewrites}/${FREE_TALK_OVERFLOW_REWRITES} 次缩稿到 ≈${Math.max(210, target)} 词`);
+        next = await shortenFreeTalk(task, text, target, { ask });
+        continue;
+      }
       if (!(error instanceof SpeechTooShortError)) throw error;
+      i++;
       last = `${m.words} 词，${error.message}`;
-      console.error(`[free-talk] 第 ${i + 1}/${FREE_TALK_ATTEMPTS} 稿录音太短：${last}`);
+      console.error(`[free-talk] 第 ${i}/${FREE_TALK_ATTEMPTS} 稿录音太短：${last}`);
     }
   }
   throw new AnswerRefusedError(`自由表达录音始终不足 ${minSec}s（${FREE_TALK_ATTEMPTS} 稿），拒绝交卷：${last}`);
