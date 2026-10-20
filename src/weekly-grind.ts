@@ -393,6 +393,18 @@ export async function ensureAccountAuth(
     };
   }
 
+  // Network failed refresh/login: do not fall back to a possibly-stale cached JWT (#102).
+  // A later 401 is not classified as network, so untilNetworkUp would never wait or re-auth.
+  if (failures.some((f) => isNetworkFailure(f))) {
+    return {
+      ok: false,
+      code: "AUTH_FAILED",
+      message:
+        (rt.length > 0 ? "refresh 失败且无可用账密/jwt" : "无 rt；无账密可回退；无本地 jwt") +
+        `（${failures.join("；")}）`,
+    };
+  }
+
   const existing = await readAccountJwt(accountId, fsOpts);
   if (existing != null) {
     return { ok: true, jwt: existing };
@@ -661,8 +673,15 @@ export async function grindOneAccount(
       return { ...base, status: "needs_placement", errors: [...errors, `placement: ${msg}（网络已恢复，重跑续上）`], error_class: "NETWORK" };
     }
     const placeNet = [placed.listen, placed.speak].find((side) => side && !side.ok && isNetworkFailure(side.detail));
-    if (waitNetwork && placeNet && !placeNet.ok && !(await waitNetwork(`定级：${placeNet.detail}`))) {
-      return networkDown(`定级：${placeNet.detail}`);
+    if (waitNetwork && placeNet && !placeNet.ok) {
+      if (!(await waitNetwork(`定级：${placeNet.detail}`))) return networkDown(`定级：${placeNet.detail}`);
+      // Recovered, but no submit (LLM/network blip before submit). Leave needs_placement for the re-run.
+      return {
+        ...base,
+        status: "needs_placement",
+        errors: [...errors, `placement: ${placeNet.detail}（网络已恢复，重跑续上）`],
+        error_class: "NETWORK",
+      };
     }
     if (!placed.attempted) {
       return {

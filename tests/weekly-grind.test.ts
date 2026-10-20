@@ -1327,13 +1327,14 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.match(result.errors.join("\n"), /探活失败[\s\S]*fetch failed/);
   });
 
-  test("rt-only account: refresh network failure keeps its detail, so auth waits for the network (#102)", async () => {
+  test("RT+JWT account: refresh network failure does not trust stale JWT; auth waits (#102)", async () => {
     const env = { ...LLM_ENV };
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-rtnet-"));
+    // Normal saved-token shape: both rt and jwt present; jwt may be expired.
     await saveAccountTokens({ accountId: "rtnet", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.r", refreshToken: "rt", makeActive: false, syncLegacy: false }, { home, env });
-    await rm(join(accountDir("rtnet", env, home), "jwt"));
     const row = (await resolveTargetAccounts({ kind: "ids", ids: ["rtnet"] }, { home, env }))[0]!;
     let refreshes = 0;
+    let progressCalls = 0;
     const waits: string[] = [];
     const result = await grindOneAccount(row, {
       home,
@@ -1341,11 +1342,37 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
       llmAsk: okLlm,
       waitNetwork: async (why: string) => { waits.push(why); return false; },
       refreshRt: async () => { refreshes++; return { ok: false, code: "NETWORK_ERROR", message: "fetch failed" }; },
-      listProgress: progress,
-    } as never);
+      listProgress: async () => { progressCalls++; return progress(); },
+    });
     assert.equal(refreshes, 1);
+    assert.equal(progressCalls, 0, "must not proceed with stale JWT");
     assert.match(waits[0]!, /登录.*refresh: fetch failed/);
     assert.equal(result.network_down, true);
+  });
+
+  test("RT+JWT account: after network recovers, refresh is re-tried and the account runs (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-rtback-"));
+    await saveAccountTokens({ accountId: "rtback", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.old", refreshToken: "rt", makeActive: false, syncLegacy: false }, { home, env });
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: ["rtback"] }, { home, env }))[0]!;
+    let refreshes = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => true,
+      refreshRt: async () => {
+        refreshes++;
+        if (refreshes === 1) return { ok: false, code: "NETWORK_ERROR", message: "fetch failed" };
+        return { ok: true, jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.new", refreshToken: "rt2", jwtExpire: 9999999999, serviceTicket: "st" } as never;
+      },
+      listProgress: progress,
+      grindListen: async () => ({ completed: 3, taskIds: ["a", "b", "c"] }),
+      grindSpeak: async () => ({ completed: 3, taskIds: ["d", "e", "f"] }),
+    });
+    assert.equal(refreshes, 2);
+    assert.notEqual(result.status, "error");
+    assert.equal(result.network_down, undefined);
   });
 
   test("UNIPUS_NET_WAIT_MAX_MS=0 keeps the old behaviour: no wait, no NETWORK_DOWN", async () => {
@@ -1407,6 +1434,23 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.ok(placements >= 1, "placement reached the network");
     assert.equal(result.network_down, true);
     assert.match(result.errors.join("\n"), /NETWORK_DOWN[\s\S]*定级/);
+  });
+
+  test("placement network failure that recovers → needs_placement (resumable), not ordinary refusal (#102)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("placerecover", env);
+    let waits = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      waitNetwork: async () => { waits++; return true; },
+      listProgress: async () => ({ error: "NEEDS_PLACEMENT: 听力仍在定级", code: "NEEDS_PLACEMENT" }),
+      http: new Proxy({}, { get: () => async () => { throw new TypeError("fetch failed"); } }) as never,
+    });
+    assert.equal(waits, 1);
+    assert.equal(result.status, "needs_placement");
+    assert.match(result.errors.join("\n"), /网络已恢复.*重跑续上/);
   });
 
   test("real LLM refusal (empty reply) never waits for the network", async () => {
