@@ -363,7 +363,13 @@ async function buildFreeTalk(
         // Aim just above the floor: scale words by (minSec + 1.5) / overflowing seconds; shortenFreeTalk clamps to 210–240.
         const target = Math.min(m.words - 5, Math.floor((m.words * (minSec + 1.5)) / error.sec));
         console.error(`[free-talk] [clio-1006] ${m.words} 词 ${error.sec.toFixed(1)}s 溢出，第 ${rewrites}/${FREE_TALK_OVERFLOW_REWRITES} 次缩稿到 ≈${Math.max(210, target)} 词`);
-        next = await shortenFreeTalk(task, text, target, { ask });
+        try {
+          next = await shortenFreeTalk(task, text, target, { ask });
+        } catch (shortenError) {
+          // Keep the 1006 (CLIO_CAPACITY soft skip) rather than turning it into a refusal.
+          console.error(`[free-talk] [clio-1006] 缩稿失败：${toError(shortenError).message}`);
+          throw error;
+        }
         continue;
       }
       if (!(error instanceof SpeechTooShortError)) throw error;

@@ -1039,10 +1039,14 @@ describe("free talk Clio 1006 at the pause floor → LLM shortens and re-voices 
   test("overflow every time → bounded rewrites, then fails as CLIO 1006 (not refused)", async () => {
     const { ClioOverflowError } = await import("../src/scored-speech.js");
     let voiced = 0;
+    let shortened = 0;
     const r = await run(scenario({}), (async (_t: string, _g: string, type: SpeechRecordType) => {
       if (type === "EN_PRED_SCORE") { voiced++; throw new ClioOverflowError(91, 0.19, "Clio 评分失败：code=1006 audio overflow"); }
       return { type, url: "u", recordDetail: { score: 90 } };
-    }) as never);
+    }) as never, async (p: string) => {
+      if (!/Shorten/i.test(p)) return FREE_TALK;
+      return Array.from({ length: (shortened += 1) === 1 ? 215 : 211 }, () => "song").join(" ");
+    });
     assert.equal(r.ok, false);
     assert.notEqual((r as { refused?: boolean }).refused, true);
     assert.match((r as { detail: string }).detail, /1006 audio overflow/);
@@ -1059,4 +1063,15 @@ describe("free talk Clio 1006 at the pause floor → LLM shortens and re-voices 
     assert.equal(r.ok, false);
     assert.equal(voiced, 1);
   });
+});
+
+test("free talk 1006: shortening fails → keeps the 1006 failure, not a refusal (#108)", async () => {
+  const { ClioOverflowError } = await import("../src/scored-speech.js");
+  const r = await run(scenario({}), (async (_t: string, _g: string, type: SpeechRecordType) => {
+    if (type === "EN_PRED_SCORE") throw new ClioOverflowError(91, 0.19, "Clio 评分失败：code=1006 audio overflow");
+    return { type, url: "u", recordDetail: { score: 90 } };
+  }) as never, async (p: string) => (/Shorten/i.test(p) ? "too short" : FREE_TALK));
+  assert.equal(r.ok, false);
+  assert.notEqual((r as { refused?: boolean }).refused, true);
+  assert.match((r as { detail: string }).detail, /1006 audio overflow/);
 });

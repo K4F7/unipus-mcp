@@ -133,3 +133,12 @@ test("shortenFreeTalk never goes under 210 words", async () => {
   await speakContent.shortenFreeTalk("t", words(212), 150, { ask: async (p) => { prompts.push(p); return words(210); } });
   assert.match(prompts[0]!, /210 words/);
 });
+
+test("shortenFreeTalk rewrite is strictly shorter than the input; refuses when ≤210 words (#108)", async () => {
+  const prompts: string[] = [];
+  const out = await speakContent.shortenFreeTalk("t", words(212), 150, {
+    ask: async (p) => { prompts.push(p); return prompts.length === 1 ? words(213) : words(211); },
+  });
+  assert.equal(out, words(211));
+  await assert.rejects(speakContent.shortenFreeTalk("t", words(210), 150, { ask: async () => words(210) }), AnswerRefusedError);
+});

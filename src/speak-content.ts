@@ -117,8 +117,10 @@ export async function shortenFreeTalk(
   targetWords: number,
   ports: SpeakContentPorts = {},
 ): Promise<string> {
-  const target = Math.max(210, Math.min(240, Math.round(targetWords)));
-  const max = Math.min(FREE_TALK_WORDS.max, target + 5);
+  // Always strictly shorter than the overflowing script, never under 210 words.
+  const max = Math.min(FREE_TALK_WORDS.max, Math.max(210, Math.round(targetWords)) + 5, wordCount(script) - 1);
+  if (max < 210) throw new AnswerRefusedError(`自由表达稿只有 ${wordCount(script)} 词，无法在 ≥210 词内再缩短`);
+  const target = Math.min(max, Math.max(210, Math.round(targetWords)));
   return askWithRetry(
     ports,
     `Shorten this spoken English answer to about ${target} words (between 210 and ${max} words), ` +
