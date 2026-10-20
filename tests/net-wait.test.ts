@@ -82,3 +82,15 @@ test("network waiter: one cumulative cap across repeated outages (one waiter per
   assert.equal(await wait("c"), false);
   assert.equal(c.now(), 10000, "8s already spent → only 2s more");
 });
+
+test("network waiter: probes get the remaining budget and a late success past the cap is NETWORK_DOWN", async () => {
+  const c = fakeClock();
+  const budgets: number[] = [];
+  const wait = createNetworkWaiter({
+    env: { UNIPUS_NET_WAIT_MAX_MS: "6000", UNIPUS_NET_WAIT_BASE_MS: "4000", UNIPUS_NET_WAIT_CAP_MS: "4000" },
+    now: c.now, sleep: c.sleep, log: () => {},
+    probe: async (budget) => { budgets.push(budget); await c.sleep(budget + 1); return true; },
+  });
+  assert.equal(await wait("x"), false);
+  assert.deepEqual(budgets, [2000]);
+});

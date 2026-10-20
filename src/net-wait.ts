@@ -32,7 +32,8 @@ function describe(value: unknown): string {
 export type NetworkWaiter = (reason: string) => Promise<boolean>;
 
 export function createNetworkWaiter(opts: {
-  probe: () => Promise<boolean>;
+  /** Gets the remaining wait budget; must not run longer than it. */
+  probe: (budgetMs: number) => Promise<boolean>;
   env?: NodeJS.ProcessEnv;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -58,7 +59,8 @@ export function createNetworkWaiter(opts: {
         // Keeps the stall watchdog (UNIPUS_STALL_MINUTES) from killing a deliberate wait.
         markProgress(`net:wait #${attempt}`);
         const secs = Math.round((now() - start) / 1000);
-        if (await opts.probe().catch(() => false)) {
+        const left = maxMs - waited();
+        if (left > 0 && (await opts.probe(left).catch(() => false)) && waited() <= maxMs) {
           log(`[net] 第 ${attempt} 次探测网络已恢复（等了 ${secs}s），重试`);
           return true;
         }
@@ -72,10 +74,12 @@ export function createNetworkWaiter(opts: {
 
 /** Any HTTP response (even 401/404) from each URL means the network path is up. */
 export function createHttpProbe(urls: string[], fetchImpl: typeof fetch = globalThis.fetch, timeoutMs = 10_000) {
-  return async (): Promise<boolean> => {
+  return async (budgetMs = timeoutMs): Promise<boolean> => {
+    // One signal for all URLs, so the probe never outlives the caller's remaining budget.
+    const signal = AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, budgetMs)));
     for (const url of urls) {
       try {
-        await fetchImpl(url, { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) });
+        await fetchImpl(url, { method: "HEAD", signal });
       } catch {
         return false;
       }
