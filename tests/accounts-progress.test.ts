@@ -116,8 +116,13 @@ describe("listAccountsProgress", () => {
     const ccc = result.accounts.find((r) => r.account_id === "ccc");
     assert.ok(ccc);
     assert.equal(ccc!.skip_placement, true);
+    // #114: listen still in grade must not hide the trained speak side.
     assert.equal(ccc!.placement.status, "needs_placement");
-    assert.equal(ccc!.error?.code, "NEEDS_PLACEMENT");
+    assert.deepEqual(ccc!.placement.sides, ["listen"]);
+    assert.equal(ccc!.error, null);
+    assert.equal(ccc!.listen_done, null);
+    assert.equal(ccc!.speak_done, 0);
+    assert.equal(ccc!.speak_total, 5);
 
     const blob = JSON.stringify(result);
     assert.equal(blob.includes(JWT_A), false);
