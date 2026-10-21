@@ -124,51 +124,45 @@ async function listWeekProgressPaid(
   const speakUrl = resolveUserStatusForAppUrl(ports.env, "speak");
   const headers = { ...authHeader, "u-app-id": resolveUAppId(ports.env) };
 
-  const listenFetch = await fetchProgress(ports, listenUrl, headers, "听力本周");
-  if (!listenFetch.ok) {
-    return listenFetch.error;
-  }
-  const listenWeek = weekCountsFromStatusForApp(listenFetch.body);
-  if (listenWeek == null) {
-    const listenType = statusTypeFromStatusForApp(listenFetch.body);
-    if (listenType != null && PLACEMENT_STATUS_TYPES.has(listenType)) {
-      return needsPlacementError("listen", listenType);
+  const sides = [] as Array<{ flow: "listen" | "speak"; week: ReturnType<typeof weekCountsFromStatusForApp> }>;
+  const pending: Array<{ flow: "listen" | "speak"; type: string }> = [];
+  for (const flow of ["listen", "speak"] as const) {
+    const label = flow === "listen" ? "听力" : "口语";
+    const fetched = await fetchProgress(ports, flow === "listen" ? listenUrl : speakUrl, headers, `${label}本周`);
+    if (!fetched.ok) return fetched.error;
+    const week = weekCountsFromStatusForApp(fetched.body);
+    if (week == null) {
+      const type = statusTypeFromStatusForApp(fetched.body);
+      if (type == null || !PLACEMENT_STATUS_TYPES.has(type)) {
+        return toolError("PARSE_ERROR", `${label} getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency`);
+      }
+      // Placement is per side (#114): only the side still in grade blocks.
+      pending.push({ flow, type });
     }
-    return toolError(
-      "PARSE_ERROR",
-      "听力 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
-    );
+    sides.push({ flow, week });
   }
-
-  const speakFetch = await fetchProgress(ports, speakUrl, headers, "口语本周");
-  if (!speakFetch.ok) {
-    return speakFetch.error;
-  }
-  const speakWeek = weekCountsFromStatusForApp(speakFetch.body);
-  if (speakWeek == null) {
-    const speakType = statusTypeFromStatusForApp(speakFetch.body);
-    if (speakType != null && PLACEMENT_STATUS_TYPES.has(speakType)) {
-      return needsPlacementError("speak", speakType);
-    }
-    return toolError(
-      "PARSE_ERROR",
-      "口语 getUserStatusForApp 无法解析 weekDoneTaskCount / weekFrequency",
-    );
-  }
-
-  return buildWeekProgressResult({
-    listenDone: listenWeek.done,
-    listenTotal: listenWeek.total,
-    speakDone: speakWeek.done,
-    speakTotal: speakWeek.total,
-    level: listenWeek.level ?? speakWeek.level,
+  if (pending.length === 2) return needsPlacementError(pending[0]!.flow, pending[0]!.type);
+  const [listenWeek, speakWeek] = [sides[0]!.week, sides[1]!.week];
+  const result = buildWeekProgressResult({
+    listenDone: listenWeek?.done ?? null,
+    listenTotal: listenWeek?.total ?? null,
+    speakDone: speakWeek?.done ?? null,
+    speakTotal: speakWeek?.total ?? null,
+    level: listenWeek?.level ?? speakWeek?.level ?? null,
     source: "paid",
   });
+  if (pending.length === 0) return result;
+  const p = pending[0]!;
+  return {
+    ...result,
+    message: `${result.message}；${p.flow === "listen" ? "听力" : "口语"}仍在定级（type=${p.type}）`,
+    placement_pending: [p.flow],
+  };
 }
 
 function buildWeekProgressResult(input: {
-  listenDone: number;
-  listenTotal: number;
+  listenDone: number | null;
+  listenTotal: number | null;
   speakDone: number | null;
   speakTotal: number | null;
   level: string | null;
@@ -196,7 +190,7 @@ function buildWeekProgressResult(input: {
         : "";
 
   return okWeekProgress({
-    message: `${listenLabel} ${input.listenDone}/${input.listenTotal}${speakSuffix}${levelSuffix}${sourceNote}`,
+    message: `${input.listenDone != null && input.listenTotal != null ? `${listenLabel} ${input.listenDone}/${input.listenTotal}` : `${listenLabel}进度未知`}${speakSuffix}${levelSuffix}${sourceNote}`,
     level: input.level,
     listen_done: input.listenDone,
     listen_total: input.listenTotal,

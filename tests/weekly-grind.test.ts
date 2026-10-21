@@ -1050,6 +1050,62 @@ describe("needs_placement", () => {
     assert.match(result.errors.join(" "), /needs_placement|NEEDS_PLACEMENT/);
   });
 
+  test("listen-only: speak placement pending does not block listening (#114)", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-side-"));
+    const env = { ...LLM_ENV };
+    await saveAccountTokens({ accountId: "side1", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.s1" }, { home, env });
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: ["side1"] }, { home, env }))[0]!;
+    let listenNeed = -1;
+    let speakCalls = 0;
+    let progressCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      skipPlacement: true,
+      grindOverride: "listen",
+      listProgress: async () => {
+        progressCalls += 1;
+        return progressCalls === 1
+          ? { listen_done: 2, listen_total: 5, speak_done: null, speak_total: null, placement_pending: ["speak"] }
+          : { listen_done: 5, listen_total: 5, speak_done: null, speak_total: null, placement_pending: ["speak"] };
+      },
+      grindListen: async (_p, need) => {
+        listenNeed = need;
+        return { completed: need, taskIds: [] };
+      },
+      grindSpeak: async () => {
+        speakCalls += 1;
+        return { completed: 0, taskIds: [] };
+      },
+    });
+    assert.notEqual(result.status, "needs_placement");
+    assert.equal(listenNeed, 3);
+    assert.equal(speakCalls, 0);
+    assert.equal(result.listen_completed, 3);
+  });
+
+  test("speak-only: speak placement pending still blocks with skip_placement (#114)", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-side2-"));
+    const env = { ...LLM_ENV };
+    await saveAccountTokens({ accountId: "side2", jwt: "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.s2" }, { home, env });
+    const row = (await resolveTargetAccounts({ kind: "ids", ids: ["side2"] }, { home, env }))[0]!;
+    let calls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      skipPlacement: true,
+      grindOverride: "speak",
+      listProgress: async () => ({ listen_done: 2, listen_total: 5, speak_done: null, speak_total: null, placement_pending: ["speak"] }),
+      grindListen: async () => { calls += 1; return { completed: 0, taskIds: [] }; },
+      grindSpeak: async () => { calls += 1; return { completed: 0, taskIds: [] }; },
+    });
+    assert.equal(result.status, "needs_placement");
+    assert.equal(calls, 0);
+    assert.match(result.errors.join(" "), /口语/);
+  });
+
   test("auto placement then continues when progress recovers", async () => {
     const home = await mkdtemp(join(tmpdir(), "unipus-wg-place-auto-"));
     const env = { ...LLM_ENV };

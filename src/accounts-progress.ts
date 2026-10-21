@@ -1,3 +1,4 @@
+import type { WeekProgressResult } from "./result.js";
 /**
  * Read-only multi-account week progress table for MCP.
  * No grind/scheduling; never returns jwt/rt/password.
@@ -19,6 +20,8 @@ export type PlacementSummary = {
   status: "ok" | "needs_placement" | "error" | "unknown";
   code?: string | null;
   detail?: string | null;
+  /** Sides still in placement; the other side's counts stay visible (#114). */
+  sides?: Array<"listen" | "speak">;
 };
 
 export type AccountProgressRow = {
@@ -76,6 +79,10 @@ function placementFromProgress(
   progress: ToolResult & Record<string, unknown>,
 ): PlacementSummary {
   if (!progress.isError) {
+    const pending = (progress as WeekProgressResult).placement_pending;
+    if (pending?.length) {
+      return { status: "needs_placement", code: "NEEDS_PLACEMENT", detail: String(progress.message ?? ""), sides: pending };
+    }
     return { status: "ok", code: "OK", detail: null };
   }
   const code = typeof progress.code === "string" ? progress.code : "ERROR";

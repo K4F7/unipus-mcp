@@ -608,6 +608,35 @@ describe("listWeekProgress NEEDS_PLACEMENT", () => {
   });
 });
 
+describe("listWeekProgress per-side placement (#114)", () => {
+  const statusHttp = (types: { listen: string; speak: string }) =>
+    mockHttp(async (call) => {
+      const flow = call.url.includes("flowType=speak") ? "speak" : "listen";
+      const type = types[flow];
+      const counts = type === "train" ? { weekDoneTaskCount: 2, weekFrequency: 5 } : { weekDoneTaskCount: null, weekFrequency: null };
+      return { statusCode: 200, body: JSON.stringify({ code: 1, value: { type, taskId: "t", ...counts } }) };
+    });
+  const creds = () => ({ getJwt: async () => makeJwt({ openId: "oid", exp: 4_000_000_000 }) });
+
+  test("speak in placement, listen trained → ok with listen counts and speak pending", async () => {
+    const result = await listWeekProgress({ credentials: creds(), http: statusHttp({ listen: "train", speak: "grade" }), env: {} });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, 2);
+    assert.equal(result.listen_total, 5);
+    assert.equal(result.speak_done, null);
+    assert.deepEqual(result.placement_pending, ["speak"]);
+    assert.match(result.message, /口语仍在定级/);
+  });
+
+  test("listen in placement, speak trained → ok with speak counts and listen pending", async () => {
+    const result = await listWeekProgress({ credentials: creds(), http: statusHttp({ listen: "grade", speak: "train" }), env: {} });
+    assert.equal(result.isError, false);
+    assert.equal(result.listen_done, null);
+    assert.equal(result.speak_done, 2);
+    assert.deepEqual(result.placement_pending, ["listen"]);
+  });
+});
+
 describe("listWeekProgress retries", () => {
   test("retries fetch failed and 5xx, then succeeds", async () => {
     const jwt = makeJwt({ openId: "oid", exp: 4_000_000_000 });
