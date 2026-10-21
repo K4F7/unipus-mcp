@@ -83,7 +83,15 @@ const freezeListeners = new Set<(gapMs: number) => void>();
 
 /** Process-wide freeze-aware clock (lazy): the default for every timer and budget. */
 export function activeNow(): number {
-  processClock ??= createStallClock({ onFreeze: (gap) => freezeListeners.forEach((f) => f(gap)) });
+  processClock ??= createStallClock({
+    onFreeze: (gap) =>
+      freezeListeners.forEach((f) => {
+        // One listener's failure must not skip the rest or escape the clock read.
+        try {
+          f(gap);
+        } catch {}
+      }),
+  });
   return processClock.now();
 }
 
