@@ -336,6 +336,24 @@ const run = (
   completeOneSpeak({ credentials: { getJwt: async () => JWT }, http, env, llmAsk: llmAsk ?? undefined, speechRecord, sleep: async () => {}, appReadyPollTries: 3 });
 const submitCalls = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("part/submit"));
 
+describe("speak answers survive a failed paper attempt (#119)", () => {
+  test("a retry of the same paper reuses voiced answers instead of re-running LLM/TTS/Clio", async () => {
+    let voiced = 0;
+    const speech = async (t: string, g: string, type: SpeechRecordType) => { voiced++; return okSpeech(t, g, type); };
+    let fail = true;
+    const http = scenario({ submit: (b) => (b.partId === "p2" && fail ? { code: 500, msg: "boom" } : { code: 1 }) });
+    const answerCache = new Map();
+    const ports = { credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 3, answerCache };
+    const first = await completeOneSpeak(ports as never);
+    assert.equal(first.ok, false);
+    const afterFirst = voiced;
+    assert.ok(afterFirst >= 1, String(afterFirst));
+    fail = false;
+    await completeOneSpeak(ports as never);
+    assert.equal(voiced, afterFirst, "no new TTS/Clio on retry");
+  });
+});
+
 describe("completeOneSpeak review (#62)", () => {
   test("partSubmit isError → fail with part/submit detail, no further parts", async () => {
     const http = scenario({ submit: () => ({ code: 200, msg: "业务错误" }) });

@@ -9,7 +9,7 @@ import { resolveNetWait } from "./limits.js";
 import { activeNow, markProgress } from "./watchdog.js";
 
 const NETWORK_RE =
-  /fetch failed|ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EPIPE|socket hang up|socket disconnected|secure TLS connection|UND_ERR_SOCKET|UND_ERR_CONNECT|getaddrinfo|\bNETWORK(_ERROR)?:|network is unreachable/i;
+  /fetch failed|ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EPIPE|socket hang up|socket disconnected|secure TLS connection|UND_ERR_SOCKET|UND_ERR_CONNECT|getaddrinfo|\bNETWORK(_ERROR)?:|network is unreachable|operation was aborted due to timeout|\bNETWORK_ERROR\b/i;
 
 /** Real failures that must never be retried as network blips (auth, refusal content, ledger write). */
 const REAL_RE = /AUTH_REQUIRED|AUTH_FAILED|\b401\b|\b403\b|JWT 无效|结果写入失败|无有效答案|LLM 拒答|empty reply/i;

@@ -75,6 +75,26 @@ export class ClioOverflowError extends Error {
  */
 export const FREE_TALK_CLIO_API = "en.pred.score";
 
+/**
+ * Reuse voiced records (TTS + Clio + upload) across attempts at the same paper (#119): keyed by tag, type and
+ * text, so a sentence-repeat leaf retried after a freeze only re-voices the sentences it had not finished.
+ */
+export function cachedSpeechRecord(
+  build: SpeechRecordBuilder,
+  cache: Map<string, Record<string, unknown>>,
+): SpeechRecordBuilder {
+  return async (text, tag, type, opts) => {
+    // Free-talk reports its audio length via onAudio; it is covered by the leaf answer cache instead.
+    if (opts?.onAudio) return build(text, tag, type, opts);
+    const key = `${tag}\u0000${type}\u0000${text}`;
+    const hit = cache.get(key);
+    if (hit) return structuredClone(hit);
+    const record = await build(text, tag, type, opts);
+    cache.set(key, structuredClone(record));
+    return record;
+  };
+}
+
 /** Longest silence inserted between sentences when stretching a short recording. */
 export const MAX_SENTENCE_PAUSE_SEC = 1.2;
 

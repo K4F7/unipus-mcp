@@ -12,6 +12,8 @@ test("isNetworkFailure: round-3 outage messages are network; auth / refusal / le
     "read ECONNRESET",
     "connect ETIMEDOUT 1.2.3.4:443",
     "getaddrinfo ENOTFOUND ucloud.unipus.cn",
+    // #119: HTTP abort after a long freeze; the leaf answers survive for the retry.
+    "part/submit snapshot 自由表达: NETWORK_ERROR part/submit 网络失败：The operation was aborted due to timeout (60000ms) (已交 part: 范例学习、AI口语对话)",
   ]) assert.equal(isNetworkFailure(msg), true, msg);
   const withCause = Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } });
   assert.equal(isNetworkFailure(withCause), true);
