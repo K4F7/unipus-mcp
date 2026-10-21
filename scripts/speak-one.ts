@@ -8,6 +8,8 @@ import { getHistoryTrainingTasks } from "../src/history-training-tasks.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { accountDir } from "../src/accounts.js";
+import { defaultNetworkWaiter } from "../src/net-wait.js";
+import { resolveNetWait } from "../src/limits.js";
 
 async function resolve(key: string): Promise<string> {
   if (/^\d+$/.test(key)) return key;
@@ -35,7 +37,9 @@ const http = dump
       return baseHttp.request(req);
     } }
   : baseHttp;
-const ports = { credentials: createStaticJwtStore(auth.jwt), http, env: process.env };
+// Same outage handling as weekly-grind (#102): a network blip waits and retries the paper, not a strike.
+const waitNetwork = resolveNetWait(process.env).maxMs > 0 ? defaultNetworkWaiter(process.env) : undefined;
+const ports = { credentials: createStaticJwtStore(auth.jwt), http, env: process.env, waitNetwork };
 const r = await grindSpeakGaps(ports as never, Number(nStr ?? 1), Number(nStr ?? 1) + 1);
 const h = await getHistoryTrainingTasks(ports as never, { flowType: "speak", pageSize: 10 } as never);
 const tasks = (h as any).page?.list ?? [];

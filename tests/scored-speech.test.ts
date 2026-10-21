@@ -265,6 +265,25 @@ describe("Clio 1006 free-talk regenerate (#104)", () => {
     assert.equal(nextFreeTalkPauseAfterOverflow(0.1, 90.2, gaps, 90), null);
   });
 
+  test("free-talk scores with en.pred.score like the App; read-aloud keeps en.sent.score (#118)", async () => {
+    const { createScoredSpeechRecordBuilder } = await import("../src/scored-speech.js");
+    const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");
+    const apis: Array<string | undefined> = [];
+    const b = createScoredSpeechRecordBuilder(
+      ports as never,
+      deps({
+        synthesize: async (input) => ({ wavPath: await wavOf(85 + 19 * (input.pauseSec ?? 0)), cleanup: async () => {} }),
+        score: async (input) => {
+          apis.push((input as { apiName?: string }).apiName);
+          return { overall: 92, total: 92, audioUrl: CLIO, raw: {}, result: { total: 92, accuracy: 92, completeness: 100, fluency: { overall: 90 }, details: [] } };
+        },
+      }),
+    );
+    await b(text, "speak-x-main", "EN_PRED_SCORE", { pauseSec: 0.5, minSec: 90 });
+    await b("Hello there.", "speak-x-0", "EN_SENT_SCORE");
+    assert.deepEqual(apis, ["en.pred.score", undefined]);
+  });
+
   test("1006 on free-talk → regenerate with tighter pause, then score; logs [clio-1006]", async () => {
     const { createScoredSpeechRecordBuilder } = await import("../src/scored-speech.js");
     const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");

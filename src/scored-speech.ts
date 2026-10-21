@@ -68,6 +68,13 @@ export class ClioOverflowError extends Error {
   }
 }
 
+/**
+ * App scores open speech (自由表达, EN_PRED_SCORE) with Clio en.pred.score and streams small frames. On a 93 s
+ * clip that answers in ~101 s vs ~168 s for en.sent.score in one frame; the slow path ran into Clio's ~4 min
+ * close=1006 (#118).
+ */
+export const FREE_TALK_CLIO_API = "en.pred.score";
+
 /** Longest silence inserted between sentences when stretching a short recording. */
 export const MAX_SENTENCE_PAUSE_SEC = 1.2;
 
@@ -253,7 +260,7 @@ export function createScoredSpeechRecordBuilder(
     freeTalk: boolean,
   ) => {
     const timeoutMs = Math.min(clioTimeoutMs(spoken.wavPath, ports.env, undefined, { freeTalk }), remainingMs);
-    const scored = await step(timings, now, "Clio 评分", () => score({ transcript: text, wavPath: spoken.wavPath, timeoutMs }, { env: ports.env }));
+    const scored = await step(timings, now, "Clio 评分", () => score({ transcript: text, wavPath: spoken.wavPath, timeoutMs, ...(freeTalk ? { apiName: FREE_TALK_CLIO_API } : {}) }, { env: ports.env }));
     const reviewScores = mapClioResultToReviewScores(scored.result);
     if (reviewScores?.score == null) throw new Error(`Clio 未返回有效分数 (${tag})`);
     // App 2.8.7 uploads mp3 (SOE/Clio path); wav CDN URLs leave 范例学习 processing.
