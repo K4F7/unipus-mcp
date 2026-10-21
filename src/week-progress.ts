@@ -155,7 +155,8 @@ async function listWeekProgressPaid(
   const p = pending[0]!;
   return {
     ...result,
-    message: `${result.message}；${p.flow === "listen" ? "听力" : "口语"}仍在定级（type=${p.type}）`,
+    // The pending side has no counts because it is in placement, not because the path is unverified.
+    message: `${result.message.replace("口语进度未知（付费口语周 path 未验证）", "口语进度未知")}；${p.flow === "listen" ? "听力" : "口语"}仍在定级（type=${p.type}）`,
     placement_pending: [p.flow],
   };
 }
