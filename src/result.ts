@@ -32,6 +32,8 @@ export type WeekProgressResult = ToolResult & {
   listen_total?: number | null;
   speak_done?: number | null;
   speak_total?: number | null;
+  /** Side still in placement (grade) while the other side trains (#114). */
+  placement_pending?: Array<"listen" | "speak">;
 };
 
 export type StartListeningResult = ToolResult & {
@@ -98,8 +100,8 @@ export function okAuthStatus(input: {
 export function okWeekProgress(input: {
   message: string;
   level: string | null;
-  listen_done: number;
-  listen_total: number;
+  listen_done: number | null;
+  listen_total: number | null;
   speak_done: number | null;
   speak_total: number | null;
 }): WeekProgressResult {
@@ -109,8 +111,8 @@ export function okWeekProgress(input: {
     code: "OK",
     message: input.message,
     // progress_* aliases listen_* for callers that predate twin fields
-    progress_done: input.listen_done,
-    progress_total: input.listen_total,
+    progress_done: input.listen_done ?? undefined,
+    progress_total: input.listen_total ?? undefined,
     level: input.level,
     listen_done: input.listen_done,
     listen_total: input.listen_total,

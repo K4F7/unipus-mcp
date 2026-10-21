@@ -53,6 +53,8 @@ export type ProgressSnap = {
   listen_total: number | null;
   speak_done: number | null;
   speak_total: number | null;
+  /** Side still in placement while the other side trains (#114). */
+  placement_pending?: Array<"listen" | "speak">;
 };
 
 export type AccountGrindSummary = {
@@ -427,13 +429,27 @@ function snapFromProgress(p: {
   listen_total?: number | null;
   speak_done?: number | null;
   speak_total?: number | null;
+  placement_pending?: Array<"listen" | "speak">;
 }): ProgressSnap {
   return {
     listen_done: p.listen_done ?? null,
     listen_total: p.listen_total ?? null,
     speak_done: p.speak_done ?? null,
     speak_total: p.speak_total ?? null,
+    ...(p.placement_pending?.length ? { placement_pending: p.placement_pending } : {}),
   };
+}
+
+/** A side being run that is still in placement turns into NEEDS_PLACEMENT; other sides never block (#114). */
+function blockOnRunningPlacement(
+  progress: ProgressSnap | { error: string; code?: string },
+  sides: { listen: boolean; speak: boolean },
+): ProgressSnap | { error: string; code?: string } {
+  if ("error" in progress) return progress;
+  const blocked = (progress.placement_pending ?? []).filter((flow) => sides[flow]);
+  if (blocked.length === 0) return progress;
+  const label = blocked.map((f) => (f === "listen" ? "听力" : "口语")).join("/");
+  return { error: `NEEDS_PLACEMENT: ${label}仍在定级（type=grade），需先完成该侧定级`, code: "NEEDS_PLACEMENT" };
 }
 
 function isAlreadyDone(
@@ -624,7 +640,7 @@ export async function grindOneAccount(
     return r.result;
   };
 
-  const beforeRaw = await listProgress(credentials);
+  const beforeRaw = blockOnRunningPlacement(await listProgress(credentials), sides);
   if (progressDown && "error" in beforeRaw) return networkDown(beforeRaw.error);
   if ("error" in beforeRaw) {
     const isPlacement =
@@ -649,8 +665,9 @@ export async function grindOneAccount(
     }
 
     // usage 配额为 0 的一侧不自动定级（不交那一侧的定级卷）。
+    // Only the sides being run are placed (#114).
     const placeFlows = (["listen", "speak"] as const).filter((flow) =>
-      flow === "listen" ? usage.listen_per_week !== 0 : usage.speak_per_week !== 0,
+      sides[flow] && (flow === "listen" ? usage.listen_per_week !== 0 : usage.speak_per_week !== 0),
     );
     const placePorts: GrindPlacementPorts = {
       credentials,
@@ -660,10 +677,10 @@ export async function grindOneAccount(
       flows: placeFlows,
     };
     const zeroQuotaNote =
-      placeFlows.length < 2
+      placeFlows.length < (["listen", "speak"] as const).filter((f) => sides[f]).length
         ? `usage 配额为 0 的一侧（${(["listen", "speak"] as const)
-            .filter((f) => !placeFlows.includes(f))
-            .join("/")}）不自动定级；若它仍在定级，平台进度拿不到另一侧计数，本周需先手动完成该侧定级或改配额`
+            .filter((f) => sides[f] && !placeFlows.includes(f))
+            .join("/")}）不自动定级；本周需先手动完成该侧定级或改配额`
         : null;
     let placed: Awaited<ReturnType<typeof runAutoPlacement>>;
     try {
@@ -705,7 +722,7 @@ export async function grindOneAccount(
       return { ...base, status: "error", errors };
     }
 
-    const afterPlace = await listProgress(credentials);
+    const afterPlace = blockOnRunningPlacement(await listProgress(credentials), sides);
     if (progressDown && "error" in afterPlace) return networkDown(afterPlace.error);
     if ("error" in afterPlace) {
       return {
