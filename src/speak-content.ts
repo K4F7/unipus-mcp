@@ -57,7 +57,7 @@ export function cleanSpoken(raw: string): string {
     .trim();
 }
 
-const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length;
+export const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length;
 
 export type SpeakContentPorts = { env?: NodeJS.ProcessEnv; ask?: LlmAsk };
 
@@ -103,6 +103,33 @@ export async function generateFreeTalk(task: string, ports: SpeakContentPorts = 
       return n < FREE_TALK_WORDS.min || n > FREE_TALK_WORDS.max
         ? `reply has ${n} words (need ${FREE_TALK_WORDS.min}-${FREE_TALK_WORDS.max})`
         : null;
+    },
+  );
+}
+
+/**
+ * Shorter rewrite of a free-talk script whose audio overflowed Clio (#108): same task and content,
+ * about `targetWords` words, never under the 210-word floor of the user requirement.
+ */
+export async function shortenFreeTalk(
+  task: string,
+  script: string,
+  targetWords: number,
+  ports: SpeakContentPorts = {},
+): Promise<string> {
+  // Always strictly shorter than the overflowing script, never under 210 words.
+  const max = Math.min(FREE_TALK_WORDS.max, Math.max(210, Math.round(targetWords)) + 5, wordCount(script) - 1);
+  if (max < 210) throw new AnswerRefusedError(`自由表达稿只有 ${wordCount(script)} 词，无法在 ≥210 词内再缩短`);
+  const target = Math.min(max, Math.max(210, Math.round(targetWords)));
+  return askWithRetry(
+    ports,
+    `Shorten this spoken English answer to about ${target} words (between 210 and ${max} words), ` +
+      `keeping every point of the task, the same plain spoken style, short simple sentences and numbers written as words.\n` +
+      `Task: ${task}\n\nAnswer to shorten:\n${script}\n\n` +
+      `Output only the words to speak: no greeting to me, no "Sure" or "Here is", no title, no quotes, no word count.`,
+    (s) => {
+      const n = wordCount(s);
+      return n < FREE_TALK_WORDS.min || n > max ? `reply has ${n} words (need ${FREE_TALK_WORDS.min}-${max})` : null;
     },
   );
 }

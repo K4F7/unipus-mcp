@@ -306,3 +306,68 @@ describe("Clio 1006 free-talk regenerate (#104)", () => {
     assert.equal(scored, 2);
   });
 });
+
+describe("Clio 1006 at the pause floor → hand back for a shorter script (#108)", () => {
+  const wavOf = async (sec: number) => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const p = join(await mkdtemp(join(tmpdir(), "ss108-")), "a.wav");
+    await writeFile(p, Buffer.alloc(44 + Math.round(sec * 32000)));
+    return p;
+  };
+  const text = Array.from({ length: 20 }, (_, i) => `Sentence number ${i} is here.`).join(" ");
+  const gaps = text.split(/[.!?]\s+(?=\S)/).length - 1;
+  const okScore = { overall: 92, total: 92, audioUrl: CLIO, raw: {}, result: { total: 92, accuracy: 92, completeness: 100, fluency: { overall: 90 }, details: [] } };
+
+  test("cannot tighten further → ClioOverflowError after one Clio try (no same-wav retry)", async () => {
+    const { createScoredSpeechRecordBuilder, ClioOverflowError } = await import("../src/scored-speech.js");
+    let scored = 0;
+    const b = createScoredSpeechRecordBuilder(
+      { ...(ports as object), env: { UNIPUS_FREE_TALK_TTS_RETRY_MAX_MS: "600000" } } as never,
+      deps({
+        retryDelayMs: 1, sleep: async () => {}, log: () => {},
+        // 90.4 s speech body: the pause cannot shrink without dropping under 90 s.
+        synthesize: async () => ({ wavPath: await wavOf(90.4), cleanup: async () => {} }),
+        score: async () => { scored++; throw new Error("Clio 评分失败：code=1006 audio overflow"); },
+      }),
+    );
+    const err = await b(text, "speak-x-main", "EN_PRED_SCORE", { pauseSec: 0.19, minSec: 90 }).catch((e) => e);
+    assert.ok(err instanceof ClioOverflowError, String(err));
+    assert.equal(scored, 1);
+    assert.match(err.message, /1006 audio overflow/);
+    assert.ok(Math.abs(err.sec - 90.4) < 0.05);
+  });
+
+  test("UNIPUS_CLIO_MAX_AUDIO_SEC: over the cap at the pause floor → ClioOverflowError without calling Clio", async () => {
+    const { createScoredSpeechRecordBuilder, ClioOverflowError } = await import("../src/scored-speech.js");
+    let scored = 0;
+    const b = createScoredSpeechRecordBuilder(
+      { ...(ports as object), env: { UNIPUS_CLIO_MAX_AUDIO_SEC: "95" } } as never,
+      deps({
+        retryDelayMs: 1, sleep: async () => {}, log: () => {},
+        synthesize: async (input) => ({ wavPath: await wavOf(96 + gaps * (input.pauseSec ?? 0)), cleanup: async () => {} }),
+        score: async () => { scored++; return okScore; },
+      }),
+    );
+    const err = await b(text, "speak-x-main", "EN_PRED_SCORE", { pauseSec: 0.5, minSec: 90 }).catch((e) => e);
+    assert.ok(err instanceof ClioOverflowError, String(err));
+    assert.equal(scored, 0);
+  });
+
+  test("UNIPUS_CLIO_MAX_AUDIO_SEC: tightening the pause fits the cap → scored once, still ≥ minSec", async () => {
+    const { createScoredSpeechRecordBuilder } = await import("../src/scored-speech.js");
+    const secs: number[] = [];
+    const b = createScoredSpeechRecordBuilder(
+      { ...(ports as object), env: { UNIPUS_CLIO_MAX_AUDIO_SEC: "95" } } as never,
+      deps({
+        retryDelayMs: 1, sleep: async () => {}, log: () => {},
+        synthesize: async (input) => ({ wavPath: await wavOf(88 + gaps * (input.pauseSec ?? 0)), cleanup: async () => {} }),
+        score: async () => okScore,
+      }),
+    );
+    await b(text, "speak-x-main", "EN_PRED_SCORE", { pauseSec: 0.5, minSec: 90, onAudio: (s) => secs.push(s) });
+    const sec = secs.at(-1)!;
+    assert.ok(sec <= 95 && sec >= 90, String(secs));
+  });
+});

@@ -115,3 +115,30 @@ test("cleanSpoken keeps the answer that follows an inline title/label (review #9
   assert.equal(cleanSpoken("Title: Music I Like. First, I love jazz."), "First, I love jazz.");
   assert.equal(cleanSpoken("**Music I Like**\nFirst, I love jazz."), "First, I love jazz.");
 });
+
+test("shortenFreeTalk asks for a shorter rewrite inside 210-240 words (#108)", async () => {
+  const prompts: string[] = [];
+  const out = await speakContent.shortenFreeTalk("Talk about music", words(238), 215, {
+    ask: async (p) => { prompts.push(p); return prompts.length === 1 ? words(236) : words(214); },
+  });
+  assert.equal(out, words(214));
+  assert.equal(prompts.length, 2); // 236 > target → rejected and re-asked
+  assert.match(prompts[0]!, /215 words/);
+  assert.match(prompts[0]!, /Talk about music/);
+  assert.match(prompts[0]!, /music music/);
+});
+
+test("shortenFreeTalk never goes under 210 words", async () => {
+  const prompts: string[] = [];
+  await speakContent.shortenFreeTalk("t", words(212), 150, { ask: async (p) => { prompts.push(p); return words(210); } });
+  assert.match(prompts[0]!, /210 words/);
+});
+
+test("shortenFreeTalk rewrite is strictly shorter than the input; refuses when ≤210 words (#108)", async () => {
+  const prompts: string[] = [];
+  const out = await speakContent.shortenFreeTalk("t", words(212), 150, {
+    ask: async (p) => { prompts.push(p); return prompts.length === 1 ? words(213) : words(211); },
+  });
+  assert.equal(out, words(211));
+  await assert.rejects(speakContent.shortenFreeTalk("t", words(210), 150, { ask: async () => words(210) }), AnswerRefusedError);
+});
