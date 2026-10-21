@@ -3,6 +3,7 @@ import { readFile as fsReadFile } from "node:fs/promises";
 
 import WebSocket from "ws";
 import { capToBudget, onProcessFreeze, wallClockTimer } from "./watchdog.js";
+import { ProcessFreezeError } from "./retry.js";
 
 import {
   DEFAULT_CLIO_APPLICATION_ID,
@@ -38,6 +39,10 @@ export type ScoreEnSentInput = {
   wssUrl?: string;
   /** Default 30s. */
   timeoutMs?: number;
+  /** Clio core type; App uses en.pred.score for open speech (自由表达), en.sent.score for read-aloud (#118). */
+  apiName?: string;
+  /** Binary frame size; the App recorder streams small PCM frames, never one multi-MB frame (#118). Default 32000 (1 s). */
+  chunkBytes?: number;
 };
 
 export type ClioScorePayload = {
@@ -149,7 +154,7 @@ export async function scoreEnSent(
     });
     // The server has most likely dropped the socket during a freeze: fail now so the caller retries (#112).
     const unsubscribeFreeze = (ports.onFreeze ?? onProcessFreeze)((gap) => {
-      fail(new Error(`Clio WSS 跨进程冻结（约 ${Math.round(gap / 1000)}s），断开重试`));
+      fail(new ProcessFreezeError(gap));
     });
 
     const destroySocket = () => {
@@ -178,9 +183,10 @@ export async function scoreEnSent(
       fail(new Error(`Clio WSS 错误：${detail}`));
     });
 
-    socket.on("close", () => {
+    socket.on("close", (code?: unknown) => {
       if (!settled) {
-        fail(new Error("Clio WSS 在收到评分前关闭"));
+        // close=… (not code=…) so a WS 1006 abnormal close is not read as Clio's 1006 audio overflow.
+        fail(new Error(`Clio WSS 在收到评分前关闭${typeof code === "number" ? `（close=${code}）` : ""}`));
       }
     });
 
@@ -219,7 +225,7 @@ export async function scoreEnSent(
             sampleBytes: 2,
           },
           request: {
-            apiName: "en.sent.score",
+            apiName: input.apiName ?? "en.sent.score",
             transcript,
             userId,
             sig,
@@ -228,7 +234,9 @@ export async function scoreEnSent(
         };
         socket.send(JSON.stringify(sdkFrame));
         socket.send(JSON.stringify(requestFrame));
-        socket.send(Buffer.from(audio));
+        const bytes = Buffer.from(audio);
+        const chunk = Math.max(1, Math.floor(input.chunkBytes ?? 32_000));
+        for (let i = 0; i < bytes.length; i += chunk) socket.send(bytes.subarray(i, i + chunk));
         socket.send(JSON.stringify({ stop: true }));
       } catch (error) {
         fail(error instanceof Error ? error : new Error(String(error)));

@@ -107,6 +107,42 @@ describe("retryWithinBudget (#98)", () => {
     }
   });
 
+  test("freeze-dropped attempts do not use up the attempt count (#116)", async () => {
+    const { retryWithinBudget, ProcessFreezeError } = await import("../src/retry.js");
+    let t = 0;
+    let n = 0;
+    const logs: string[] = [];
+    const out = await retryWithinBudget(
+      async () => {
+        n++;
+        if (n <= 2) throw new Error("Clio WSS 超时 (58803ms)");
+        if (n <= 4) throw new Error("Clio 评分失败：x", { cause: new ProcessFreezeError(467_000) });
+        return "ok";
+      },
+      { label: "speak-4", budgetMs: 600_000, attempts: 4, now: () => t, sleep: async (ms) => void (t += ms), log: (l) => logs.push(l) },
+    );
+    assert.equal(out, "ok");
+    assert.equal(n, 5);
+    assert.ok(logs.some((l) => /冻结断开，不计次/.test(l)), logs.join("\n"));
+  });
+
+  test("freeze retries are bounded (#116)", async () => {
+    const { retryWithinBudget, ProcessFreezeError } = await import("../src/retry.js");
+    let t = 0;
+    let n = 0;
+    await assert.rejects(
+      retryWithinBudget(
+        async () => {
+          n++;
+          throw new ProcessFreezeError(100_000);
+        },
+        { label: "x", budgetMs: 600_000, attempts: 2, freezeRetries: 3, now: () => t, sleep: async (ms) => void (t += ms), log: () => {} },
+      ),
+      /跨进程冻结/,
+    );
+    assert.equal(n, 5);
+  });
+
   test("the retry budget is hard-capped by an enclosing part / paper budget (#100)", async () => {
     const { retryWithinBudget } = await import("../src/retry.js");
     const { withDeadline } = await import("../src/watchdog.js");

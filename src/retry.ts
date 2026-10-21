@@ -16,6 +16,22 @@ export function toError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : String(value));
 }
 
+/** A long-lived connection dropped because the process froze (#112): retry is free, not a strike (#116). */
+export class ProcessFreezeError extends Error {
+  constructor(readonly gapMs: number) {
+    super(`Clio WSS 跨进程冻结（约 ${Math.round(gapMs / 1000)}s），断开重试`);
+    this.name = "ProcessFreezeError";
+  }
+}
+
+/** True when `value` or any error in its cause chain is a ProcessFreezeError. */
+export function isProcessFreezeError(value: unknown): boolean {
+  for (let e: unknown = value, depth = 0; e != null && depth < 8; e = (e as { cause?: unknown }).cause, depth++) {
+    if (e instanceof ProcessFreezeError) return true;
+  }
+  return false;
+}
+
 export function classifyError(value: unknown): ErrorClass {
   const err = toError(value);
   const msg = err.message;
@@ -86,8 +102,10 @@ export type BudgetRetryOptions = {
   label: string;
   /** Wall-clock budget for all attempts and backoffs together. */
   budgetMs: number;
-  /** Attempt cap (default 4). */
+  /** Attempt cap (default 4). Freeze drops do not count against it (#116). */
   attempts?: number;
+  /** Extra attempts allowed for ProcessFreezeError failures (default 4). */
+  freezeRetries?: number;
   /** First backoff; doubles each retry up to maxDelayMs (defaults 3000 / 30000). */
   baseDelayMs?: number;
   maxDelayMs?: number;
@@ -116,27 +134,36 @@ export async function retryWithinBudget<T>(
   const start = now();
   // Never past an enclosing part / paper budget (#100); nested steps see this deadline too.
   const deadline = start + Math.min(opts.budgetMs, remainingBudgetMs(now));
+  let freezeLeft = Math.max(0, opts.freezeRetries ?? 4);
   let last: Error = new Error("no attempt");
   let attempt = 0;
+  let tries = 0;
   while (attempt < attempts) {
     // A VM suspend during backoff can overshoot the deadline: never start a late attempt.
-    if (attempt > 0 && deadline - now() <= 0) break;
+    if (tries > 0 && deadline - now() <= 0) break;
     attempt++;
+    tries++;
     const remaining = Math.max(1, deadline - now());
     try {
       return await withWallTimeout(withDeadline(deadline, () => fn(remaining, attempt)), remaining, `${opts.label} 重试总时长上限`, { now });
     } catch (raw) {
       last = toError(raw);
       if (opts.isFatal?.(last)) throw last;
-      const delay = Math.min(max, base * 2 ** (attempt - 1));
+      // The freeze already ate the wait; reconnect promptly and give the strike back (#116).
+      const freeze = isProcessFreezeError(last) && freezeLeft > 0;
+      if (freeze) {
+        freezeLeft--;
+        attempt--;
+      }
+      const delay = freeze ? base : Math.min(max, base * 2 ** Math.max(0, attempt - 1));
       const retry = attempt < attempts && now() + delay < deadline;
       log(
-        `[retry] ${opts.label} 第 ${attempt}/${attempts} 次失败（已用 ${now() - start}ms）：${last.message}；` +
+        `[retry] ${opts.label} 第 ${freeze ? `${tries} 次失败（冻结断开，不计次）` : `${attempt}/${attempts} 次失败`}（已用 ${now() - start}ms）：${last.message}；` +
           (retry ? `${delay}ms 后重试` : "不再重试"),
       );
       if (!retry) break;
       await sleep(delay);
     }
   }
-  throw new Error(`${opts.label}：${attempt} 次均失败（${now() - start}ms）：${last.message}`, { cause: last });
+  throw new Error(`${opts.label}：${tries} 次均失败（${now() - start}ms）：${last.message}`, { cause: last });
 }

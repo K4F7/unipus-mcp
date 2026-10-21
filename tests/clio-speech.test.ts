@@ -265,6 +265,50 @@ describe("scoreEnSent (mocked WSS)", () => {
     assert.equal(unsubscribed, true);
   });
 
+  test("freeze rejection is a ProcessFreezeError; server close carries the close code (#116)", async () => {
+    const { isProcessFreezeError } = await import("../src/retry.js");
+    MockWebSocket.instances = [];
+    let freeze: ((ms: number) => void) | undefined;
+    const p = scoreEnSent(
+      { transcript: "hello", audioBytes: Buffer.from("RIFF"), timeoutMs: 300_000 },
+      { createWebSocket: (url) => new MockWebSocket(url), onFreeze: (cb) => ((freeze = cb), () => {}) },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    freeze!(467_000);
+    const err = await p.catch((e) => e);
+    assert.equal(isProcessFreezeError(new Error("Clio 评分失败：x", { cause: err })), true);
+
+    MockWebSocket.instances = [];
+    const q = scoreEnSent(
+      { transcript: "hello", audioBytes: Buffer.from("RIFF"), timeoutMs: 300_000 },
+      { createWebSocket: (url) => new MockWebSocket(url), onFreeze: () => () => {} },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    MockWebSocket.instances[0]!.emit("close", 1006, Buffer.from(""));
+    const closed = await q.catch((e) => e);
+    assert.match(closed.message, /在收到评分前关闭（close=1006）/);
+    assert.equal(isProcessFreezeError(closed), false);
+  });
+
+  test("audio is streamed in chunks like the App recorder, and apiName is selectable (#118)", async () => {
+    MockWebSocket.instances = [];
+    const audio = Buffer.alloc(100_000, 1);
+    const p = scoreEnSent(
+      { transcript: "hello", audioBytes: audio, timeoutMs: 30_000, apiName: "en.pred.score", chunkBytes: 32_000 },
+      { createWebSocket: (url) => new MockWebSocket(url), onFreeze: () => () => {} },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    const sock = MockWebSocket.instances[0]!;
+    const req = JSON.parse(String(sock.sent[1]));
+    assert.equal(req.request.apiName, "en.pred.score");
+    const bins = sock.sent.slice(2, -1) as Buffer[];
+    assert.deepEqual(bins.map((b) => b.length), [32_000, 32_000, 32_000, 4_000]);
+    assert.deepEqual(Buffer.concat(bins), audio);
+    assert.equal(String(sock.sent.at(-1)), JSON.stringify({ stop: true }));
+    sock.respondFinal({ code: 0, finalResult: { result: { total: 80 } } });
+    await p;
+  });
+
   test("scoreSpeechTool maps EN_SENT_SCORE content", async () => {
     MockWebSocket.instances = [];
     const toolPromise = scoreSpeechTool(
