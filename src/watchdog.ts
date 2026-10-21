@@ -17,6 +17,12 @@ export type Clock = { now?: () => number; tickMs?: number };
 /** Exit code when the process-level stall watchdog fires. */
 export const EXIT_STALL = 3;
 export const DEFAULT_STALL_MINUTES = 15;
+/** Exit code when the wall-clock idle watchdog fires (#110): no output for N real minutes, freezes included. */
+export const EXIT_IDLE = 6;
+export const DEFAULT_IDLE_MINUTES = 30;
+/** Ceiling on total freeze time excluded from activeNow (#110): past it, deadlines run on wall time. */
+export const DEFAULT_MAX_FROZEN_MS = 20 * 60_000;
+const STALL_LOG = "[stall]";
 
 export type StallClock = {
   /** Wall time minus every detected freeze (ms, Date.now scale). */
@@ -36,11 +42,14 @@ export function createStallClock(opts: {
   now?: () => number;
   tickMs?: number;
   thresholdMs?: number;
+  /** Total excluded freeze time never exceeds this (default DEFAULT_MAX_FROZEN_MS, #110). */
+  maxFrozenMs?: number;
   log?: (line: string) => void;
 } = {}): StallClock {
   const wall = opts.now ?? Date.now;
   const tickMs = opts.tickMs ?? 1000;
   const thresholdMs = opts.thresholdMs ?? 15_000;
+  const maxFrozenMs = opts.maxFrozenMs ?? DEFAULT_MAX_FROZEN_MS;
   const log = opts.log ?? ((line: string) => console.error(line));
   let last = wall();
   let stalled = 0;
@@ -50,8 +59,8 @@ export function createStallClock(opts: {
     // Move the heartbeat first: the log goes through the stall watchdog's stderr hook, which reads this clock again.
     last = t;
     if (gap > thresholdMs) {
-      stalled += gap - tickMs;
-      log(`[stall] 进程冻结约 ${Math.round(gap / 1000)}s（VM 暂停/宿主卡顿/事件循环阻塞），超时与预算不计这段`);
+      stalled = Math.min(maxFrozenMs, stalled + gap - tickMs);
+      log(`${STALL_LOG} 进程冻结约 ${Math.round(gap / 1000)}s（VM 暂停/宿主卡顿/事件循环阻塞），超时与预算不计这段`);
     }
     return t;
   };
@@ -138,6 +147,14 @@ export function resolveStallMs(env: NodeJS.ProcessEnv = process.env): number {
   return Math.round(n * 60_000);
 }
 
+/** `UNIPUS_IDLE_MINUTES` (default 30; 0 = off) → ms of real wall time without output before EXIT_IDLE (#110). */
+export function resolveIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.UNIPUS_IDLE_MINUTES?.trim();
+  const n = raw ? Number(raw) : DEFAULT_IDLE_MINUTES;
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_MINUTES * 60_000;
+  return Math.round(n * 60_000);
+}
+
 export type StallWatchdog = {
   /** Record progress (new log line / stage advance). */
   touch(stage?: string): void;
@@ -195,32 +212,46 @@ export function installProcessStallWatchdog(
   label: string,
   opts: ProcessWatchdogOptions = {},
 ): StallWatchdog | null {
-  const stallMs = resolveStallMs(opts.env ?? process.env);
-  if (stallMs <= 0) return null;
+  const env = opts.env ?? process.env;
+  const stallMs = resolveStallMs(env);
+  const idleMs = resolveIdleMs(env);
+  if (stallMs <= 0 && idleMs <= 0) return null;
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
   const originals = [stdout.write, stderr.write] as const;
   const print = (i: 0 | 1, line: string, done?: () => void) =>
     (originals[i] as (s: string, cb?: () => void) => boolean).call(i === 0 ? stdout : stderr, `${line}\n`, done);
-  const wd = createStallWatchdog(stallMs, ({ idleMs, stage }) => {
+  let exited = false;
+  const fatal = (code: number, errorCode: string, kind: string) => ({ idleMs, stage }: { idleMs: number; stage: string }) => {
+    if (exited) return;
+    exited = true;
     const minutes = Math.round(idleMs / 60_000);
-    const message = `${label}: ${minutes} 分钟无进展（最后阶段 ${stage}），stall watchdog 退出 ${EXIT_STALL}`;
-    const exit = opts.exit ?? ((code) => process.exit(code));
-    let exited = false;
+    const message = `${label}: ${minutes} 分钟无进展（最后阶段 ${stage}），${kind} 退出 ${code}`;
+    const exit = opts.exit ?? ((c) => process.exit(c));
+    let done = false;
     const exitOnce = () => {
-      if (exited) return;
-      exited = true;
-      exit(EXIT_STALL);
+      if (done) return;
+      done = true;
+      exit(code);
     };
     print(1, `[watchdog] ${message}`);
-    // Piped stdout writes are async: exit only after the fatal line is flushed (2s cap).
-    print(0, JSON.stringify({ event: "fatal", error_code: "STALL", stage, idle_ms: idleMs, message }), exitOnce);
-    wallClockTimer(2000, exitOnce);
-  });
+    // Piped stdout writes are async: exit only after the fatal line is flushed (2s cap, real time).
+    print(0, JSON.stringify({ event: "fatal", error_code: errorCode, stage, idle_ms: idleMs, message }), exitOnce);
+    wallClockTimer(2000, exitOnce, { now: Date.now });
+  };
+  const dogs: StallWatchdog[] = [];
+  if (stallMs > 0) dogs.push(createStallWatchdog(stallMs, fatal(EXIT_STALL, "STALL", "stall watchdog")));
+  // Real wall clock: a run of "freezes" (host throttling) can no longer hide a hang (#110).
+  if (idleMs > 0) dogs.push(createStallWatchdog(idleMs, fatal(EXIT_IDLE, "IDLE", "idle watchdog（墙钟）"), { now: Date.now }));
+  const wd: StallWatchdog = {
+    touch: (s) => dogs.forEach((d) => d.touch(s)),
+    stop: () => dogs.forEach((d) => d.stop()),
+  };
   [stdout, stderr].forEach((stream, i) => {
     const original = originals[i] as (...a: unknown[]) => boolean;
     stream.write = function (...a: unknown[]) {
-      wd.touch();
+      // The freeze notice is not progress, else every detected "freeze" resets the watchdog (#110).
+      if (!String(a[0]).startsWith(STALL_LOG)) wd.touch();
       return original.apply(stream, a);
     } as Writable["write"];
   });

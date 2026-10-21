@@ -35,6 +35,9 @@ export function defaultMaxRounds(need: number, env?: NodeJS.ProcessEnv): number 
   return need + Math.max(need, resolveMaxConsecutiveFailures(env)) + resolveClioOverflowSkips(env);
 }
 
+/** weekly-grind exit code when an account hit the consecutive-failure stop (#110). */
+export const EXIT_STREAK_STOPPED = 7;
+
 /** Counts papers failed in a row; `fail` returns the stop reason once the cap is hit. */
 export function createFailureStreak(env?: NodeJS.ProcessEnv) {
   const max = resolveMaxConsecutiveFailures(env);
@@ -141,6 +144,8 @@ export type PaperLoopResult = {
   warnings?: string[];
   /** Network stayed down past UNIPUS_NET_WAIT_MAX_MS (#102): resumable, not the account's fault. */
   networkDown?: boolean;
+  /** Stopped by the consecutive-failure rule (#110): do not restart this account. */
+  streakStopped?: boolean;
 };
 
 /**
@@ -232,7 +237,7 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       if (result.refused) return done({ stoppedReason: result.detail, refused: true });
       if (isAuthFailure(result.detail, result.errorClass)) return done({ stoppedReason: result.detail });
       const stop = streak.fail(result.detail);
-      if (stop) return done({ stoppedReason: stop });
+      if (stop) return done({ stoppedReason: stop, streakStopped: true });
       warnings.push(`跳过 ${result.taskId ?? "?"}：${result.detail}`);
       console.error(`[grind] ${opts.skill} 第 ${round} 轮失败，跳过本张继续：${result.detail}`);
       continue;

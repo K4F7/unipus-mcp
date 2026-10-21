@@ -1495,6 +1495,20 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.equal(speakCalls, 0);
   });
 
+  test("consecutive-failure stop surfaces streak_stopped in the account summary (#110)", async () => {
+    const env = { ...LLM_ENV };
+    const { home, row } = await oneRow("streak", env);
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      listProgress: progress,
+      grindListen: async () => ({ completed: 0, taskIds: [] }),
+      grindSpeak: async () => ({ completed: 0, taskIds: [], stoppedReason: "连续 2 张失败，停号：a | b", streakStopped: true }),
+    });
+    assert.equal(result.streak_stopped, true);
+  });
+
   test("listen refused → speak not run, account status error", async () => {
     const env = { ...LLM_ENV };
     const { home, row } = await oneRow("lref", env);

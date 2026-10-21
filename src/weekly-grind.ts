@@ -87,6 +87,8 @@ export type AccountGrindSummary = {
   warnings?: string[];
   /** Network stayed down past UNIPUS_NET_WAIT_MAX_MS (#102): resumable by re-running. */
   network_down?: boolean;
+  /** Stopped by the consecutive-failure rule (#110): a wrapper must not restart this account. */
+  streak_stopped?: boolean;
   /** Set when the account run threw unexpectedly (TIMEOUT/NETWORK/FORBIDDEN/…). */
   error_class?: ErrorClass;
 };
@@ -151,6 +153,7 @@ type SideResult = {
   refused?: boolean;
   /** Network stayed down past the wait cap (#102). */
   networkDown?: boolean;
+  streakStopped?: boolean;
 };
 
 export type SelectAccountsMode =
@@ -768,6 +771,7 @@ export async function grindOneAccount(
       if (r.errorClass) base.error_class ??= r.errorClass;
       if (r.refused) refused = true;
       if (r.networkDown) base.network_down = true;
+      if (r.streakStopped) base.streak_stopped = true;
     } catch (error) {
       const err = toError(error);
       errors.push(`${side}: ${err.message}`);

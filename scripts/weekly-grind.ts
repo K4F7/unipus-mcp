@@ -16,6 +16,7 @@ import {
 } from "../src/weekly-grind.js";
 import { ACCOUNT_LOCKED_EXIT_CODE, AccountLockedError, acquireAccountLocks } from "../src/account-lock.js";
 import { createPaperReporter, redactSecrets } from "../src/paper-result.js";
+import { EXIT_STREAK_STOPPED } from "../src/paper-loop.js";
 import { installProcessStallWatchdog } from "../src/watchdog.js";
 
 function printHelp(): void {
@@ -125,6 +126,11 @@ async function main(): Promise<void> {
   }
   // exitCode (not process.exit) so piped stdout JSON fully flushes.
   if (hardFail && !anyOk) process.exitCode = 1;
+  // Consecutive-failure stop (#110): distinct code so a wrapper skips instead of restarting.
+  if (summary.accounts.some((a) => a.streak_stopped)) {
+    console.error("[grind] STREAK_STOPPED：连续失败停号，不要自动重跑该号");
+    process.exitCode = EXIT_STREAK_STOPPED;
+  }
   // Network outage outlasted UNIPUS_NET_WAIT_MAX_MS (#102): resumable, not an account failure.
   if (summary.accounts.some((a) => a.network_down)) {
     console.error("[net] NETWORK_DOWN：网络未恢复，已停止；网络恢复后重跑同一命令即可续上（已交的卷按 App 历史跳过）");
