@@ -210,7 +210,7 @@ export function createScoredSpeechRecordBuilder(
     );
     if (sec < opts.minSec && gaps > 0) {
       // Stretch only the pauses between sentences (speech itself unchanged), within a natural limit.
-      const stretched = Math.min(pauseCap, (opts.pauseSec ?? 0) + (opts.minSec + 1 - sec) / gaps);
+      const stretched = Math.min(pauseCap, (opts.pauseSec ?? 0) + (opts.minSec + 0.5 - sec) / gaps);
       if (stretched > (opts.pauseSec ?? 0)) {
         await spoken.cleanup?.();
         console.error(`[speech] 录音 ${sec.toFixed(1)}s < ${opts.minSec}s，句间停顿加到 ${stretched.toFixed(2)}s 重合成`);

@@ -145,10 +145,18 @@ describe("free-talk duration gate (#92)", () => {
     assert.ok(sec >= 90, String(sec));
   });
 
+  test("stretch targets minSec + 0.5 s, not +1 s, to stay clear of Clio 1006 (#116)", async () => {
+    const calls: Array<{ speed?: number; pauseSec?: number }> = [];
+    let sec = 0;
+    const b = createScoredSpeechRecordBuilder(ports, deps({ synthesize: synth(calls) }));
+    await b(text, "t", "EN_PRED_SCORE", { pauseSec: 0.3, minSec: 90, onAudio: (s) => (sec = s) });
+    assert.ok(sec >= 90 && sec <= 90.6, String(sec));
+  });
+
   test("needed pause just over the cap → retried at the cap instead of giving up (review #93)", async () => {
     const calls: Array<{ speed?: number; pauseSec?: number }> = [];
     let sec = 0;
-    const b = createScoredSpeechRecordBuilder(ports, deps({ synthesize: synth(calls, 68) }));
+    const b = createScoredSpeechRecordBuilder(ports, deps({ synthesize: synth(calls, 67.6) }));
     await b(text, "t", "EN_PRED_SCORE", { pauseSec: 0.3, minSec: 90, onAudio: (s) => (sec = s) });
     assert.equal(calls.length, 2);
     assert.equal(calls[1]!.pauseSec, 1.2);
