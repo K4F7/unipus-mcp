@@ -32,6 +32,7 @@ import { extractParsedPaperJson, parseJsonPreservingLargeInts } from "./safe-jso
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 import {
   buildVoicedAnswer,
+  cachedSpeechRecord,
   createScoredSpeechRecordBuilder,
   voicedChild,
   type SpeechRecordBuilder,
@@ -87,6 +88,8 @@ export type GrindSpeakPorts = AuthPorts & {
    * retry after a submit/network failure does not redo LLM + TTS + Clio + upload (#119). grindSpeakGaps owns one.
    */
   answerCache?: Map<string, { answer: string; meta?: FreeTalkMeta }>;
+  /** Voiced records per sentence (tag+type+text), same lifetime as answerCache (#119). */
+  speechCache?: Map<string, Record<string, unknown>>;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam for the paper cap; default activeNow (freezes excluded, #100). */
@@ -534,7 +537,8 @@ export async function completeOneSpeak(
   let ask: LlmAsk;
   try {
     ask = ports.llmAsk ?? resolveLlmAsk(ports.env ?? process.env);
-    const speech = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+    const built = ports.speechRecord ?? createScoredSpeechRecordBuilder(ports);
+    const speech = ports.speechCache ? cachedSpeechRecord(built, ports.speechCache) : built;
     /** One UNIPUS_PART_MAX_MS budget per part, shared by its leaves, never past the paper deadline. */
     const partDeadlines = new Map<SpeakPart | undefined, number>();
     for (const leaf of leaves) {
@@ -869,7 +873,7 @@ export async function grindSpeakGaps(
     return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
   }
   const appScores: number[] = [];
-  const speakPorts = { ...ports, answerCache: ports.answerCache ?? new Map() };
+  const speakPorts = { ...ports, answerCache: ports.answerCache ?? new Map(), speechCache: ports.speechCache ?? new Map() };
   const r = await runPaperLoop({
     skill: "说",
     need,

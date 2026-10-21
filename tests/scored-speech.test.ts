@@ -398,3 +398,27 @@ describe("Clio 1006 at the pause floor → hand back for a shorter script (#108)
     assert.ok(sec <= 95 && sec >= 90, String(secs));
   });
 });
+
+test("cachedSpeechRecord: a retried leaf re-voices only the sentences that failed (#119)", async () => {
+  const { cachedSpeechRecord } = await import("../src/scored-speech.js");
+  const calls: string[] = [];
+  let failC = true;
+  const base = async (text: string, tag: string) => {
+    calls.push(tag);
+    if (tag === "s-2" && failC) throw new Error("Clio 超时");
+    return { text, url: `u-${tag}` };
+  };
+  const cache = new Map();
+  const b = cachedSpeechRecord(base as never, cache);
+  await b("A", "s-0", "EN_SENT_SCORE");
+  await b("B", "s-1", "EN_SENT_SCORE");
+  await assert.rejects(b("C", "s-2", "EN_SENT_SCORE"));
+  failC = false;
+  const a = await b("A", "s-0", "EN_SENT_SCORE");
+  await b("B", "s-1", "EN_SENT_SCORE");
+  await b("C", "s-2", "EN_SENT_SCORE");
+  assert.deepEqual(calls, ["s-0", "s-1", "s-2", "s-2"]);
+  assert.equal(a.url, "u-s-0");
+  a.url = "mutated";
+  assert.equal((await b("A", "s-0", "EN_SENT_SCORE")).url, "u-s-0", "cache hands out copies");
+});

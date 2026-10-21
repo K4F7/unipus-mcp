@@ -12,6 +12,10 @@ import { isClioAudioOverflow } from "./clio-speech.js";
 import { isNetworkFailure, networkDownReason, type NetworkWaiter } from "./net-wait.js";
 import type { FindHistoryTrainingTaskResult } from "./history-training-tasks.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
+import { DEFAULT_MAX_FROZEN_MS, onProcessFreeze } from "./watchdog.js";
+
+/** Same-paper retries after a freeze longer than the exclusion cap (#119). */
+export const FREEZE_PAPER_RETRIES = 3;
 
 /** part/submit / submitAnswer 4021「请勿多设备同时作答」: another session reloaded the paper token. */
 export function isConcurrentAnswerError(message: string | undefined): boolean {
@@ -168,6 +172,8 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   onSubmitted?: (r: Extract<R, { ok: true }>) => void;
   /** Network-outage wait (#102); absent → network failures count like any other. */
   waitNetwork?: NetworkWaiter;
+  /** Freeze feed (test seam); default the process stall clock. */
+  onFreeze?: (cb: (gapMs: number) => void) => () => void;
 }): Promise<PaperLoopResult> {
   const taskIds: string[] = [];
   const warnings: string[] = [];
@@ -176,6 +182,9 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   let errorClass: ErrorClass | undefined;
   let netRetries = resolveNetWait(opts.env).retries;
   let overflowSkips = resolveClioOverflowSkips(opts.env);
+  // A freeze longer than the exclusion cap charges its excess to the paper budget (#112); a paper that then
+  // fails was killed by the host, not by its content: retry it with a fresh budget, a few times (#119).
+  let freezeRetries = FREEZE_PAPER_RETRIES;
   const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
     completed: taskIds.length,
     taskIds,
@@ -186,6 +195,10 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   for (let round = 1; round <= opts.maxRounds && taskIds.length < opts.need; round++) {
     let result: R | ThrownRound;
     let before: Record<string, unknown> | null = null;
+    let longFreeze = false;
+    const unsubscribe = (opts.onFreeze ?? onProcessFreeze)((gap) => {
+      if (gap > DEFAULT_MAX_FROZEN_MS) longFreeze = true;
+    });
     try {
       before = await opts.status();
       result = await opts.completeOne();
@@ -193,6 +206,8 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       const err = toError(error);
       const cls = classifyError(err);
       result = { ok: false, taskId: null, detail: `${cls}: ${err.message}`, errorClass: cls };
+    } finally {
+      unsubscribe();
     }
     try {
       await opts.report(result);
@@ -217,6 +232,13 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
         return done({ stoppedReason: networkDownReason(result.detail), networkDown: true, errorClass: "NETWORK" });
       }
       netRetries--;
+      round--;
+      continue;
+    }
+    if (!result.ok && longFreeze && freezeRetries > 0 && !result.refused && !isAuthFailure(result.detail, result.errorClass)) {
+      freezeRetries--;
+      warnings.push(`重试 ${result.taskId ?? "?"}（超长冻结拖垮本卷，不计连续失败，剩 ${freezeRetries}）：${result.detail}`);
+      console.error(`[stall] ${opts.skill} 第 ${round} 轮在超长冻结后失败，同卷重来（不计连续失败/轮次，剩 ${freezeRetries}）`);
       round--;
       continue;
     }
