@@ -82,6 +82,11 @@ export type GrindSpeakPorts = AuthPorts & {
   loadPaperUrl?: string;
   /** Inject voiced record builder; default TTS → Clio score → Qiniu upload. */
   speechRecord?: SpeechRecordBuilder;
+  /**
+   * Voiced leaf answers keyed by taskId:ansVersion:instanceId, kept across attempts at the same paper so a
+   * retry after a submit/network failure does not redo LLM + TTS + Clio + upload (#119). grindSpeakGaps owns one.
+   */
+  answerCache?: Map<string, { answer: string; meta?: FreeTalkMeta }>;
   /** Test seam; default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam for the paper cap; default activeNow (freezes excluded, #100). */
@@ -534,6 +539,13 @@ export async function completeOneSpeak(
     const partDeadlines = new Map<SpeakPart | undefined, number>();
     for (const leaf of leaves) {
       if (skipIds.has(leaf.instanceId)) continue;
+      const cacheKey = `${taskId}:${ansVersion}:${leaf.instanceId}`;
+      const cached = ports.answerCache?.get(cacheKey);
+      if (cached) {
+        answers.set(leaf.instanceId, cached.answer);
+        if (cached.meta) freeTalkMeta.set(leaf.instanceId, cached.meta);
+        continue;
+      }
       const part = parts.find((p) => p.questionInstanceIds.includes(leaf.instanceId));
       if (!partDeadlines.has(part)) partDeadlines.set(part, Math.min(clock() + partMaxMs, paperDeadline));
       answers.set(
@@ -545,6 +557,7 @@ export async function completeOneSpeak(
           `口语答案 ${leaf.name || leaf.instanceId} 单 part / 整卷上限`,
         ),
       );
+      ports.answerCache?.set(cacheKey, { answer: answers.get(leaf.instanceId)!, meta: freeTalkMeta.get(leaf.instanceId) });
     }
   } catch (error) {
     const err = toError(error);
@@ -856,6 +869,7 @@ export async function grindSpeakGaps(
     return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
   }
   const appScores: number[] = [];
+  const speakPorts = { ...ports, answerCache: ports.answerCache ?? new Map() };
   const r = await runPaperLoop({
     skill: "说",
     need,
@@ -867,7 +881,7 @@ export async function grindSpeakGaps(
       const body = (await adaptiveGet(ports, "/api/uls/user/getUserStatus?flowType=speak", jwt)) as Record<string, unknown>;
       return (body?.value as Record<string, unknown> | undefined) ?? null;
     },
-    completeOne: () => completeOneSpeak(ports),
+    completeOne: () => completeOneSpeak(speakPorts),
     report: async (round) => { await ports.results?.report(speakPaperResult(round)); },
     onSubmitted: (round) => appScores.push(round.appScore ?? 0),
     waitNetwork: ports.waitNetwork,
