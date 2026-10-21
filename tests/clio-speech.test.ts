@@ -247,6 +247,24 @@ describe("scoreEnSent (mocked WSS)", () => {
     assert.equal(sock.terminated, true);
   });
 
+  test("a process freeze mid-WSS drops the socket and rejects at once, retryable (#112)", async () => {
+    MockWebSocket.instances = [];
+    let freeze: ((ms: number) => void) | undefined;
+    let unsubscribed = false;
+    const p = scoreEnSent(
+      { transcript: "hello", audioBytes: Buffer.from("RIFF"), timeoutMs: 300_000 },
+      {
+        createWebSocket: (url) => new MockWebSocket(url),
+        onFreeze: (cb) => ((freeze = cb), () => { unsubscribed = true; }),
+      },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    freeze!(1_277_000);
+    await assert.rejects(p, /Clio WSS 跨进程冻结/);
+    assert.equal(MockWebSocket.instances[0]!.terminated, true);
+    assert.equal(unsubscribed, true);
+  });
+
   test("scoreSpeechTool maps EN_SENT_SCORE content", async () => {
     MockWebSocket.instances = [];
     const toolPromise = scoreSpeechTool(

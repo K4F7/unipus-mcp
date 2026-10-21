@@ -2,7 +2,7 @@ import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 
 import WebSocket from "ws";
-import { capToBudget, wallClockTimer } from "./watchdog.js";
+import { capToBudget, onProcessFreeze, wallClockTimer } from "./watchdog.js";
 
 import {
   DEFAULT_CLIO_APPLICATION_ID,
@@ -65,6 +65,8 @@ export type ScoreEnSentPorts = {
   readFile?: (path: string) => Promise<Buffer>;
   createWebSocket?: (url: string) => ClioWebSocketLike;
   nowMs?: () => number;
+  /** Freeze subscription (default onProcessFreeze); returns unsubscribe. */
+  onFreeze?: (cb: (gapMs: number) => void) => () => void;
   randomUUID?: () => string;
 };
 
@@ -145,6 +147,10 @@ export async function scoreEnSent(
     const cancelTimer = wallClockTimer(timeoutMs, () => {
       fail(new Error(`Clio WSS 超时 (${timeoutMs}ms)`));
     });
+    // The server has most likely dropped the socket during a freeze: fail now so the caller retries (#112).
+    const unsubscribeFreeze = (ports.onFreeze ?? onProcessFreeze)((gap) => {
+      fail(new Error(`Clio WSS 跨进程冻结（约 ${Math.round(gap / 1000)}s），断开重试`));
+    });
 
     const destroySocket = () => {
       try {
@@ -159,6 +165,7 @@ export async function scoreEnSent(
       if (settled) return;
       settled = true;
       cancelTimer();
+      unsubscribeFreeze();
       destroySocket();
       fn();
     };

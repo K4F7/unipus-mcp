@@ -188,15 +188,25 @@ test("withDeadline / remainingBudgetMs: nested scopes keep the tighter deadline;
   await withDeadline(t - 5, async () => assert.equal(capToBudget(45_000, now), 1, "spent budget → 1ms, never 0/negative"));
 });
 
-test("createStallClock: excluded freeze time is capped by a real wall-clock ceiling (#110)", () => {
+test("createStallClock: the exclusion ceiling is per freeze, not per process (#110, #112)", () => {
   let t = 0;
-  const clock = createStallClock({ now: () => t, thresholdMs: 15_000, tickMs: 1000, maxFrozenMs: 600_000, log: () => {} });
+  const lines: string[] = [];
+  const freezes: number[] = [];
+  const clock = createStallClock({
+    now: () => t, thresholdMs: 15_000, tickMs: 1000, maxFrozenMs: 1_200_000,
+    log: (l) => lines.push(l), onFreeze: (ms) => freezes.push(ms),
+  });
   try {
-    const a0 = clock.now();
-    for (let i = 0; i < 5; i++) t += 300_000; // heartbeat keeps arriving late (host throttling)
-    clock.now();
-    assert.ok(clock.stalledMs() <= 600_000, "never excludes more than the ceiling");
-    assert.ok(clock.now() - a0 >= 1_500_000 - 600_000, "deadlines advance on wall time past the ceiling");
+    t += 1_900_000; // first long freeze: 1200s excluded, the rest counts
+    const a1 = clock.now();
+    assert.equal(a1, 1_900_000 - 1_200_000);
+    t += 1_277_000; // second long freeze in the same process: still excluded up to the ceiling
+    const a2 = clock.now();
+    assert.equal(a2 - a1, 1_277_000 - 1_200_000, "a later freeze is excluded again; next paper keeps its budget");
+    t += 1000;
+    assert.equal(clock.now() - a2, 1000, "normal time still counts");
+    assert.match(lines[0]!, /扣除 1200s，计入预算 700s/);
+    assert.deepEqual(freezes, [1_900_000, 1_277_000]);
   } finally {
     clock.stop();
   }

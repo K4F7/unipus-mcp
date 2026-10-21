@@ -20,7 +20,7 @@ export const DEFAULT_STALL_MINUTES = 15;
 /** Exit code when the wall-clock idle watchdog fires (#110): no output for N real minutes, freezes included. */
 export const EXIT_IDLE = 6;
 export const DEFAULT_IDLE_MINUTES = 30;
-/** Ceiling on total freeze time excluded from activeNow (#110): past it, deadlines run on wall time. */
+/** Ceiling on the time excluded from activeNow per freeze (#110, #112): the excess counts as active time. */
 export const DEFAULT_MAX_FROZEN_MS = 20 * 60_000;
 const STALL_LOG = "[stall]";
 
@@ -42,9 +42,11 @@ export function createStallClock(opts: {
   now?: () => number;
   tickMs?: number;
   thresholdMs?: number;
-  /** Total excluded freeze time never exceeds this (default DEFAULT_MAX_FROZEN_MS, #110). */
+  /** One freeze excludes at most this (default DEFAULT_MAX_FROZEN_MS, #110/#112); hangs are caught by EXIT_IDLE. */
   maxFrozenMs?: number;
   log?: (line: string) => void;
+  /** Called with the gap (ms) of each detected freeze. */
+  onFreeze?: (gapMs: number) => void;
 } = {}): StallClock {
   const wall = opts.now ?? Date.now;
   const tickMs = opts.tickMs ?? 1000;
@@ -59,8 +61,11 @@ export function createStallClock(opts: {
     // Move the heartbeat first: the log goes through the stall watchdog's stderr hook, which reads this clock again.
     last = t;
     if (gap > thresholdMs) {
-      stalled = Math.min(maxFrozenMs, stalled + gap - tickMs);
-      log(`${STALL_LOG} 进程冻结约 ${Math.round(gap / 1000)}s（VM 暂停/宿主卡顿/事件循环阻塞），超时与预算不计这段`);
+      const excluded = Math.min(maxFrozenMs, gap - tickMs);
+      stalled += excluded;
+      const sec = (ms: number) => Math.round(ms / 1000);
+      log(`${STALL_LOG} 进程冻结约 ${sec(gap)}s（VM 暂停/宿主卡顿/事件循环阻塞），扣除 ${sec(excluded)}s，计入预算 ${sec(gap - excluded)}s`);
+      opts.onFreeze?.(gap);
     }
     return t;
   };
@@ -74,11 +79,19 @@ export function createStallClock(opts: {
 }
 
 let processClock: StallClock | null = null;
+const freezeListeners = new Set<(gapMs: number) => void>();
 
 /** Process-wide freeze-aware clock (lazy): the default for every timer and budget. */
 export function activeNow(): number {
-  processClock ??= createStallClock();
+  processClock ??= createStallClock({ onFreeze: (gap) => freezeListeners.forEach((f) => f(gap)) });
   return processClock.now();
+}
+
+/** Subscribe to process freezes detected by activeNow's clock (#112). Returns unsubscribe. */
+export function onProcessFreeze(cb: (gapMs: number) => void): () => void {
+  activeNow();
+  freezeListeners.add(cb);
+  return () => freezeListeners.delete(cb);
 }
 
 /** Innermost budget deadline (activeNow scale) of the current async call chain. */
