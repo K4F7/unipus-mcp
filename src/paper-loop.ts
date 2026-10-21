@@ -184,7 +184,7 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
   let overflowSkips = resolveClioOverflowSkips(opts.env);
   // A freeze longer than the exclusion cap charges its excess to the paper budget (#112); a paper that then
   // fails was killed by the host, not by its content: retry it with a fresh budget, a few times (#119).
-  let freezeRetries = FREEZE_PAPER_RETRIES;
+  const freezeRetries = new Map<string | null, number>();
   const done = (extra: Partial<PaperLoopResult> = {}): PaperLoopResult => ({
     completed: taskIds.length,
     taskIds,
@@ -235,10 +235,12 @@ export async function runPaperLoop<R extends PaperRound>(opts: {
       round--;
       continue;
     }
-    if (!result.ok && longFreeze && freezeRetries > 0 && !result.refused && !isAuthFailure(result.detail, result.errorClass)) {
-      freezeRetries--;
-      warnings.push(`重试 ${result.taskId ?? "?"}（超长冻结拖垮本卷，不计连续失败，剩 ${freezeRetries}）：${result.detail}`);
-      console.error(`[stall] ${opts.skill} 第 ${round} 轮在超长冻结后失败，同卷重来（不计连续失败/轮次，剩 ${freezeRetries}）`);
+    // Submitted-but-low/grading papers carry an outcome: they are done, never retried here.
+    const left = freezeRetries.get(result.taskId) ?? FREEZE_PAPER_RETRIES;
+    if (!result.ok && longFreeze && left > 0 && !("outcome" in result && result.outcome) && !result.refused && !isAuthFailure(result.detail, result.errorClass)) {
+      freezeRetries.set(result.taskId, left - 1);
+      warnings.push(`重试 ${result.taskId ?? "?"}（超长冻结拖垮本卷，不计连续失败，剩 ${left - 1}）：${result.detail}`);
+      console.error(`[stall] ${opts.skill} 第 ${round} 轮在超长冻结后失败，同卷重来（不计连续失败/轮次，剩 ${left - 1}）`);
       round--;
       continue;
     }

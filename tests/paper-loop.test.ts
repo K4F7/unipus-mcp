@@ -238,3 +238,20 @@ test("runPaperLoop: short freezes do not turn a failure into a free retry (#119)
   assert.equal(n, 1);
   assert.equal(r.completed, 0);
 });
+
+test("runPaperLoop: a submitted low-score paper is not freeze-retried (#119 review)", async () => {
+  let freeze: ((gap: number) => void) | undefined;
+  let n = 0;
+  await runPaperLoop({
+    skill: "说", need: 1, maxRounds: 1, env: {},
+    status: async () => ({ taskId: "X" }),
+    onFreeze: (cb) => ((freeze = cb), () => {}),
+    completeOne: async () => {
+      n++;
+      freeze!(2_747_000);
+      return { ok: false as const, taskId: "X", detail: "App 74 < 80", outcome: "low_score" as const };
+    },
+    report: async () => {},
+  });
+  assert.equal(n, 1);
+});
