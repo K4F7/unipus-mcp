@@ -273,4 +273,91 @@ describe("startStudyDuration (mocked WSS)", () => {
     assert.equal(session.inert, true);
     assert.equal(MockWebSocket.instances.length, 0);
   });
+
+  test("ready timeout: disposed so late namespace join does not start timers", async () => {
+    MockWebSocket.instances = [];
+    const intervals: Array<{ ms: number; fn: () => void }> = [];
+    const timers: Array<{ ms: number; fn: () => void }> = [];
+
+    const promise = startStudyDuration(
+      { jwt: jwtWithOpenId("oid-fail"), target: speakStudyTarget() },
+      {
+        createWebSocket: (url) => new MockWebSocket(url, { autoHandshake: false }),
+        setTimeoutFn: ((fn: () => void, ms: number) => {
+          timers.push({ ms, fn });
+          return timers.length as unknown as NodeJS.Timeout;
+        }) as typeof setTimeout,
+        clearTimeoutFn: () => {},
+        setIntervalFn: ((fn: () => void, ms: number) => {
+          intervals.push({ ms, fn });
+          return intervals.length as unknown as NodeJS.Timeout;
+        }) as typeof setInterval,
+        clearIntervalFn: () => {},
+        readyTimeoutMs: 100,
+      },
+    );
+
+    // Allow open microtask; do not complete handshake.
+    await new Promise<void>((r) => queueMicrotask(r));
+    const ws = MockWebSocket.instances[0]!;
+    // Fire the ready-timeout timer (last registered with readyTimeoutMs).
+    const readyT = timers.find((t) => t.ms === 100);
+    assert.ok(readyT);
+    readyT!.fn();
+    await assert.rejects(promise, /ready timeout/);
+
+    // Late namespace ack must not start refresh/ping timers.
+    ws.respond(`40${STUDY_DURATION_NAMESPACE},`);
+    assert.equal(intervals.length, 0);
+    assert.equal(ws.sent.filter((s) => s.includes('["kick-v2",')).length, 0);
+  });
+
+  test("softStart does not await handshake before returning", async () => {
+    MockWebSocket.instances = [];
+    let resolveOpen!: () => void;
+    const openGate = new Promise<void>((r) => {
+      resolveOpen = r;
+    });
+
+    // Manual socket: no auto open until we say so.
+    class GateWs extends EventEmitter implements StudyDurationWebSocketLike {
+      url: string;
+      sent: string[] = [];
+      closed = false;
+      constructor(url: string) {
+        super();
+        this.url = url;
+        MockWebSocket.instances.push(this as unknown as MockWebSocket);
+        void openGate.then(() => {
+          this.emit("open");
+          this.emit("message", Buffer.from('0{"sid":"x"}', "utf8"));
+        });
+      }
+      send(data: string | Buffer | Uint8Array): void {
+        const text = typeof data === "string" ? data : Buffer.from(data as Buffer).toString("utf8");
+        this.sent.push(text);
+        if (text.startsWith(`40${STUDY_DURATION_NAMESPACE}?`)) {
+          queueMicrotask(() => this.emit("message", Buffer.from(`40${STUDY_DURATION_NAMESPACE},`, "utf8")));
+        }
+      }
+      close(): void {
+        this.closed = true;
+        this.emit("close");
+      }
+    }
+
+    const t0 = Date.now();
+    const session = await softStartStudyDuration(
+      { jwt: jwtWithOpenId("oid-bg"), target: speakStudyTarget() },
+      { createWebSocket: (url) => new GateWs(url), readyTimeoutMs: 5_000 },
+    );
+    assert.ok(Date.now() - t0 < 200, "softStart must return without waiting for handshake");
+    assert.equal(session.kicked, false);
+    resolveOpen();
+    // Let handshake complete
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(session.kicked, true);
+    await session.dispose();
+  });
+
 });
