@@ -117,6 +117,8 @@ export type GrindSpeakPorts = AuthPorts & {
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
   /** When false, skip study-duration presence (unit tests). Default true. */
   studyDuration?: boolean;
+  /** Prefer accounts/<id>/edx-jwt when resolving study-duration edx JWT (#121). */
+  accountId?: string;
 };
 
 /** Server part-report per part name; 自由表达 also carries our script words + recording seconds. */
@@ -542,6 +544,7 @@ export async function completeOneSpeak(
     {
       jwt,
       openId,
+      accountId: ports.accountId,
       target: speakStudyTarget(),
       env: ports.env,
       enabled: ports.studyDuration,

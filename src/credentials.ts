@@ -126,6 +126,26 @@ export function createAccountJwtStore(
   };
 }
 
+/**
+ * Read native App edx.unipus.cn JWT from accounts/<id>/edx-jwt (0600).
+ * Never logs the value. Missing file → null.
+ */
+export async function readEdxJwtForAccount(
+  accountId: string,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    homedir?: string;
+    readFile?: (path: string) => Promise<string>;
+  } = {},
+): Promise<string | null> {
+  const env = options.env ?? process.env;
+  const home = options.homedir ?? homedir();
+  const read = options.readFile ?? ((path: string) => readFile(path, "utf8"));
+  const id = accountId.trim();
+  if (id.length === 0) return null;
+  return readJwtFile(join(accountDir(id, env, home), "edx-jwt"), read);
+}
+
 export function createStaticJwtStore(jwt: string): JwtCredentialStore {
   const token = jwt.trim();
   return {

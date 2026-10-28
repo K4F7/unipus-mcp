@@ -8,6 +8,7 @@ import {
   createEnvCredentialStore,
   defaultJwtFilePath,
   extractJwtFromText,
+  readEdxJwtForAccount,
 } from "../src/credentials.js";
 
 describe("extractJwtFromText", () => {
@@ -123,5 +124,26 @@ describe("active-account credential resolution", () => {
       homedir: "/tmp/no-such-home-for-active",
     });
     assert.equal(await store.getJwt(), envJwt);
+  });
+});
+
+describe("readEdxJwtForAccount", () => {
+  test("reads accounts/<id>/edx-jwt; missing → null", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-edx-read-"));
+    const config = join(home, ".config", "unipus-mcp");
+    const accountDir = join(config, "accounts", "acct1");
+    await mkdir(accountDir, { recursive: true, mode: 0o700 });
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiZWR4In0.sig";
+    await writeFile(join(accountDir, "edx-jwt"), `${jwt}\n`, { mode: 0o600 });
+
+    assert.equal(
+      await readEdxJwtForAccount("acct1", { env: {}, homedir: home }),
+      jwt,
+    );
+    assert.equal(
+      await readEdxJwtForAccount("missing", { env: {}, homedir: home }),
+      null,
+    );
   });
 });

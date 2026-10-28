@@ -8,9 +8,13 @@
  *
  * Soft-fail: connection / protocol errors are logged and never throw into grind scoring.
  */
+import { readFile } from "node:fs/promises";
+
 import WebSocket from "ws";
 
+import { readActiveAccountId } from "./accounts.js";
 import { DEFAULT_U_APP_ID, resolveUAppId } from "./config.js";
+import { extractJwtFromText, readEdxJwtForAccount } from "./credentials.js";
 import { openIdFromJwt } from "./uls-business.js";
 
 export const DEFAULT_UNIPUSIO_WSS_URL = "wss://ucontent.unipus.cn/unipusio/";
@@ -32,7 +36,7 @@ export type StudyDurationWebSocketLike = {
   terminate?(): void;
 };
 
-export type StudyDurationHubModule = "utingli" | "ukouyu";
+export type StudyDurationHubModule = "utingli" | "ukouyu" | "shouye";
 
 export type StudyDurationTarget =
   | { kind: "hub"; module: StudyDurationHubModule }
@@ -71,6 +75,72 @@ export type StudyDurationPorts = {
 export function resolveUnipusioWssUrl(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.UNIPUS_UNIPUSIO_WSS_URL?.trim() || DEFAULT_UNIPUSIO_WSS_URL;
   return raw.replace(/\?+$/, "");
+}
+
+
+export type ResolveEdxJwtOptions = {
+  /** Prefer this account's accounts/<id>/edx-jwt (after env). */
+  accountId?: string;
+  homedir?: string;
+  readFile?: (path: string) => Promise<string>;
+};
+
+/**
+ * Resolve native App edx.unipus.cn JWT for dual-socket presence (#121).
+ * Order: UNIPUS_EDX_JWT → UNIPUS_EDX_JWT_FILE → accounts/<id>/edx-jwt
+ * (explicit accountId, else active-account.txt). Soft-missing → undefined.
+ * Never logs the token value.
+ */
+export async function resolveEdxJwt(
+  env: NodeJS.ProcessEnv = process.env,
+  options: ResolveEdxJwtOptions = {},
+): Promise<string | undefined> {
+  const inline = env.UNIPUS_EDX_JWT?.trim();
+  if (inline) {
+    const token = inline.replace(/^Bearer\s+/i, "").trim();
+    if (token) return token;
+  }
+
+  const filePath = env.UNIPUS_EDX_JWT_FILE?.trim();
+  if (filePath) {
+    const read = options.readFile ?? ((p: string) => readFile(p, "utf8"));
+    try {
+      const raw = await read(filePath);
+      const token = extractJwtFromText(raw);
+      if (token != null) return token;
+    } catch (error) {
+      if (
+        error == null ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        (error as { code?: unknown }).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  let accountId = options.accountId?.trim() || "";
+  if (!accountId) {
+    const active = await readActiveAccountId({
+      env,
+      home: options.homedir,
+      readFile:
+        options.readFile != null
+          ? async (p) => options.readFile!(p)
+          : undefined,
+    });
+    accountId = active?.trim() ?? "";
+  }
+  if (accountId) {
+    const fromAccount = await readEdxJwtForAccount(accountId, {
+      env,
+      homedir: options.homedir,
+      readFile: options.readFile,
+    });
+    if (fromAccount != null && fromAccount.length > 0) return fromAccount;
+  }
+  return undefined;
 }
 
 export function buildUnipusioUrl(openId: string, jwt: string, env?: NodeJS.ProcessEnv): string {
@@ -240,6 +310,13 @@ export async function softStartStudyDuration(
     openId?: string;
     target: StudyDurationTarget;
     env?: NodeJS.ProcessEnv;
+    /**
+     * Native App edx.unipus.cn JWT. When set with listenTask, opens a second
+     * unipusio socket that receives r_set while SSO jwt emits uls kick-v2 (#121).
+     */
+    edxJwt?: string;
+    /** Prefer accounts/<id>/edx-jwt when edxJwt / env unset. */
+    accountId?: string;
     /** When false, skip entirely (tests). Default true. */
     enabled?: boolean;
   },
@@ -248,12 +325,20 @@ export async function softStartStudyDuration(
   if (input.enabled === false) return NOOP_SESSION;
   const log = ports.log ?? ((msg: string) => console.error(`[study-duration] ${msg}`));
   const jwt = input.jwt?.trim() ?? "";
+  const edxRaw =
+    input.edxJwt?.trim() ||
+    (await resolveEdxJwt(input.env ?? process.env, { accountId: input.accountId }));
+  const edxJwt = edxRaw && edxRaw.length > 0 ? edxRaw : undefined;
   const openId = (input.openId?.trim() || (jwt ? openIdFromJwt(jwt) : undefined) || "").trim();
   // Fake JWTs in unit tests have no openId claim — skip quietly; live App JWTs always carry it.
   if (jwt.length === 0 || openId.length === 0) return NOOP_SESSION;
 
   let session: StudyDurationSession = NOOP_SESSION;
-  const settled = startStudyDuration({ ...input, jwt, openId }, ports).then(
+  const starter =
+    edxJwt != null && input.target.kind === "listenTask"
+      ? startDualStudyDuration({ jwt, edxJwt, openId, target: input.target, env: input.env }, ports)
+      : startStudyDuration({ ...input, jwt, openId }, ports);
+  const settled = starter.then(
     (s) => {
       session = s;
       return s;
@@ -488,6 +573,216 @@ export async function startStudyDuration(
       }
       disposed = true;
       await destroySocket(socket);
+    },
+  };
+}
+
+
+/**
+ * App dual-socket presence for listenTask (#121):
+ * - edxJwt native socket stays joined (receives r_set)
+ * - SSO jwt socket emits uls_* kick-v2 / refresh / stop
+ * Hub kick/stop on edx mirrors App before H5 enter (best-effort).
+ */
+export async function startDualStudyDuration(
+  input: {
+    jwt: string;
+    edxJwt: string;
+    openId: string;
+    target: Extract<StudyDurationTarget, { kind: "listenTask" }>;
+    env?: NodeJS.ProcessEnv;
+  },
+  ports: StudyDurationPorts = {},
+): Promise<StudyDurationSession> {
+  const ssoJwt = input.jwt.trim();
+  const edxJwt = input.edxJwt.trim();
+  const openId = input.openId.trim();
+  if (!ssoJwt || !edxJwt || !openId) {
+    throw new Error("study-duration dual: jwt, edxJwt, openId required");
+  }
+
+  const nowMs = ports.nowMs ?? Date.now;
+  const setIntervalFn = ports.setIntervalFn ?? setInterval;
+  const clearIntervalFn = ports.clearIntervalFn ?? clearInterval;
+  const setTimeoutFn = ports.setTimeoutFn ?? setTimeout;
+  const clearTimeoutFn = ports.clearTimeoutFn ?? clearTimeout;
+  const log = ports.log ?? ((msg: string) => console.error(`[study-duration] ${msg}`));
+  const readyTimeoutMs = ports.readyTimeoutMs ?? 12_000;
+  const createWs =
+    ports.createWebSocket ??
+    ((u: string) => new WebSocket(u) as unknown as StudyDurationWebSocketLike);
+
+  const edxUrl = buildUnipusioUrl(openId, edxJwt, input.env);
+  const ssoUrl = buildUnipusioUrl(openId, ssoJwt, input.env);
+  const edxSocket = createWs(edxUrl);
+  const ssoSocket = createWs(ssoUrl);
+
+  let disposed = false;
+  let edxJoined = false;
+  let ssoJoined = false;
+  let kicked = false;
+  let ackId = 0;
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let readyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const nextAck = () => {
+    const id = ackId;
+    ackId = (ackId + 1) % 1_000_000;
+    return id;
+  };
+  const safeSend = (sock: StudyDurationWebSocketLike, data: string) => {
+    if (disposed) return;
+    try {
+      sock.send(data);
+    } catch (error) {
+      log(`dual send failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const emitKick = () => {
+    const payload = buildKickPayload(input.target, openId, nowMs());
+    safeSend(ssoSocket, encodeNamespaceEvent(nextAck(), "kick-v2", payload));
+    kicked = true;
+  };
+  const emitStop = () => {
+    const payload = buildStopPayload(input.target, openId, nowMs());
+    safeSend(ssoSocket, encodeNamespaceEvent(nextAck(), "stop", payload));
+  };
+  const emitHub = (module: "shouye" | "utingli", event: "kick-v2" | "stop") => {
+    const hub: StudyDurationTarget = { kind: "hub", module };
+    const payload =
+      event === "kick-v2"
+        ? buildKickPayload(hub, openId, nowMs())
+        : buildStopPayload(hub, openId, nowMs());
+    safeSend(edxSocket, encodeNamespaceEvent(nextAck(), event, payload));
+  };
+
+  let settleReady: () => void = () => {};
+  let rejectReady: (err: Error) => void = () => {};
+  const ready = new Promise<void>((resolve, reject) => {
+    settleReady = resolve;
+    rejectReady = reject;
+  });
+
+  const maybeReady = () => {
+    if (disposed || !edxJoined || !ssoJoined || kicked) return;
+    // App: hub on edx then stop utingli, then H5 uls kick on SSO.
+    emitHub("shouye", "kick-v2");
+    emitHub("utingli", "kick-v2");
+    emitHub("utingli", "stop");
+    emitKick();
+    if (refreshTimer == null) {
+      refreshTimer = setIntervalFn(() => {
+        if (!disposed) emitKick();
+      }, STUDY_DURATION_REFRESH_MS);
+    }
+    if (pingTimer == null) {
+      pingTimer = setIntervalFn(() => {
+        if (disposed) return;
+        safeSend(edxSocket, "2");
+        safeSend(ssoSocket, "2");
+      }, STUDY_DURATION_PING_MS);
+    }
+    if (readyTimer != null) {
+      clearTimeoutFn(readyTimer);
+      readyTimer = null;
+    }
+    settleReady();
+  };
+
+  const onSockMessage = (which: "edx" | "sso", raw: unknown) => {
+    if (disposed) return;
+    const text = messageText(raw);
+    if (text == null) return;
+    const sock = which === "edx" ? edxSocket : ssoSocket;
+    const jwt = which === "edx" ? edxJwt : ssoJwt;
+    if (text === "2") {
+      safeSend(sock, "3");
+      return;
+    }
+    if (text === "3") return;
+    if (text.startsWith("0") || text === "40" || text.startsWith("40,")) {
+      safeSend(sock, encodeNamespaceJoin(openId, jwt));
+      return;
+    }
+    if (text.startsWith(`40${STUDY_DURATION_NAMESPACE}`)) {
+      if (which === "edx") edxJoined = true;
+      else ssoJoined = true;
+      maybeReady();
+    }
+  };
+
+  for (const [which, sock] of [
+    ["edx", edxSocket],
+    ["sso", ssoSocket],
+  ] as const) {
+    sock.on("message", (...args: unknown[]) => {
+      try {
+        onSockMessage(which, args[0]);
+      } catch (error) {
+        log(`dual ${which} message: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    sock.on("error", (...args: unknown[]) => {
+      const err = args[0];
+      const msg = err instanceof Error ? err.message : String(err ?? "ws error");
+      log(`dual ${which}: ${msg}`);
+      if (!kicked) rejectReady(new Error(msg));
+    });
+    sock.on("close", () => {
+      if (!disposed && !kicked) {
+        rejectReady(new Error(`study-duration dual: ${which} closed before kick`));
+      }
+    });
+    sock.on("open", () => {
+      setTimeoutFn(() => {
+        if (disposed) return;
+        if (which === "edx" && !edxJoined) safeSend(edxSocket, encodeNamespaceJoin(openId, edxJwt));
+        if (which === "sso" && !ssoJoined) safeSend(ssoSocket, encodeNamespaceJoin(openId, ssoJwt));
+      }, 50);
+    });
+  }
+
+  readyTimer = setTimeoutFn(() => {
+    if (!kicked) {
+      rejectReady(new Error(`study-duration dual: ready timeout (${readyTimeoutMs}ms)`));
+    }
+  }, readyTimeoutMs);
+
+  try {
+    await ready;
+  } catch (error) {
+    disposed = true;
+    if (readyTimer != null) clearTimeoutFn(readyTimer);
+    if (refreshTimer != null) clearIntervalFn(refreshTimer);
+    if (pingTimer != null) clearIntervalFn(pingTimer);
+    await destroySocket(ssoSocket);
+    await destroySocket(edxSocket);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+
+  return {
+    get kicked() {
+      return kicked;
+    },
+    get inert() {
+      return false;
+    },
+    async dispose() {
+      if (disposed) return;
+      if (readyTimer != null) clearTimeoutFn(readyTimer);
+      if (refreshTimer != null) clearIntervalFn(refreshTimer);
+      if (pingTimer != null) clearIntervalFn(pingTimer);
+      refreshTimer = null;
+      pingTimer = null;
+      try {
+        if (kicked) emitStop();
+      } catch (error) {
+        log(`dual stop failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      disposed = true;
+      await destroySocket(ssoSocket);
+      await destroySocket(edxSocket);
     },
   };
 }
