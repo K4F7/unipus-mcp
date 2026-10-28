@@ -43,6 +43,11 @@ import { findHistoryTrainingTask } from "./history-training-tasks.js";
 import { MIN_APP_SCORE, statusFromScore, type PaperReporter } from "./paper-result.js";
 import { markProgress } from "./watchdog.js";
 import { budgetFromTries, pollWithin, resolveScorePoll } from "./limits.js";
+import {
+  listenStudyTarget,
+  softStartStudyDuration,
+  type StudyDurationWebSocketLike,
+} from "./study-duration.js";
 
 const DEFAULT_TRAIN_PROFILE_MAX_POLLS = 15;
 const DEFAULT_TRAIN_PROFILE_POLL_MS = 500;
@@ -69,6 +74,10 @@ export type GrindListenPorts = AuthPorts & {
   /** App history score polls per paper when `results` is set (default UNIPUS_SCORE_POLL_MS / UNIPUS_SCORE_MAX_MS). */
   scorePollTries?: number;
   scorePollMs?: number;
+  /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
+  createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
+  /** When false, skip study-duration presence (unit tests). Default true. */
+  studyDuration?: boolean;
 };
 
 export type GrindListenRoundResult =
@@ -282,52 +291,71 @@ export async function completeOneListen(
   const { paper } = loaded;
 
   const leaves = walkPaperLeaves(paper);
-  const answers: string[] = [];
-  try {
-    const ask = resolveAsk(ports);
-    for (const leaf of leaves) {
-      answers.push(await buildLeafAnswer(leaf, ports, ask));
-    }
-  } catch (error) {
-    // LLM / TTS / Clio failure: do not submit a half-guessed paper.
-    return {
-      ok: false,
-      taskId,
-      ansVersion,
-      detail: `answer build failed, not submitted: ${toError(error).message}`,
-      refused: error instanceof AnswerRefusedError,
-    };
-  }
-  const finalized = finalizeUserData(leaves, answers);
-  if (!finalized.ok) {
-    return { ok: false, taskId, detail: finalized.detail };
-  }
-
-  let paperToken = loaded.token;
-  const submit = () => submitAnswer(ports, {
-    taskId,
-    paperToken,
-    ansVersion,
-    durationSec: 300,
-    userData: finalized.userData,
-    wrapAudioUrl: false,
-  });
-  const out = await retryOnConcurrent(await submit(), {
-    env: ports.env,
-    sleep: ports.sleep ?? defaultSleep,
-    label: `听 ${taskId}`,
-    reload: async () => {
-      const fresh = await reloadForResubmit(ports, jwt, loadPath, taskId, ansVersion, leaves);
-      if (fresh.ok) paperToken = fresh.token;
-      return fresh;
+  // Study-time KPI: unipusio kick-v2 for uls_<qiId> (else utingli hub). Soft-fail — never block 出分 (#121).
+  const presence = await softStartStudyDuration(
+    {
+      jwt,
+      target: listenStudyTarget({
+        taskId,
+        questionInstanceId: leaves[0]?.instanceId,
+        ansVersion,
+        env: ports.env,
+      }),
+      env: ports.env,
+      enabled: ports.studyDuration,
     },
-    resubmit: submit,
-  });
-  const sub = out.result;
-  if (sub.isError) {
-    return { ok: false, taskId, ansVersion, detail: `submit error: ${sub.code} ${sub.message}${out.note}` };
+    { createWebSocket: ports.createStudyDurationWebSocket },
+  );
+  try {
+    const answers: string[] = [];
+    try {
+      const ask = resolveAsk(ports);
+      for (const leaf of leaves) {
+        answers.push(await buildLeafAnswer(leaf, ports, ask));
+      }
+    } catch (error) {
+      // LLM / TTS / Clio failure: do not submit a half-guessed paper.
+      return {
+        ok: false,
+        taskId,
+        ansVersion,
+        detail: `answer build failed, not submitted: ${toError(error).message}`,
+        refused: error instanceof AnswerRefusedError,
+      };
+    }
+    const finalized = finalizeUserData(leaves, answers);
+    if (!finalized.ok) {
+      return { ok: false, taskId, detail: finalized.detail };
+    }
+
+    let paperToken = loaded.token;
+    const submit = () => submitAnswer(ports, {
+      taskId,
+      paperToken,
+      ansVersion,
+      durationSec: 300,
+      userData: finalized.userData,
+      wrapAudioUrl: false,
+    });
+    const out = await retryOnConcurrent(await submit(), {
+      env: ports.env,
+      sleep: ports.sleep ?? defaultSleep,
+      label: `听 ${taskId}`,
+      reload: async () => {
+        const fresh = await reloadForResubmit(ports, jwt, loadPath, taskId, ansVersion, leaves);
+        if (fresh.ok) paperToken = fresh.token;
+        return fresh;
+      },
+      resubmit: submit,
+    });
+    const sub = out.result;
+    if (sub.isError) {
+      return { ok: false, taskId, ansVersion, detail: `submit error: ${sub.code} ${sub.message}${out.note}` };
+    }
+    return { ok: true, taskId, ansVersion };
+  } finally {
+    await presence.dispose();
   }
-  return { ok: true, taskId, ansVersion };
 }
 
 async function loadListenPaper(
