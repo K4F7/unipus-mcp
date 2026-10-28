@@ -768,6 +768,7 @@ export async function grindOneAccount(
     credentials,
     http,
     env: ports.env,
+    accountId: account.account_id,
     results: ports.resultsFor ? await ports.resultsFor(base.note, base.account_id) : undefined,
     llmAsk,
     waitNetwork,

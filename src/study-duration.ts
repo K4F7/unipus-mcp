@@ -8,9 +8,13 @@
  *
  * Soft-fail: connection / protocol errors are logged and never throw into grind scoring.
  */
+import { readFile } from "node:fs/promises";
+
 import WebSocket from "ws";
 
+import { readActiveAccountId } from "./accounts.js";
 import { DEFAULT_U_APP_ID, resolveUAppId } from "./config.js";
+import { extractJwtFromText, readEdxJwtForAccount } from "./credentials.js";
 import { openIdFromJwt } from "./uls-business.js";
 
 export const DEFAULT_UNIPUSIO_WSS_URL = "wss://ucontent.unipus.cn/unipusio/";
@@ -32,7 +36,7 @@ export type StudyDurationWebSocketLike = {
   terminate?(): void;
 };
 
-export type StudyDurationHubModule = "utingli" | "ukouyu";
+export type StudyDurationHubModule = "utingli" | "ukouyu" | "shouye";
 
 export type StudyDurationTarget =
   | { kind: "hub"; module: StudyDurationHubModule }
@@ -74,11 +78,69 @@ export function resolveUnipusioWssUrl(env: NodeJS.ProcessEnv = process.env): str
 }
 
 
-/** Optional native App edx.unipus.cn JWT (inline env). File loading is caller's job. */
-export function resolveEdxJwt(env: NodeJS.ProcessEnv = process.env): string | undefined {
+export type ResolveEdxJwtOptions = {
+  /** Prefer this account's accounts/<id>/edx-jwt (after env). */
+  accountId?: string;
+  homedir?: string;
+  readFile?: (path: string) => Promise<string>;
+};
+
+/**
+ * Resolve native App edx.unipus.cn JWT for dual-socket presence (#121).
+ * Order: UNIPUS_EDX_JWT → UNIPUS_EDX_JWT_FILE → accounts/<id>/edx-jwt
+ * (explicit accountId, else active-account.txt). Soft-missing → undefined.
+ * Never logs the token value.
+ */
+export async function resolveEdxJwt(
+  env: NodeJS.ProcessEnv = process.env,
+  options: ResolveEdxJwtOptions = {},
+): Promise<string | undefined> {
   const inline = env.UNIPUS_EDX_JWT?.trim();
-  if (!inline) return undefined;
-  return inline.replace(/^Bearer\s+/i, "").trim() || undefined;
+  if (inline) {
+    const token = inline.replace(/^Bearer\s+/i, "").trim();
+    if (token) return token;
+  }
+
+  const filePath = env.UNIPUS_EDX_JWT_FILE?.trim();
+  if (filePath) {
+    const read = options.readFile ?? ((p: string) => readFile(p, "utf8"));
+    try {
+      const raw = await read(filePath);
+      const token = extractJwtFromText(raw);
+      if (token != null) return token;
+    } catch (error) {
+      if (
+        error == null ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        (error as { code?: unknown }).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  let accountId = options.accountId?.trim() || "";
+  if (!accountId) {
+    const active = await readActiveAccountId({
+      env,
+      home: options.homedir,
+      readFile:
+        options.readFile != null
+          ? async (p) => options.readFile!(p)
+          : undefined,
+    });
+    accountId = active?.trim() ?? "";
+  }
+  if (accountId) {
+    const fromAccount = await readEdxJwtForAccount(accountId, {
+      env,
+      homedir: options.homedir,
+      readFile: options.readFile,
+    });
+    if (fromAccount != null && fromAccount.length > 0) return fromAccount;
+  }
+  return undefined;
 }
 
 export function buildUnipusioUrl(openId: string, jwt: string, env?: NodeJS.ProcessEnv): string {
@@ -253,6 +315,8 @@ export async function softStartStudyDuration(
      * unipusio socket that receives r_set while SSO jwt emits uls kick-v2 (#121).
      */
     edxJwt?: string;
+    /** Prefer accounts/<id>/edx-jwt when edxJwt / env unset. */
+    accountId?: string;
     /** When false, skip entirely (tests). Default true. */
     enabled?: boolean;
   },
@@ -261,7 +325,9 @@ export async function softStartStudyDuration(
   if (input.enabled === false) return NOOP_SESSION;
   const log = ports.log ?? ((msg: string) => console.error(`[study-duration] ${msg}`));
   const jwt = input.jwt?.trim() ?? "";
-  const edxRaw = input.edxJwt?.trim() || resolveEdxJwt(input.env);
+  const edxRaw =
+    input.edxJwt?.trim() ||
+    (await resolveEdxJwt(input.env ?? process.env, { accountId: input.accountId }));
   const edxJwt = edxRaw && edxRaw.length > 0 ? edxRaw : undefined;
   const openId = (input.openId?.trim() || (jwt ? openIdFromJwt(jwt) : undefined) || "").trim();
   // Fake JWTs in unit tests have no openId claim — skip quietly; live App JWTs always carry it.

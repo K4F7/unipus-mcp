@@ -24,9 +24,25 @@ Gap: need login-window capture or APK reverse of HS256 client `c4f772063dcfa98e9
 ## Code direction
 
 1. Keep SSO JWT for uls `kick-v2` (and ULS HTTP).
-2. Optional `edxJwt` (env `UNIPUS_EDX_JWT` / `UNIPUS_EDX_JWT_FILE` / per-account file) opens native presence socket that stays joined while grind runs.
+2. Optional `edxJwt` opens native presence socket that stays joined while grind runs.
 3. Soft-fail if edx missing (today’s behaviour: ACK-only, durationHours may stay 0).
 4. Do not block 出分 on presence failures.
+
+## edx JWT resolve order (`resolveEdxJwt`)
+
+1. `UNIPUS_EDX_JWT` — inline token (optional `Bearer ` prefix)
+2. `UNIPUS_EDX_JWT_FILE` — path to a file containing the token
+3. `accounts/<id>/edx-jwt` — per-account file (mode `0600`), where `<id>` is the explicit `accountId` passed by grind/weekly-grind, or else `active-account.txt`
+
+### Ops: install per-account edx JWT
+
+```bash
+# After capturing a native App edx.unipus.cn JWT for account <id>:
+install -m 600 /path/to/edx.jwt ~/.config/unipus-mcp/accounts/<id>/edx-jwt
+# Never commit or log the file contents. open_id in the edx JWT must match the account SSO jwt.
+```
+
+Mint API still unknown; refresh_jwt only returns SSO. Without this file (and without env), listen soft-starts SSO-only and durationHours may stay 0.
 
 ## Probe scripts (main tree, not required to ship)
 

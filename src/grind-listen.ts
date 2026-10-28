@@ -79,6 +79,8 @@ export type GrindListenPorts = AuthPorts & {
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
   /** When false, skip study-duration presence (unit tests). Default true. */
   studyDuration?: boolean;
+  /** Prefer accounts/<id>/edx-jwt for dual-JWT presence (#121). */
+  accountId?: string;
 };
 
 export type GrindListenRoundResult =
@@ -296,7 +298,10 @@ export async function completeOneListen(
   const presence = await softStartStudyDuration(
     {
       jwt,
-      edxJwt: resolveEdxJwt(ports.env),
+      edxJwt: await resolveEdxJwt(ports.env ?? process.env, {
+        accountId: ports.accountId,
+      }),
+      accountId: ports.accountId,
       target: listenStudyTarget({
         taskId,
         questionInstanceId: leaves[0]?.instanceId,

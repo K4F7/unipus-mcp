@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import {
@@ -13,6 +16,7 @@ import {
   encodeNamespaceEvent,
   encodeNamespaceJoin,
   listenStudyTarget,
+  resolveEdxJwt,
   softStartStudyDuration,
   speakStudyTarget,
   startStudyDuration,
@@ -360,4 +364,77 @@ describe("startStudyDuration (mocked WSS)", () => {
     await session.dispose();
   });
 
+});
+
+describe("resolveEdxJwt", () => {
+  const inlineJwt =
+    "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiaW5saW5lIn0.sig";
+  const fileJwt =
+    "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiZmlsZSJ9.sig";
+  const accountJwt =
+    "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiYWNjdCJ9.sig";
+  const activeJwt =
+    "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiYWN0aXZlIn0.sig";
+
+  test("prefers UNIPUS_EDX_JWT over file and account", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-edx-"));
+    const config = join(home, ".config", "unipus-mcp");
+    const acct = join(config, "accounts", "acct1");
+    await mkdir(acct, { recursive: true, mode: 0o700 });
+    const filePath = join(home, "edx.env");
+    await writeFile(filePath, `${fileJwt}\n`, { mode: 0o600 });
+    await writeFile(join(acct, "edx-jwt"), `${accountJwt}\n`, { mode: 0o600 });
+    await writeFile(join(config, "active-account.txt"), "acct1\n", { mode: 0o600 });
+
+    const got = await resolveEdxJwt(
+      {
+        UNIPUS_EDX_JWT: `Bearer ${inlineJwt}`,
+        UNIPUS_EDX_JWT_FILE: filePath,
+      },
+      { accountId: "acct1", homedir: home },
+    );
+    assert.equal(got, inlineJwt);
+  });
+
+  test("uses UNIPUS_EDX_JWT_FILE when inline missing", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-edx-file-"));
+    const filePath = join(home, "edx.jwt");
+    await writeFile(filePath, `${fileJwt}\n`, { mode: 0o600 });
+    const got = await resolveEdxJwt(
+      { UNIPUS_EDX_JWT_FILE: filePath },
+      { homedir: home },
+    );
+    assert.equal(got, fileJwt);
+  });
+
+  test("uses accounts/<id>/edx-jwt when env unset", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-edx-acct-"));
+    const config = join(home, ".config", "unipus-mcp");
+    const acct = join(config, "accounts", "acct1");
+    await mkdir(acct, { recursive: true, mode: 0o700 });
+    await writeFile(join(acct, "edx-jwt"), `${accountJwt}\n`, { mode: 0o600 });
+
+    const got = await resolveEdxJwt({}, { accountId: "acct1", homedir: home });
+    assert.equal(got, accountJwt);
+  });
+
+  test("falls back to active-account edx-jwt", async () => {
+    const home = await mkdtemp(join(tmpdir(), "unipus-edx-active-"));
+    const config = join(home, ".config", "unipus-mcp");
+    const acct = join(config, "accounts", "acct-active");
+    await mkdir(acct, { recursive: true, mode: 0o700 });
+    await writeFile(join(acct, "edx-jwt"), `${activeJwt}\n`, { mode: 0o600 });
+    await writeFile(join(config, "active-account.txt"), "acct-active\n", { mode: 0o600 });
+
+    const got = await resolveEdxJwt({}, { homedir: home });
+    assert.equal(got, activeJwt);
+  });
+
+  test("missing sources yield undefined (soft)", async () => {
+    const got = await resolveEdxJwt(
+      {},
+      { accountId: "nope", homedir: "/tmp/no-such-unipus-edx-home" },
+    );
+    assert.equal(got, undefined);
+  });
 });
