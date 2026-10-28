@@ -84,7 +84,8 @@ export function parseBusinessBody(
 /** openId claim from the (unverified) JWT payload; tolerates a `Bearer ` prefix. */
 export function openIdFromJwt(jwt: string): string | undefined {
   const payload = decodeJwtPayload(jwt.replace(/^Bearer\s+/i, ""));
-  const v = payload?.openId ?? payload?.openid;
+  // SSO uses openId; edx.unipus.cn HS256 presence JWT uses open_id (mitm 2026-10-28).
+  const v = payload?.openId ?? payload?.openid ?? payload?.open_id;
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
 

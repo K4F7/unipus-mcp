@@ -10,5 +10,6 @@ test("ulsCloudHeaders defaults openid from JWT (ebcp/conversation 500 without it
   assert.equal(h.origin, "https://uadaptive.unipus.cn");
   assert.equal(ulsCloudHeaders(jwt({ openId: "a" }), undefined, "b").openid, "b");
   assert.equal(openIdFromJwt("Bearer " + jwt({ openId: "c" })), "c");
+  assert.equal(openIdFromJwt(jwt({ open_id: "edx-oid" })), "edx-oid");
   assert.equal(ulsCloudHeaders("garbage").openid, undefined);
 });

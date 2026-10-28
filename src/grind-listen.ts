@@ -45,6 +45,7 @@ import { markProgress } from "./watchdog.js";
 import { budgetFromTries, pollWithin, resolveScorePoll } from "./limits.js";
 import {
   listenStudyTarget,
+  resolveEdxJwt,
   softStartStudyDuration,
   type StudyDurationWebSocketLike,
 } from "./study-duration.js";
@@ -295,6 +296,7 @@ export async function completeOneListen(
   const presence = await softStartStudyDuration(
     {
       jwt,
+      edxJwt: resolveEdxJwt(ports.env),
       target: listenStudyTarget({
         taskId,
         questionInstanceId: leaves[0]?.instanceId,
