@@ -137,7 +137,13 @@ describe("readEdxJwtForAccount", () => {
       "eyJhbGciOiJIUzI1NiJ9.eyJvcGVuX2lkIjoiZWR4In0.sig";
     await writeFile(join(accountDir, "edx-jwt"), `${jwt}\n`, { mode: 0o600 });
 
-    assert.equal(await readEdxJwtForAccount("acct1", { homedir: home }), jwt);
-    assert.equal(await readEdxJwtForAccount("missing", { homedir: home }), null);
+    assert.equal(
+      await readEdxJwtForAccount("acct1", { env: {}, homedir: home }),
+      jwt,
+    );
+    assert.equal(
+      await readEdxJwtForAccount("missing", { env: {}, homedir: home }),
+      null,
+    );
   });
 });
