@@ -42,6 +42,11 @@ import {
   runAiDialogFlow,
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
+import {
+  softStartStudyDuration,
+  speakStudyTarget,
+  type StudyDurationWebSocketLike,
+} from "./study-duration.js";
 import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
 import { generateFreeTalk, leafTaskText, shortenFreeTalk, wordCount } from "./speak-content.js";
 import type { PaperReporter, PaperResult } from "./paper-result.js";
@@ -108,6 +113,10 @@ export type GrindSpeakPorts = AuthPorts & {
   requireCheckStatusOut?: boolean;
   /** Per-paper JSONL result lines + idempotency ledger (#88); CLI-only. */
   results?: PaperReporter;
+  /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
+  createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
+  /** When false, skip study-duration presence (unit tests). Default true. */
+  studyDuration?: boolean;
 };
 
 /** Server part-report per part name; 自由表达 also carries our script words + recording seconds. */
@@ -527,6 +536,19 @@ export async function completeOneSpeak(
     };
   }
 
+  const openId = openIdFromJwt(jwt);
+  // Study-time KPI: unipusio kick-v2 for ukouyu hub. Soft-fail — never block 出分 (#121).
+  const presence = await softStartStudyDuration(
+    {
+      jwt,
+      openId,
+      target: speakStudyTarget(),
+      env: ports.env,
+      enabled: ports.studyDuration,
+    },
+    { createWebSocket: ports.createStudyDurationWebSocket },
+  );
+  try {
   // AI对话 answers come from runAiDialogFlow in the part loop; never pre-voice a script for them.
   // Already-submitted parts are skipped below, so don't spend LLM/TTS on them either.
   const skipIds = new Set(
@@ -580,7 +602,6 @@ export async function completeOneSpeak(
   const doneParts: string[] = [];
   const doneSuffix = () =>
     doneParts.length ? ` (已交 part: ${doneParts.join("、")})` : " (未交任何 part)";
-  const openId = openIdFromJwt(jwt);
   for (const part of parts) {
     // questionInstanceIds already validated against paper leaves above; get is safe.
     const partLeaves = part.questionInstanceIds.map((id) => byId.get(id)!);
@@ -803,6 +824,9 @@ export async function completeOneSpeak(
     };
   }
   return { ok: true, taskId, ansVersion, appScore, ...report };
+  } finally {
+    await presence.dispose();
+  }
 }
 
 /**

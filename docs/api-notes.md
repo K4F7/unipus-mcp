@@ -500,3 +500,10 @@ Interpretation: per-item `gradeQuestion` on a **placement/grade** task is an ack
 - Clio 实际 `finalResult` 字段是 `total` / `fluency.overall` / `completeness` / `accuracy`（没有 `overall` / `integrity` / `pronunciation`），`mapClioResultToReviewScores` 以此为回退，否则分数全丢。
 - 听力 `单词跟读`（视频卷每个单词一个子项）、`视频配音` 同样写有声打分记录。`音频学习` / `视频学习` / `定位精听` / `口语_音频学习` 目前仍为 0 分（答体未知）。
 - Edge TTS 在 box 网络 403，周刷实际一直走 flite；flite 音频 Clio 单条 88–99 分，不是低分原因。
+
+
+## StudyDuration / learning-report `durationHours` (2026-10-28)
+
+App KPI study time is **not** `submitAnswer.durationSec` / `part/submit.duration` / `saveSnapshot.duration`.
+
+It is Socket.IO presence on `wss://ucontent.unipus.cn/unipusio/` namespace `/userActivities`: client `kick-v2` / `stop`, server `r_set.delta`. Modules: listen hub `utingli`/`app`, listen H5 `uls_<qiId>` / `uls:<taskId>_1`, speak hub `ukouyu`/`app`. See `docs/cloud-api-map.md` § StudyDuration and `src/study-duration.ts`.

@@ -152,6 +152,65 @@ http://update.stkouyu.com/sdk.cfg
 
 ---
 
+## StudyDuration / 训练时长 (runtime mitm 2026-10-28)
+
+Captured on nixos redroid + mitm with WebSocket hooks. Full notes (redacted): capture tree under `/workspace/unipus-apk/mitm/duration-capture-2026-10-28/` (`notes.md`).
+
+### Source of `durationHours` (learning-report KPI)
+
+**Not** part/submit `durationSec`, **not** `saveSnapshot.duration` (seen as `0`), **not** datasink buried-points (Sensors Analytics only).
+
+**Yes:** Socket.IO presence on
+
+`wss://ucontent.unipus.cn/unipusio/?EIO=3&transport=websocket&uuid=<openId>&token=<JWT>`
+
+Namespace: **`/userActivities`** (Engine.IO 3 / Socket.IO).
+
+| Direction | Event | Meaning |
+|-----------|-------|---------|
+| client | `kick-v2` | Start/refresh study presence (`TTL`=60s on hub) |
+| client | `stop` | End presence for a `module` |
+| server | `r_Hi` | Room hello (`concurrent`) |
+| server | `r_set` | Duration credit tick: `delta` seconds, `msUpdate` |
+
+Join: `40/userActivities?uuid=…&token=…` then emits `42/userActivities,<id>["kick-v2",{…}]`; acks `43/…`; client Engine.IO ping `2` / server `3` (~25s).
+
+### Payload shape (`kick-v2` / `stop`)
+
+```json
+{
+  "client": "ucloud",
+  "module": "utingli|ukouyu|uls_<questionInstanceId>|shouye",
+  "moduleGroup": "app|uls:<taskId>_1",
+  "openId": "<uuid>",
+  "sendTimestamp": 1793192719893,
+  "TTL": 60,
+  "tag3": "{\"role\":\"student\",\"status\":\"train\",\"OS\":\"Android\"}"
+}
+```
+
+Listen task variant adds `url`, `appId`=116, `serviceId`=`uls`, and richer `tag3` (`type=train`, `apptype=listen`, `appMiddle=/listen/guide|/listen/pre-listening`, `questionInstanceId`, …). Hub `stop` omits `status=train` in `tag3`.
+
+### Modules
+
+| module | moduleGroup | Product surface |
+|--------|-------------|-----------------|
+| `shouye` | `app` | Home |
+| `utingli` | `app` | U听力 hub (`status=train`); `stop` when entering listen H5 |
+| `ukouyu` | `app` | U口语 hub (`status=train`); `stop` on leave |
+| `uls_<qiId>` | `uls:<taskId>_1` | Listen adaptive H5; server `r_set.delta` ≈ 60s heartbeats |
+
+Speak **hub** duration = `ukouyu`/`app`. Deeper speak-task module id was not observed in the short 口语开始训练 window.
+
+### Headless impl (`src/study-duration.ts`)
+
+`grind-listen` / `grind-speak` soft-start a unipusio session per paper: listen prefers `uls_*` when the first leaf `instanceId` is known (else `utingli`/`app`); speak uses `ukouyu`/`app`. Refresh kick-v2 ~45s; `stop` in `finally`. Failures are logged and **must not** block scoring / 出分.
+
+### Side channels
+
+- `POST https://log.unipus.cn/common/log` `eventId=durationSocketMessage|durationSocketMessageSuccess` — client echo of kick/stop (hashed openId in `msg`).
+- `datasink.unipus.cn/buried-poing` (`project=ucloud|uls-app`) — analytics clicks only.
+
 ## One-line summary
 
 **U听力 = native UTSS (`cn.unipus.cloud.uts.student`); deeplink `page=ulistenspeak`; API likely `https://ucloud.unipus.cn/api/uls/*` (JWT). Adaptive/开始训练 paths locked in ijiami — not in jadx sources.**
