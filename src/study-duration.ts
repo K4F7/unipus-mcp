@@ -230,8 +230,9 @@ const NOOP_SESSION: StudyDurationSession = {
 };
 
 /**
- * Soft-start presence for a grind paper. Never throws; returns an inert session on failure
- * so scoring / 出分 is never blocked (#121).
+ * Soft-start presence for a grind paper. Never throws.
+ * Handshake runs in the background so a slow/unreachable unipusio cannot delay scoring (#121 / Codex).
+ * `dispose` awaits settle then stop; failures become an inert session.
  */
 export async function softStartStudyDuration(
   input: {
@@ -250,13 +251,32 @@ export async function softStartStudyDuration(
   const openId = (input.openId?.trim() || (jwt ? openIdFromJwt(jwt) : undefined) || "").trim();
   // Fake JWTs in unit tests have no openId claim — skip quietly; live App JWTs always carry it.
   if (jwt.length === 0 || openId.length === 0) return NOOP_SESSION;
-  try {
-    return await startStudyDuration({ ...input, jwt, openId }, ports);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    log(`soft-fail start: ${msg}`);
-    return NOOP_SESSION;
-  }
+
+  let session: StudyDurationSession = NOOP_SESSION;
+  const settled = startStudyDuration({ ...input, jwt, openId }, ports).then(
+    (s) => {
+      session = s;
+      return s;
+    },
+    (error: unknown) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      log(`soft-fail start: ${msg}`);
+      session = NOOP_SESSION;
+      return NOOP_SESSION;
+    },
+  );
+
+  return {
+    get kicked() {
+      return session.kicked;
+    },
+    get inert() {
+      return session.inert;
+    },
+    async dispose() {
+      await (await settled).dispose();
+    },
+  };
 }
 
 /**
@@ -433,6 +453,14 @@ export async function startStudyDuration(
   try {
     await ready;
   } catch (error) {
+    // Mark disposed before close so a late 40/userActivities cannot startHeartbeat (#CodeRabbit).
+    disposed = true;
+    if (readyTimer != null) clearTimeoutFn(readyTimer);
+    readyTimer = null;
+    if (refreshTimer != null) clearIntervalFn(refreshTimer);
+    if (pingTimer != null) clearIntervalFn(pingTimer);
+    refreshTimer = null;
+    pingTimer = null;
     await destroySocket(socket);
     throw error instanceof Error ? error : new Error(String(error));
   }
