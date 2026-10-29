@@ -43,6 +43,7 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import {
+  resolveEdxJwt,
   softStartStudyDuration,
   speakStudyTarget,
   type StudyDurationWebSocketLike,
@@ -539,13 +540,21 @@ export async function completeOneSpeak(
   }
 
   const openId = openIdFromJwt(jwt);
-  // Study-time KPI: unipusio kick-v2 for ukouyu hub. Soft-fail — never block 出分 (#121).
+  // Study-time KPI: dual-JWT uls_* speak (else ukouyu hub). Soft-fail — never block 出分 (#121 / #126).
   const presence = await softStartStudyDuration(
     {
       jwt,
       openId,
+      edxJwt: await resolveEdxJwt(ports.env ?? process.env, {
+        accountId: ports.accountId,
+      }),
       accountId: ports.accountId,
-      target: speakStudyTarget(),
+      target: speakStudyTarget({
+        taskId,
+        questionInstanceId: leaves[0]?.instanceId,
+        ansVersion,
+        env: ports.env,
+      }),
       env: ports.env,
       enabled: ports.studyDuration,
     },

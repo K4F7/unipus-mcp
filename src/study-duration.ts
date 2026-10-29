@@ -45,8 +45,10 @@ export type StudyDurationTarget =
       taskId: string;
       questionInstanceId: string;
       ansVersion?: number;
-      /** Default /listen/guide. */
+      /** Default /listen/guide (listen) or /speak (speak). */
       appMiddle?: string;
+      /** tag3.apptype + URL path; default listen. Speak dual uses "speak" (#126). */
+      apptype?: "listen" | "speak";
       adaptiveOrigin?: string;
       appId?: number | string;
     };
@@ -176,7 +178,29 @@ export function listenStudyTarget(input: {
   return { kind: "hub", module: "utingli" };
 }
 
-export function speakStudyTarget(): StudyDurationTarget {
+/** Prefer speak adaptive H5 uls_* when qiId is known; else U口语 hub. */
+export function speakStudyTarget(input?: {
+  taskId?: string;
+  questionInstanceId?: string | null;
+  ansVersion?: number;
+  env?: NodeJS.ProcessEnv;
+}): StudyDurationTarget {
+  const taskId = input?.taskId?.trim() ?? "";
+  const qi = input?.questionInstanceId?.trim();
+  if (qi != null && qi.length > 0 && taskId.length > 0) {
+    const origin =
+      input?.env?.UNIPUS_ULS_ADAPTIVE_ORIGIN?.trim() || "https://uadaptive.unipus.cn";
+    return {
+      kind: "listenTask",
+      taskId,
+      questionInstanceId: qi,
+      ansVersion: input?.ansVersion ?? 1,
+      appMiddle: "/speak",
+      apptype: "speak",
+      adaptiveOrigin: origin.replace(/\/+$/, ""),
+      appId: resolveUAppId(input?.env),
+    };
+  }
   return { kind: "hub", module: "ukouyu" };
 }
 
@@ -211,7 +235,9 @@ export function buildKickPayload(
   }
   const module = `uls_${target.questionInstanceId}`;
   const moduleGroup = `uls:${target.taskId}_1`;
-  const appMiddle = target.appMiddle?.trim() || "/listen/guide";
+  const apptype = target.apptype === "speak" ? "speak" : "listen";
+  const appMiddle =
+    target.appMiddle?.trim() || (apptype === "speak" ? "/speak" : "/listen/guide");
   const ansVersion = target.ansVersion ?? 1;
   const origin = (target.adaptiveOrigin ?? "https://uadaptive.unipus.cn").replace(/\/+$/, "");
   const appIdRaw = target.appId ?? DEFAULT_U_APP_ID;
@@ -230,7 +256,7 @@ export function buildKickPayload(
       moduleGroup,
       type: "train",
       enterStatus: "play",
-      apptype: "listen",
+      apptype,
       anstype: "ans",
       usertype: "active",
       questionInstanceId: target.questionInstanceId,
@@ -311,8 +337,9 @@ export async function softStartStudyDuration(
     target: StudyDurationTarget;
     env?: NodeJS.ProcessEnv;
     /**
-     * Native App edx.unipus.cn JWT. When set with listenTask, opens a second
-     * unipusio socket that receives r_set while SSO jwt emits uls kick-v2 (#121).
+     * Native App edx.unipus.cn JWT. When set with listenTask (listen or speak
+     * apptype), opens a second unipusio socket that receives r_set while SSO
+     * jwt emits uls kick-v2 (#121 / #126).
      */
     edxJwt?: string;
     /** Prefer accounts/<id>/edx-jwt when edxJwt / env unset. */
@@ -579,10 +606,11 @@ export async function startStudyDuration(
 
 
 /**
- * App dual-socket presence for listenTask (#121):
+ * App dual-socket presence for listenTask (#121 / speak #126):
  * - edxJwt native socket stays joined (receives r_set)
  * - SSO jwt socket emits uls_* kick-v2 / refresh / stop
- * Hub kick/stop on edx mirrors App before H5 enter (best-effort).
+ * Hub kick/stop on edx mirrors App before H5 enter (utingli for listen,
+ * ukouyu for speak apptype; best-effort).
  */
 export async function startDualStudyDuration(
   input: {
@@ -648,7 +676,7 @@ export async function startDualStudyDuration(
     const payload = buildStopPayload(input.target, openId, nowMs());
     safeSend(ssoSocket, encodeNamespaceEvent(nextAck(), "stop", payload));
   };
-  const emitHub = (module: "shouye" | "utingli", event: "kick-v2" | "stop") => {
+  const emitHub = (module: StudyDurationHubModule, event: "kick-v2" | "stop") => {
     const hub: StudyDurationTarget = { kind: "hub", module };
     const payload =
       event === "kick-v2"
@@ -666,10 +694,13 @@ export async function startDualStudyDuration(
 
   const maybeReady = () => {
     if (disposed || !edxJoined || !ssoJoined || kicked) return;
-    // App: hub on edx then stop utingli, then H5 uls kick on SSO.
+    // App: hub on edx then stop side hub, then H5 uls kick on SSO.
+    // Speak dual (#126): ukouyu; listen (#121): utingli.
+    const sideHub: StudyDurationHubModule =
+      input.target.apptype === "speak" ? "ukouyu" : "utingli";
     emitHub("shouye", "kick-v2");
-    emitHub("utingli", "kick-v2");
-    emitHub("utingli", "stop");
+    emitHub(sideHub, "kick-v2");
+    emitHub(sideHub, "stop");
     emitKick();
     if (refreshTimer == null) {
       refreshTimer = setIntervalFn(() => {

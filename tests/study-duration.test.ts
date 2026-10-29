@@ -90,6 +90,22 @@ describe("listenStudyTarget / speakStudyTarget", () => {
     }
     assert.deepEqual(speakStudyTarget(), { kind: "hub", module: "ukouyu" });
   });
+
+  test("speak prefer uls_* with apptype speak when qiId present, else ukouyu hub", () => {
+    assert.deepEqual(speakStudyTarget({ taskId: "t1" }), { kind: "hub", module: "ukouyu" });
+    const task = speakStudyTarget({
+      taskId: "1985595618996559872",
+      questionInstanceId: "1985595618996559872",
+      ansVersion: 1,
+    });
+    assert.equal(task.kind, "listenTask");
+    if (task.kind === "listenTask") {
+      assert.equal(task.taskId, "1985595618996559872");
+      assert.equal(task.questionInstanceId, "1985595618996559872");
+      assert.equal(task.apptype, "speak");
+      assert.equal(task.appMiddle, "/speak");
+    }
+  });
 });
 
 describe("payload builders", () => {
@@ -133,6 +149,28 @@ describe("payload builders", () => {
     const tag = JSON.parse(kick.tag3);
     assert.equal(tag.apptype, "listen");
     assert.equal(tag.questionInstanceId, "1986612581352873984");
+  });
+
+  test("speak listenTask kick uses /speak url and apptype speak", () => {
+    const kick = buildKickPayload(
+      {
+        kind: "listenTask",
+        taskId: "1985595618996559872",
+        questionInstanceId: "1985595619004952576",
+        ansVersion: 1,
+        apptype: "speak",
+        appMiddle: "/speak",
+      },
+      "oid",
+      100,
+    );
+    assert.equal(kick.module, "uls_1985595619004952576");
+    assert.equal(kick.moduleGroup, "uls:1985595618996559872_1");
+    assert.match(kick.url!, /\/speak\?/);
+    assert.match(kick.url!, /questionInstanceId=1985595619004952576/);
+    const tag = JSON.parse(kick.tag3);
+    assert.equal(tag.apptype, "speak");
+    assert.equal(tag.appMiddle, "/speak");
   });
 
   test("encode frames", () => {
