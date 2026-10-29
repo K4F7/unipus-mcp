@@ -39,6 +39,7 @@ import {
   saveLoginTokens,
 } from "./sso-login.js";
 import { listWeekProgress, type WeekProgressPorts } from "./week-progress.js";
+import { missingEdxJwtDetail, resolveEdxJwt } from "./study-duration.js";
 import { classifyError, toError, type ErrorClass } from "./retry.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -769,6 +770,7 @@ export async function grindOneAccount(
     http,
     env: ports.env,
     accountId: account.account_id,
+    accountNote: base.note,
     results: ports.resultsFor ? await ports.resultsFor(base.note, base.account_id) : undefined,
     llmAsk,
     waitNetwork,
@@ -776,6 +778,20 @@ export async function grindOneAccount(
 
   const grindListen = ports.grindListen ?? grindListenGaps;
   const grindSpeak = ports.grindSpeak ?? grindSpeakGaps;
+
+  // Hard gate (#130): no edx-jwt → fail the account before score-only grind.
+  if (listenNeed > 0 || speakNeed > 0) {
+    const edxJwt = await resolveEdxJwt(ports.env ?? process.env, {
+      accountId: account.account_id,
+    });
+    if (edxJwt == null || edxJwt.length === 0) {
+      return {
+        ...base,
+        status: "error",
+        errors: [...errors, missingEdxJwtDetail(account.account_id, base.note)],
+      };
+    }
+  }
 
   // Each side isolated: a throw on one side keeps the other side's completions.
   // A refusal (no valid LLM answer) stops the whole account: no retry, no next side.

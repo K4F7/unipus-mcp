@@ -1,8 +1,61 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 
 import { completeOneListen, grindListenGaps } from "../src/grind-listen.js";
+import {
+  STUDY_DURATION_NAMESPACE,
+  type StudyDurationWebSocketLike,
+} from "../src/study-duration.js";
 import { mockHttp } from "./mock-http.js";
+
+function jwtOid(openId: string, claim: "openId" | "open_id" = "openId"): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ [claim]: openId })).toString("base64url");
+  return `${header}.${payload}.x`;
+}
+
+/** Dual-capable mock: handshake + emit r_set after kick-v2 (#130 hard gate). */
+class CreditWs extends EventEmitter implements StudyDurationWebSocketLike {
+  sent: string[] = [];
+  constructor(public url: string) {
+    super();
+    queueMicrotask(() => {
+      this.emit("open");
+      this.emit("message", Buffer.from('0{"sid":"t"}'));
+    });
+  }
+  send(data: string | Buffer | Uint8Array): void {
+    const text = typeof data === "string" ? data : Buffer.from(data as Buffer).toString("utf8");
+    this.sent.push(text);
+    if (text.startsWith(`40${STUDY_DURATION_NAMESPACE}?`)) {
+      queueMicrotask(() => this.emit("message", Buffer.from(`40${STUDY_DURATION_NAMESPACE},`)));
+    }
+    if (text.includes('["kick-v2"')) {
+      queueMicrotask(() => {
+        this.emit(
+          "message",
+          Buffer.from(
+            `42${STUDY_DURATION_NAMESPACE},${JSON.stringify(["r_set", { delta: 1, module: "uls_x" }])}`,
+          ),
+        );
+      });
+    }
+  }
+  close(): void {
+    this.emit("close");
+  }
+}
+
+function durationGate() {
+  return {
+    env: { UNIPUS_EDX_JWT: jwtOid("oid", "open_id") } as NodeJS.ProcessEnv,
+    createStudyDurationWebSocket: (url: string) => new CreditWs(url),
+    studyDurationReadyTimeoutMs: 2000,
+    studyDurationCreditTimeoutMs: 2000,
+    sleep: async () => {},
+  };
+}
 
 const paper = [{
   q_qinstid: "1985995334422880257",
@@ -33,10 +86,28 @@ function http() {
 const submits = (h: ReturnType<typeof http>) => h.calls.filter((c) => c.url.includes("submitAnswer"));
 
 describe("grind-listen solver paths", () => {
+  test("missing edx-jwt → hard-fail before papers (#130)", async () => {
+    const h = http();
+    const r = await grindListenGaps({
+      credentials: { getJwt: async () => jwtOid("oid") },
+      http: h,
+      env: {},
+      accountId: "acct-no-edx",
+      accountNote: "bob",
+      llmAsk: async () => '{"answers":["A"]}',
+      sleep: async () => {},
+      trainProfileMaxPolls: 1,
+    } as never, 2, 2);
+    assert.equal(r.completed, 0);
+    assert.match(r.stoppedReason!, /missing edx-jwt for account acct-no-edx/);
+    assert.match(r.stoppedReason!, /note=bob/);
+    assert.equal(submits(h).length, 0);
+  });
   test("LLM failure after retries → paper not submitted", async () => {
     const h = http();
+    const d = durationGate();
     const r = await completeOneListen({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {},
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d,
       llmAsk: async () => { throw new Error("HTTP 503"); },
     } as never);
     assert.equal(r.ok, false);
@@ -60,8 +131,9 @@ describe("grind-listen solver paths", () => {
 
   test("invalid LLM letter → refused, nothing submitted, no heuristic", async () => {
     const h = http();
+    const d = durationGate();
     const r = await grindListenGaps({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {},
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d,
       llmAsk: async () => '{"answers":["Z"]}',
       sleep: async () => {}, trainProfileMaxPolls: 1,
     } as never, 3, 3);
@@ -73,8 +145,9 @@ describe("grind-listen solver paths", () => {
 
   test("valid LLM letter → submitted with that letter", async () => {
     const h = http();
+    const d = durationGate();
     const r = await completeOneListen({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {},
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d,
       llmAsk: async () => '{"answers":["A"]}',
     } as never);
     assert.equal(r.ok, true);
@@ -105,8 +178,9 @@ describe("grind-listen per-paper results (#88)", () => {
       report: async (r: Record<string, unknown>) => void lines.push(r),
       isSubmitted: (s: string, t: string, v: number) => submittedKeys.includes(`${s}|${t}|${v}`),
     };
+    const d = durationGate();
     return grindListenGaps({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {}, llmAsk: async () => '{"answers":["B"]}',
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d, llmAsk: async () => '{"answers":["B"]}',
       sleep: async () => {}, trainProfileMaxPolls: 1, scorePollTries: 2, results,
     } as never, 1, 1).then((r) => ({ r, lines }));
   };
@@ -131,8 +205,11 @@ describe("grind-listen per-paper results (#88)", () => {
     });
     const sleeps: number[] = [];
     const lines: Array<Record<string, unknown>> = [];
+    const d = durationGate();
     await grindListenGaps({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: { UNIPUS_SCORE_POLL_MS: "5000", UNIPUS_SCORE_MAX_MS: "60000" },
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h,
+      ...d,
+      env: { ...d.env, UNIPUS_SCORE_POLL_MS: "5000", UNIPUS_SCORE_MAX_MS: "60000" },
       llmAsk: async () => '{"answers":["B"]}', sleep: async (ms: number) => void sleeps.push(ms), trainProfileMaxPolls: 1,
       results: { report: async (r: Record<string, unknown>) => void lines.push(r), isSubmitted: () => false },
     } as never, 1, 1);
@@ -190,8 +267,9 @@ describe("grind-listen per-paper results (#88)", () => {
 describe("grind-listen rounds (#88)", () => {
   test("maxRounds defaults to max(8, need): a 12-paper week finishes all 12", async () => {
     const h = http();
+    const d = durationGate();
     const r = await grindListenGaps({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {}, llmAsk: async () => '{"answers":["B"]}',
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d, llmAsk: async () => '{"answers":["B"]}',
       sleep: async () => {}, trainProfileMaxPolls: 1,
     } as never, 12);
     assert.equal(r.completed, 12);
@@ -206,8 +284,9 @@ describe("grind-listen rounds (#88)", () => {
       return base.request(c);
     } };
     const lines: Array<Record<string, unknown>> = [];
+    const d = durationGate();
     const r = await grindListenGaps({
-      credentials: { getJwt: async () => "jwt" }, http: h, env: {}, llmAsk: async () => '{"answers":["B"]}',
+      credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d, llmAsk: async () => '{"answers":["B"]}',
       sleep: async () => {}, trainProfileMaxPolls: 1, scorePollTries: 1,
       results: { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false },
     } as never, 3);
@@ -258,11 +337,16 @@ function serverHttp(opts: {
 const grind = (h: ReturnType<typeof mockHttp>, need: number, extra: Record<string, unknown> = {}) => {
   const lines: Array<Record<string, unknown>> = [];
   const sleeps: number[] = [];
+  const d = durationGate();
+  const extraEnv = (extra.env as NodeJS.ProcessEnv | undefined) ?? {};
+  const { env: _ignore, ...rest } = extra;
   return grindListenGaps({
-    credentials: { getJwt: async () => "jwt" }, http: h, env: {}, llmAsk: async () => '{"answers":["B"]}',
+    credentials: { getJwt: async () => jwtOid("oid") }, http: h, ...d,
+    env: { ...d.env, ...extraEnv },
+    llmAsk: async () => '{"answers":["B"]}',
     sleep: async (ms: number) => void sleeps.push(ms), trainProfileMaxPolls: 1, scorePollTries: 1,
     results: { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false },
-    ...extra,
+    ...rest,
   } as never, need).then((r) => ({ r, lines, sleeps }));
 };
 const calls = (h: ReturnType<typeof mockHttp>, part: string) => h.calls.filter((c) => c.url.includes(part)).length;

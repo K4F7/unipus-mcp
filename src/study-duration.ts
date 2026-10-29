@@ -6,7 +6,8 @@
  * namespace /userActivities — client emit kick-v2 (TTL 60s) / stop; server r_set.delta credits seconds.
  * NOT submitAnswer durationSec, saveSnapshot.duration, or datasink analytics.
  *
- * Soft-fail: connection / protocol errors are logged and never throw into grind scoring.
+ * Soft-start helpers still NOOP for unit fakes (no openId). Live grind requires dual-JWT
+ * + r_set credit (#130 hard gate): see missingEdxJwtDetail / waitForStudyDuration*.
  */
 import { readFile } from "node:fs/promises";
 
@@ -60,7 +61,18 @@ export type StudyDurationSession = {
   get kicked(): boolean;
   /** True when this handle is a soft-fail no-op. */
   get inert(): boolean;
+  /** True when edx+SSO dual path was used (only this credits durationHours). */
+  get dual(): boolean;
+  /** Count of server `r_set` events with delta≥1 observed on presence sockets. */
+  get rSetCount(): number;
+  /** Sum of those r_set deltas (seconds credited while paper open). */
+  get sumDelta(): number;
 };
+
+/** Minimum credit for hard gate: at least one r_set with delta≥1 (#130). */
+export function studyDurationCreditOk(session: Pick<StudyDurationSession, "rSetCount" | "sumDelta">): boolean {
+  return session.rSetCount >= 1 && session.sumDelta >= 1;
+}
 
 export type StudyDurationPorts = {
   createWebSocket?: (url: string) => StudyDurationWebSocketLike;
@@ -323,6 +335,15 @@ const NOOP_SESSION: StudyDurationSession = {
   get inert() {
     return true;
   },
+  get dual() {
+    return false;
+  },
+  get rSetCount() {
+    return 0;
+  },
+  get sumDelta() {
+    return 0;
+  },
 };
 
 /**
@@ -382,6 +403,15 @@ export async function softStartStudyDuration(
     get inert() {
       return session.inert;
     },
+    get dual() {
+      return session.dual;
+    },
+    get rSetCount() {
+      return session.rSetCount;
+    },
+    get sumDelta() {
+      return session.sumDelta;
+    },
     async dispose() {
       await (await settled).dispose();
     },
@@ -433,6 +463,8 @@ export async function startStudyDuration(
   let disposed = false;
   let joined = false;
   let kicked = false;
+  let rSetCount = 0;
+  let sumDelta = 0;
   let ackId = 0;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -525,7 +557,11 @@ export async function startStudyDuration(
       return;
     }
 
-    // ACK / server events — ignore (r_set credits are server-side).
+    // ACK / server events — track r_set for hard-gate credit (#130).
+    noteRSet(text, (delta) => {
+      rSetCount += 1;
+      sumDelta += delta;
+    });
   };
 
   socket.on("message", (...args: unknown[]) => {
@@ -580,6 +616,15 @@ export async function startStudyDuration(
     },
     get inert() {
       return false;
+    },
+    get dual() {
+      return false;
+    },
+    get rSetCount() {
+      return rSetCount;
+    },
+    get sumDelta() {
+      return sumDelta;
     },
     async dispose() {
       if (disposed) return;
@@ -646,6 +691,8 @@ export async function startDualStudyDuration(
   let edxJoined = false;
   let ssoJoined = false;
   let kicked = false;
+  let rSetCount = 0;
+  let sumDelta = 0;
   let ackId = 0;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -737,7 +784,13 @@ export async function startDualStudyDuration(
       if (which === "edx") edxJoined = true;
       else ssoJoined = true;
       maybeReady();
+      return;
     }
+    // edx receives r_set in App dual; count either socket if server emits there.
+    noteRSet(text, (delta) => {
+      rSetCount += 1;
+      sumDelta += delta;
+    });
   };
 
   for (const [which, sock] of [
@@ -796,6 +849,15 @@ export async function startDualStudyDuration(
     get inert() {
       return false;
     },
+    get dual() {
+      return true;
+    },
+    get rSetCount() {
+      return rSetCount;
+    },
+    get sumDelta() {
+      return sumDelta;
+    },
     async dispose() {
       if (disposed) return;
       if (readyTimer != null) clearTimeoutFn(readyTimer);
@@ -812,6 +874,117 @@ export async function startDualStudyDuration(
       await destroySocket(ssoSocket);
       await destroySocket(edxSocket);
     },
+  };
+}
+
+
+/** Parse Socket.IO /userActivities payload for r_set with delta≥1. */
+export function parseUnipusioRSet(text: string): { delta: number } | null {
+  const idx = text.indexOf('["r_set"');
+  if (idx < 0) return null;
+  try {
+    const arr = JSON.parse(text.slice(idx)) as unknown;
+    if (!Array.isArray(arr) || arr[0] !== "r_set") return null;
+    const body = arr[1];
+    const delta =
+      body != null && typeof body === "object" && "delta" in body
+        ? Number((body as { delta: unknown }).delta)
+        : NaN;
+    if (!Number.isFinite(delta) || delta < 1) return null;
+    return { delta };
+  } catch {
+    return null;
+  }
+}
+
+function noteRSet(text: string, onDelta: (delta: number) => void): void {
+  const parsed = parseUnipusioRSet(text);
+  if (parsed != null) onDelta(parsed.delta);
+}
+
+/** Error detail when edx-jwt is missing — never includes the token (#130). */
+export function missingEdxJwtDetail(accountId?: string | null, note?: string | null): string {
+  const id = accountId?.trim() || "(unknown)";
+  const notePart = note?.trim() ? ` note=${note.trim()}` : "";
+  return (
+    `study-duration: missing edx-jwt for account ${id}${notePart}; ` +
+    "install accounts/<id>/edx-jwt (native App edx.unipus.cn token)"
+  );
+}
+
+export type StudyDurationWaitPorts = {
+  timeoutMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  nowMs?: () => number;
+};
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Wait until presence kicked and not inert (dual handshake finished). */
+export async function waitForStudyDurationReady(
+  session: StudyDurationSession,
+  ports: StudyDurationWaitPorts = {},
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const timeoutMs = ports.timeoutMs ?? 15_000;
+  const pollMs = ports.pollMs ?? 50;
+  const sleep = ports.sleep ?? defaultSleep;
+  const nowMs = ports.nowMs ?? Date.now;
+  const deadline = nowMs() + timeoutMs;
+  while (nowMs() < deadline) {
+    if (session.dual && session.kicked && !session.inert) return { ok: true };
+    await sleep(pollMs);
+  }
+  if (session.dual && session.kicked && !session.inert) return { ok: true };
+  if (session.inert) {
+    return { ok: false, detail: "study-duration: presence inert (dual failed or never started)" };
+  }
+  if (!session.dual) {
+    return {
+      ok: false,
+      detail: "study-duration: dual-JWT required (SSO-only / hub-only does not credit durationHours)",
+    };
+  }
+  return { ok: false, detail: "study-duration: presence not ready (no kick-v2)" };
+}
+
+/**
+ * Hard gate (#130): dual path required and at least one r_set with delta≥1
+ * while the paper is open. Short papers may only get delta=1 — that counts.
+ */
+export async function waitForStudyDurationCredit(
+  session: StudyDurationSession,
+  ports: StudyDurationWaitPorts = {},
+): Promise<
+  | { ok: true; rSetCount: number; sumDelta: number }
+  | { ok: false; detail: string }
+> {
+  if (!session.dual) {
+    return {
+      ok: false,
+      detail:
+        "study-duration: dual-JWT required (SSO-only / hub-only does not credit durationHours)",
+    };
+  }
+  const timeoutMs = ports.timeoutMs ?? 90_000;
+  const pollMs = ports.pollMs ?? 200;
+  const sleep = ports.sleep ?? defaultSleep;
+  const nowMs = ports.nowMs ?? Date.now;
+  const deadline = nowMs() + timeoutMs;
+  while (nowMs() < deadline) {
+    if (studyDurationCreditOk(session)) {
+      return { ok: true, rSetCount: session.rSetCount, sumDelta: session.sumDelta };
+    }
+    await sleep(pollMs);
+  }
+  if (studyDurationCreditOk(session)) {
+    return { ok: true, rSetCount: session.rSetCount, sumDelta: session.sumDelta };
+  }
+  return {
+    ok: false,
+    detail:
+      `study-duration: no r_set credit (rSetCount=${session.rSetCount} sumDelta=${session.sumDelta}); ` +
+      "dual ran but server never credited while paper open",
   };
 }
 

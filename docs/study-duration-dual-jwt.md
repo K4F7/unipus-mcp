@@ -21,12 +21,13 @@ Headless reproduction (2026-10-28):
 edx JWT appears already on the first native unipusio connect (cached / minted outside capture).
 Gap: need login-window capture or APK reverse of HS256 client `c4f772063dcfa98e9c50`.
 
-## Code direction
+## Code direction (#130 hard gate)
 
 1. Keep SSO JWT for uls `kick-v2` (and ULS HTTP).
-2. Optional `edxJwt` opens native presence socket that stays joined while grind runs.
-3. Soft-fail if edx missing (today’s behaviour: ACK-only, durationHours may stay 0).
-4. Do not block 出分 on presence failures.
+2. `edxJwt` opens native presence socket that stays joined while grind runs (required for live grind).
+3. **Hard gate**: missing edx-jwt / dual failed / no `r_set` (delta≥1) → fail the grind side.
+   交卷出分 alone is **not** success. Unit tests with fake JWTs (no openId) still soft-NOOP.
+4. Threshold: at least one `r_set` with `delta≥1` while the paper is open (short papers may only get delta=1).
 
 ## edx JWT resolve order (`resolveEdxJwt`)
 
@@ -42,7 +43,9 @@ install -m 600 /path/to/edx.jwt ~/.config/unipus-mcp/accounts/<id>/edx-jwt
 # Never commit or log the file contents. open_id in the edx JWT must match the account SSO jwt.
 ```
 
-Mint API still unknown; refresh_jwt only returns SSO. Without this file (and without env), listen soft-starts SSO-only and durationHours may stay 0.
+Mint API still unknown; refresh_jwt only returns SSO. Without this file (and without env),
+live grind **fails** the side with `missing edx-jwt for account <id>` (hard gate #130).
+Only accounts with a captured native App token (today: mainly **me**) can grind successfully.
 
 ## Probe scripts (main tree, not required to ship)
 
@@ -65,7 +68,8 @@ Speak uses the same dual-JWT pattern as listen:
 1. Prefer `speakStudyTarget({ taskId, questionInstanceId })` → `listenTask` with `apptype: "speak"` / `appMiddle: "/speak"`.
 2. `softStartStudyDuration` + `edxJwt` → `startDualStudyDuration` (SSO kicks uls_*; edx receives `r_set`; edx hub prelude uses `ukouyu` for speak).
 3. Fallback without qiId: hub `ukouyu` (needs edx presence + SSO kick to credit; edx-alone fails).
-4. Soft-fail; never block 出分.
+4. Hard gate (#130): same as listen — missing edx / no dual / no r_set → fail the speak side.
 
-`grind-speak` resolves `edxJwt` and passes the first paper leaf qiId, mirroring `grind-listen`.
+`grind-speak` / `grind-listen` / `weekly-grind` require `edxJwt` up front and wait for
+`r_set` credit before declaring a paper ok.
 

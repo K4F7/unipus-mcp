@@ -16,10 +16,16 @@ import {
   encodeNamespaceEvent,
   encodeNamespaceJoin,
   listenStudyTarget,
+  missingEdxJwtDetail,
+  parseUnipusioRSet,
   resolveEdxJwt,
   softStartStudyDuration,
   speakStudyTarget,
+  startDualStudyDuration,
   startStudyDuration,
+  studyDurationCreditOk,
+  waitForStudyDurationCredit,
+  waitForStudyDurationReady,
   type StudyDurationWebSocketLike,
 } from "../src/study-duration.js";
 
@@ -393,6 +399,90 @@ describe("startStudyDuration (mocked WSS)", () => {
     await session.dispose();
   });
 
+});
+
+
+describe("hard gate helpers (#130)", () => {
+  test("parseUnipusioRSet requires delta≥1", () => {
+    assert.deepEqual(
+      parseUnipusioRSet('42/userActivities,["r_set",{"delta":1,"module":"uls_x"}]'),
+      { delta: 1 },
+    );
+    assert.equal(parseUnipusioRSet('42/userActivities,["r_set",{"delta":0}]'), null);
+    assert.equal(parseUnipusioRSet("42/userActivities,[\"r_Hi\",{}]"), null);
+  });
+
+  test("missingEdxJwtDetail names account without token", () => {
+    const d = missingEdxJwtDetail("acct1", "me");
+    assert.match(d, /account acct1/);
+    assert.match(d, /note=me/);
+    assert.match(d, /edx-jwt/);
+    assert.doesNotMatch(d, /eyJ/);
+  });
+
+  test("dual session tracks r_set credit; waitForCredit ok", async () => {
+    MockWebSocket.instances = [];
+    const sso = jwtWithOpenId("oid-dual");
+    const edx =
+      Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url") +
+      "." +
+      Buffer.from(JSON.stringify({ open_id: "oid-dual" })).toString("base64url") +
+      ".x";
+    const session = await startDualStudyDuration(
+      {
+        jwt: sso,
+        edxJwt: edx,
+        openId: "oid-dual",
+        target: {
+          kind: "listenTask",
+          taskId: "t1",
+          questionInstanceId: "qi1",
+        },
+      },
+      {
+        createWebSocket: (url) => new MockWebSocket(url),
+        readyTimeoutMs: 5_000,
+      },
+    );
+    assert.equal(session.dual, true);
+    assert.equal(session.kicked, true);
+    assert.equal(studyDurationCreditOk(session), false);
+    // Server r_set on edx socket (first instance = edx URL order in dual).
+    const edxWs = MockWebSocket.instances[0]!;
+    edxWs.respond(
+      `42${STUDY_DURATION_NAMESPACE},${JSON.stringify(["r_set", { delta: 1, module: "uls_qi1" }])}`,
+    );
+    assert.equal(session.rSetCount, 1);
+    assert.equal(session.sumDelta, 1);
+    const credit = await waitForStudyDurationCredit(session, {
+      timeoutMs: 100,
+      pollMs: 10,
+      sleep: async () => {},
+    });
+    assert.equal(credit.ok, true);
+    if (credit.ok) assert.equal(credit.sumDelta, 1);
+    await session.dispose();
+  });
+
+  test("waitForCredit fails when not dual", async () => {
+    const session = await softStartStudyDuration(
+      { jwt: "not-a-jwt", target: speakStudyTarget() },
+      { createWebSocket: () => { throw new Error("no"); } },
+    );
+    const credit = await waitForStudyDurationCredit(session, { timeoutMs: 20, sleep: async () => {} });
+    assert.equal(credit.ok, false);
+    if (!credit.ok) assert.match(credit.detail, /dual-JWT required/);
+  });
+
+  test("waitForReady fails on inert softStart", async () => {
+    const session = await softStartStudyDuration(
+      { jwt: "not-a-jwt", target: listenStudyTarget({ taskId: "t" }) },
+      { createWebSocket: () => { throw new Error("no"); } },
+    );
+    const ready = await waitForStudyDurationReady(session, { timeoutMs: 30, sleep: async () => {} });
+    assert.equal(ready.ok, false);
+    if (!ready.ok) assert.match(ready.detail, /inert/);
+  });
 });
 
 describe("resolveEdxJwt", () => {
