@@ -17,9 +17,19 @@ Headless reproduction (2026-10-28):
 
 ## Mint API
 
-**Not found** in duration-capture `flows.jsonl` (nor bak). `refresh_jwt` returns SSO only.
-edx JWT appears already on the first native unipusio connect (cached / minted outside capture).
-Gap: need login-window capture or APK reverse of HS256 client `c4f772063dcfa98e9c50`.
+**Not found** (research 2026-10-29). No HTTP mint URL/fields suitable for box `obtainEdxJwt`.
+
+Evidence:
+
+- Duration + live mitm `flows.jsonl`: `http_resp_edx=0`; edx HS256 only appears as WS query `token=` on `wss://umcs.unipus.cn/umcs/` and `wss://ucontent.unipus.cn/unipusio/` (`aud=edx.unipus.cn`, `iss=c4f772063dcfa98e9c50`, claim `open_id`, ~1y `exp`).
+- `POST https://sso.unipus.cn/sso/4.0/sso/login` and `refresh_jwt` return SSO RS256 `jwt`+`rt` only (`aud=cn.unipus.sso.jwt`) — no edx field.
+- `GET https://u.unipus.cn/user/data/getToken` (public unipus-tool annotator path) is **not** edx; with SSO cookies it currently returns HTML. Empty-secret forged `aud=edx.unipus.cn` JWTs used as `X-Annotator-Auth-Token` are for content API only; unipusio `/userActivities` rejects them with `Signature verification failed`.
+- `https://umcs.unipus.cn/api/*` stubs return `{"umcs":"OK"}` — not a token mint.
+- Client-side forge with secrets `{iss, appId, empty, common words}` fails server verify; weak HMAC dictionary against captured me edx signature: 0 hits. APK is ijiami-packed (secret not in plaintext resources).
+
+Leading theory: App locally signs HS256 with embedded secret (`iss` = key id). Gap: recover secret (Frida/memory after login) or finish cold-start login-window mitm if an HTTP mint was missed. Prefer mint API over per-account mitm; until then install `accounts/<id>/edx-jwt` from App capture only.
+
+Do **not** ship a forge-based obtainer in unipus-mcp — server rejects bad signatures.
 
 ## Code direction (#130 hard gate)
 
@@ -72,4 +82,14 @@ Speak uses the same dual-JWT pattern as listen:
 
 `grind-speak` / `grind-listen` / `weekly-grind` require `edxJwt` up front and wait for
 `r_set` credit before declaring a paper ok.
+
+## Mint / obtaining edx-jwt
+
+Proven facts (2026-10-29, alice→nixos redroid+mitm capture):
+
+- **No HTTP mint** observed. SSO `login` / `refresh_jwt` return only SSO RS256 `jwt`+`rt`.
+- edx JWT is **HS256**, claims include `aud=edx.unipus.cn`, `iss=c4f772063dcfa98e9c50`, `open_id` matching SSO `openId`.
+- Token first appears as WebSocket query `token=` on `umcs.unipus.cn` / unipusio after App login (local sign; secret still unknown / ijiami-packed).
+- **Operational obtain (self accounts):** password-login on instrumented App → open U听说 → extract `token=` from mitm `flows.jsonl` → install `accounts/<phone>/edx-jwt` mode `0600`. Do **not** ship forged HS256 (server rejects).
+- Capture recipe that worked: landscape tap privacy `同意` → portrait password mode + ADBKeyboard fill → check `cb_policy_and_agreement` (login stays `enabled=false` until checked) → MainActivity → U听说.
 
