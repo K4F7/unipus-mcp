@@ -344,12 +344,9 @@ export async function softStartStudyDuration(
     edxJwt?: string;
     /** Prefer accounts/<id>/edx-jwt when edxJwt / env unset. */
     accountId?: string;
-    /** When false, skip entirely (tests). Default true. */
-    enabled?: boolean;
   },
   ports: StudyDurationPorts = {},
 ): Promise<StudyDurationSession> {
-  if (input.enabled === false) return NOOP_SESSION;
   const log = ports.log ?? ((msg: string) => console.error(`[study-duration] ${msg}`));
   const jwt = input.jwt?.trim() ?? "";
   const edxRaw =
