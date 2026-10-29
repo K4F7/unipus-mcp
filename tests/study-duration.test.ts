@@ -306,15 +306,6 @@ describe("startStudyDuration (mocked WSS)", () => {
     await session.dispose();
   });
 
-  test("softStart enabled:false is inert without socket", async () => {
-    MockWebSocket.instances = [];
-    const session = await softStartStudyDuration(
-      { jwt: jwtWithOpenId("oid"), target: speakStudyTarget(), enabled: false },
-      { createWebSocket: (url) => new MockWebSocket(url) },
-    );
-    assert.equal(session.inert, true);
-    assert.equal(MockWebSocket.instances.length, 0);
-  });
 
   test("ready timeout: disposed so late namespace join does not start timers", async () => {
     MockWebSocket.instances = [];

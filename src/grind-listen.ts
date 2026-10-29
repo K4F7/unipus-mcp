@@ -77,8 +77,6 @@ export type GrindListenPorts = AuthPorts & {
   scorePollMs?: number;
   /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
-  /** When false, skip study-duration presence (unit tests). Default true. */
-  studyDuration?: boolean;
   /** Prefer accounts/<id>/edx-jwt for dual-JWT presence (#121). */
   accountId?: string;
 };
@@ -309,7 +307,6 @@ export async function completeOneListen(
         env: ports.env,
       }),
       env: ports.env,
-      enabled: ports.studyDuration,
     },
     { createWebSocket: ports.createStudyDurationWebSocket },
   );

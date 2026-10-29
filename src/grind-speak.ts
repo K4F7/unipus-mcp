@@ -116,8 +116,6 @@ export type GrindSpeakPorts = AuthPorts & {
   results?: PaperReporter;
   /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
-  /** When false, skip study-duration presence (unit tests). Default true. */
-  studyDuration?: boolean;
   /** Prefer accounts/<id>/edx-jwt when resolving study-duration edx JWT (#121). */
   accountId?: string;
 };
@@ -556,7 +554,6 @@ export async function completeOneSpeak(
         env: ports.env,
       }),
       env: ports.env,
-      enabled: ports.studyDuration,
     },
     { createWebSocket: ports.createStudyDurationWebSocket },
   );
