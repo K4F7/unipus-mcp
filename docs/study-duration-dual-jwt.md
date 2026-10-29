@@ -48,3 +48,24 @@ Mint API still unknown; refresh_jwt only returns SSO. Without this file (and wit
 
 - `scripts/sd-ab-probe.ts` — A/B/prelude/C
 - `scripts/sd-dual-appseq.ts` — App-sequence dual (reproduced `r_set`)
+
+## Speak (#126)
+
+Headless probe on `me` (2026-10-29, `scripts/sd-speak-probe.ts`):
+
+| cell | r_set | sumΔ | result |
+|------|-------|------|--------|
+| dual + uls listenTask-shape with speak ids | 7 | 301 | PASS |
+| dual App-seq (edx ukouyu stop → SSO `/speak` uls) | 7 | 299 | PASS |
+| edx joined + SSO kick hub `ukouyu` | 7 | 299 | PASS |
+| edx alone kick hub `ukouyu` | 0 | 0 | FAIL |
+
+Speak uses the same dual-JWT pattern as listen:
+
+1. Prefer `speakStudyTarget({ taskId, questionInstanceId })` → `listenTask` with `apptype: "speak"` / `appMiddle: "/speak"`.
+2. `softStartStudyDuration` + `edxJwt` → `startDualStudyDuration` (SSO kicks uls_*; edx receives `r_set`; edx hub prelude uses `ukouyu` for speak).
+3. Fallback without qiId: hub `ukouyu` (needs edx presence + SSO kick to credit; edx-alone fails).
+4. Soft-fail; never block 出分.
+
+`grind-speak` resolves `edxJwt` and passes the first paper leaf qiId, mirroring `grind-listen`.
+
