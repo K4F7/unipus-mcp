@@ -32,6 +32,15 @@ export UNIPUS_JWT_FILE=/path/to/jwt # 原始 JWT、jwt= cookie、或 portal JSON
 
 多账户：`~/.config/unipus-mcp/accounts/<id>/{jwt,rt}` + `active-account.txt`；JWT ~48h，优先 `npm run refresh-jwt`；切换 `npx tsx scripts/accounts.ts use <id>`。详见 `docs/mcp.md`「登录约定」。
 
+### 训练时长前提：每号需要 `edx-jwt`
+
+听口 **训练时长（StudyDuration）** 依赖 native App 的 **edx JWT**（HS256，`aud=edx.unipus.cn`），与 SSO `jwt` / `rt` **不是一回事**。
+
+- 每号落盘：`~/.config/unipus-mcp/accounts/<id>/edx-jwt`（mode `0600`）。也可用 env `UNIPUS_EDX_JWT` / `UNIPUS_EDX_JWT_FILE`。
+- **无 HTTP mint**：SSO `login` / `refresh_jwt` 不含 edx。装盘方式：App 密码登录后，从 mitm 抓包（`umcs` / `unipusio` WebSocket query `token=`）取出再 `install -m 600`。细节见 [docs/study-duration-dual-jwt.md](docs/study-duration-dual-jwt.md)。
+- hard gate（#131）：缺 edx / 非 dual-JWT / 无 `r_set` 计入时长 → 听口侧失败；**仅交卷出分不算成功**。
+
+
 ## 开发
 
 ```sh
