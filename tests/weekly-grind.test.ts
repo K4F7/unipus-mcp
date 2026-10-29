@@ -1,10 +1,61 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import { assistMonths, assistUntil, selfUsage } from "../src/account-usage.js";
+import {
+  STUDY_DURATION_NAMESPACE,
+  type StudyDurationWebSocketLike,
+} from "../src/study-duration.js";
+
+function jwtOid(openId: string, claim: "openId" | "open_id" = "openId"): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ [claim]: openId })).toString("base64url");
+  return `${header}.${payload}.x`;
+}
+
+class CreditWs extends EventEmitter implements StudyDurationWebSocketLike {
+  sent: string[] = [];
+  constructor(public url: string) {
+    super();
+    queueMicrotask(() => {
+      this.emit("open");
+      this.emit("message", Buffer.from('0{"sid":"t"}'));
+    });
+  }
+  send(data: string | Buffer | Uint8Array): void {
+    const text = typeof data === "string" ? data : Buffer.from(data as Buffer).toString("utf8");
+    this.sent.push(text);
+    if (text.startsWith(`40${STUDY_DURATION_NAMESPACE}?`)) {
+      queueMicrotask(() => this.emit("message", Buffer.from(`40${STUDY_DURATION_NAMESPACE},`)));
+    }
+    if (text.includes('["kick-v2"')) {
+      queueMicrotask(() => {
+        this.emit(
+          "message",
+          Buffer.from(
+            `42${STUDY_DURATION_NAMESPACE},${JSON.stringify(["r_set", { delta: 1, module: "uls_x" }])}`,
+          ),
+        );
+      });
+    }
+  }
+  close(): void {
+    this.emit("close");
+  }
+}
+
+function durationListenPorts() {
+  return {
+    createStudyDurationWebSocket: (url: string) => new CreditWs(url),
+    studyDurationReadyTimeoutMs: 2000,
+    studyDurationCreditTimeoutMs: 2000,
+    sleep: async () => {},
+  };
+}
 import {
   accountDir,
   listAccounts,
@@ -27,7 +78,12 @@ import {
 import { mockHttp } from "./mock-http.js";
 
 const okLlm = async () => "OK";
-const LLM_ENV = { UNIPUS_LLM_BASE_URL: "https://llm.example/v1", UNIPUS_LLM_MODEL: "m", UNIPUS_LLM_API_KEY: "k" };
+const LLM_ENV = {
+  UNIPUS_LLM_BASE_URL: "https://llm.example/v1",
+  UNIPUS_LLM_MODEL: "m",
+  UNIPUS_LLM_API_KEY: "k",
+  UNIPUS_EDX_JWT: jwtOid("oid", "open_id"),
+};
 
 describe("parseWeeklyGrindArgs", () => {
   test("defaults to active; --all; multiple --account", () => {
@@ -444,9 +500,10 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       return { statusCode: 404, body: "{}" };
     });
     const result = await completeOneListen({
-      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      credentials: { getJwt: async () => jwtOid("oid") },
       http,
       env: { ...LLM_ENV },
+      ...durationListenPorts(),
       llmAsk: okLlm,
     });
     assert.equal(result.ok, true);
@@ -513,9 +570,10 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       return { statusCode: 404, body: "{}" };
     });
     const result = await completeOneListen({
-      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      credentials: { getJwt: async () => jwtOid("oid") },
       http,
       env: { ...LLM_ENV },
+      ...durationListenPorts(),
       llmAsk: okLlm,
       sleep: async (ms) => {
         sleeps.push(ms);
@@ -550,9 +608,10 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
       return { statusCode: 404, body: "{}" };
     });
     const result = await completeOneListen({
-      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      credentials: { getJwt: async () => jwtOid("oid") },
       http,
       env: { ...LLM_ENV },
+      ...durationListenPorts(),
       llmAsk: okLlm,
       sleep: async () => {},
       trainProfileMaxPolls: 3,
@@ -610,9 +669,10 @@ describe("ensureAccountAuth + grind orchestration (mocked)", () => {
     });
     const result = await grindListenGaps(
       {
-        credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+        credentials: { getJwt: async () => jwtOid("oid") },
         http,
         env: { ...LLM_ENV },
+        ...durationListenPorts(),
         llmAsk: okLlm,
         sleep: async () => {},
         trainProfilePollMs: 1,
@@ -1565,7 +1625,33 @@ describe("answer refusal (no LLM answer → no submit, account stops)", () => {
     assert.equal(result.streak_stopped, true);
   });
 
-  test("listen refused → speak not run, account status error", async () => {
+  
+test("missing edx-jwt fails listen side before grind (hard gate #130)", async () => {
+    const { UNIPUS_EDX_JWT: _drop, ...noEdxEnv } = LLM_ENV;
+    void _drop;
+    const env = { ...noEdxEnv };
+    const { home, row } = await oneRow("noedx", env);
+    let grindCalls = 0;
+    const result = await grindOneAccount(row, {
+      home,
+      env,
+      llmAsk: okLlm,
+      listProgress: progress,
+      grindListen: async () => {
+        grindCalls++;
+        return { completed: 1, taskIds: ["l"] };
+      },
+      grindSpeak: async () => {
+        grindCalls++;
+        return { completed: 1, taskIds: ["s"] };
+      },
+    });
+    assert.equal(result.status, "error");
+    assert.match(result.errors.join("\n"), /missing edx-jwt|edx-jwt/);
+    assert.equal(grindCalls, 0);
+  });
+
+test("listen refused → speak not run, account status error", async () => {
     const env = { ...LLM_ENV };
     const { home, row } = await oneRow("lref", env);
     let speakCalls = 0;

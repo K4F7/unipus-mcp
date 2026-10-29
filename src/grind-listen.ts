@@ -45,8 +45,11 @@ import { markProgress } from "./watchdog.js";
 import { budgetFromTries, pollWithin, resolveScorePoll } from "./limits.js";
 import {
   listenStudyTarget,
+  missingEdxJwtDetail,
   resolveEdxJwt,
   softStartStudyDuration,
+  waitForStudyDurationCredit,
+  waitForStudyDurationReady,
   type StudyDurationWebSocketLike,
 } from "./study-duration.js";
 
@@ -77,8 +80,14 @@ export type GrindListenPorts = AuthPorts & {
   scorePollMs?: number;
   /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
-  /** Prefer accounts/<id>/edx-jwt for dual-JWT presence (#121). */
+  /** Prefer accounts/<id>/edx-jwt for dual-JWT presence (#121 / #130 hard gate). */
   accountId?: string;
+  /** Optional display note for missing-edx error (never a secret). */
+  accountNote?: string | null;
+  /** Dual handshake wait (default 15s). */
+  studyDurationReadyTimeoutMs?: number;
+  /** Wait for r_set credit after/during paper (default 90s). */
+  studyDurationCreditTimeoutMs?: number;
 };
 
 export type GrindListenRoundResult =
@@ -292,17 +301,35 @@ export async function completeOneListen(
   const { paper } = loaded;
 
   const leaves = walkPaperLeaves(paper);
-  // Study-time KPI: unipusio kick-v2 for uls_<qiId> (else utingli hub). Soft-fail — never block 出分 (#121).
+  // Hard gate (#130): edx-jwt + dual uls_* + r_set credit required (交卷出分 alone is not enough).
+  const edxJwt = await resolveEdxJwt(ports.env ?? process.env, {
+    accountId: ports.accountId,
+  });
+  if (edxJwt == null || edxJwt.length === 0) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      detail: missingEdxJwtDetail(ports.accountId, ports.accountNote),
+    };
+  }
+  const qiId = leaves[0]?.instanceId?.trim() ?? "";
+  if (qiId.length === 0) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      detail: "study-duration: no questionInstanceId for uls_* dual kick",
+    };
+  }
   const presence = await softStartStudyDuration(
     {
       jwt,
-      edxJwt: await resolveEdxJwt(ports.env ?? process.env, {
-        accountId: ports.accountId,
-      }),
+      edxJwt,
       accountId: ports.accountId,
       target: listenStudyTarget({
         taskId,
-        questionInstanceId: leaves[0]?.instanceId,
+        questionInstanceId: qiId,
         ansVersion,
         env: ports.env,
       }),
@@ -311,6 +338,13 @@ export async function completeOneListen(
     { createWebSocket: ports.createStudyDurationWebSocket },
   );
   try {
+    const ready = await waitForStudyDurationReady(presence, {
+      timeoutMs: ports.studyDurationReadyTimeoutMs,
+      sleep: ports.sleep,
+    });
+    if (!ready.ok) {
+      return { ok: false, taskId, ansVersion, detail: ready.detail };
+    }
     const answers: string[] = [];
     try {
       const ask = resolveAsk(ports);
@@ -355,6 +389,13 @@ export async function completeOneListen(
     const sub = out.result;
     if (sub.isError) {
       return { ok: false, taskId, ansVersion, detail: `submit error: ${sub.code} ${sub.message}${out.note}` };
+    }
+    const credit = await waitForStudyDurationCredit(presence, {
+      timeoutMs: ports.studyDurationCreditTimeoutMs,
+      sleep: ports.sleep,
+    });
+    if (!credit.ok) {
+      return { ok: false, taskId, ansVersion, detail: credit.detail };
     }
     return { ok: true, taskId, ansVersion };
   } finally {
@@ -492,6 +533,14 @@ export async function grindListenGaps(
   } catch (error) {
     // No LLM config: refuse before loading any paper.
     return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
+  }
+  const edxJwt = await resolveEdxJwt(ports.env ?? process.env, { accountId: ports.accountId });
+  if (edxJwt == null || edxJwt.length === 0) {
+    return {
+      completed: 0,
+      taskIds: [],
+      stoppedReason: missingEdxJwtDetail(ports.accountId, ports.accountNote),
+    };
   }
   const status = async () => {
     const jwt = await requireJwt(ports);

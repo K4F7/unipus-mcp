@@ -43,9 +43,12 @@ import {
 } from "./ai-dialog-flow.js";
 import { openIdFromJwt } from "./uls-business.js";
 import {
+  missingEdxJwtDetail,
   resolveEdxJwt,
   softStartStudyDuration,
   speakStudyTarget,
+  waitForStudyDurationCredit,
+  waitForStudyDurationReady,
   type StudyDurationWebSocketLike,
 } from "./study-duration.js";
 import { defaultMaxRounds, ledgerSkipReason, retryOnConcurrent, runPaperLoop, type PaperLoopResult } from "./paper-loop.js";
@@ -116,8 +119,14 @@ export type GrindSpeakPorts = AuthPorts & {
   results?: PaperReporter;
   /** Inject unipusio WebSocket for study-duration presence (#121); default real `ws`. */
   createStudyDurationWebSocket?: (url: string) => StudyDurationWebSocketLike;
-  /** Prefer accounts/<id>/edx-jwt when resolving study-duration edx JWT (#121). */
+  /** Prefer accounts/<id>/edx-jwt when resolving study-duration edx JWT (#121 / #130 hard gate). */
   accountId?: string;
+  /** Optional display note for missing-edx error (never a secret). */
+  accountNote?: string | null;
+  /** Dual handshake wait (default 15s). */
+  studyDurationReadyTimeoutMs?: number;
+  /** Wait for r_set credit after/during paper (default 90s). */
+  studyDurationCreditTimeoutMs?: number;
 };
 
 /** Server part-report per part name; 自由表达 also carries our script words + recording seconds. */
@@ -538,18 +547,36 @@ export async function completeOneSpeak(
   }
 
   const openId = openIdFromJwt(jwt);
-  // Study-time KPI: dual-JWT uls_* speak (else ukouyu hub). Soft-fail — never block 出分 (#121 / #126).
+  // Hard gate (#130): edx-jwt + dual uls_* speak + r_set credit required.
+  const edxJwt = await resolveEdxJwt(ports.env ?? process.env, {
+    accountId: ports.accountId,
+  });
+  if (edxJwt == null || edxJwt.length === 0) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      detail: missingEdxJwtDetail(ports.accountId, ports.accountNote),
+    };
+  }
+  const qiId = leaves[0]?.instanceId?.trim() ?? "";
+  if (qiId.length === 0) {
+    return {
+      ok: false,
+      taskId,
+      ansVersion,
+      detail: "study-duration: no questionInstanceId for uls_* dual kick",
+    };
+  }
   const presence = await softStartStudyDuration(
     {
       jwt,
       openId,
-      edxJwt: await resolveEdxJwt(ports.env ?? process.env, {
-        accountId: ports.accountId,
-      }),
+      edxJwt,
       accountId: ports.accountId,
       target: speakStudyTarget({
         taskId,
-        questionInstanceId: leaves[0]?.instanceId,
+        questionInstanceId: qiId,
         ansVersion,
         env: ports.env,
       }),
@@ -558,6 +585,13 @@ export async function completeOneSpeak(
     { createWebSocket: ports.createStudyDurationWebSocket },
   );
   try {
+    const ready = await waitForStudyDurationReady(presence, {
+      timeoutMs: ports.studyDurationReadyTimeoutMs,
+      sleep: ports.sleep,
+    });
+    if (!ready.ok) {
+      return { ok: false, taskId, ansVersion, detail: ready.detail };
+    }
   // AI对话 answers come from runAiDialogFlow in the part loop; never pre-voice a script for them.
   // Already-submitted parts are skipped below, so don't spend LLM/TTS on them either.
   const skipIds = new Set(
@@ -832,6 +866,13 @@ export async function completeOneSpeak(
       ...report,
     };
   }
+  const credit = await waitForStudyDurationCredit(presence, {
+    timeoutMs: ports.studyDurationCreditTimeoutMs,
+    sleep: ports.sleep,
+  });
+  if (!credit.ok) {
+    return { ok: false, taskId, ansVersion, detail: credit.detail, ...report };
+  }
   return { ok: true, taskId, ansVersion, appScore, ...report };
   } finally {
     await presence.dispose();
@@ -904,6 +945,14 @@ export async function grindSpeakGaps(
   } catch (error) {
     // No LLM config: refuse before loading any paper.
     return { completed: 0, taskIds: [], stoppedReason: toError(error).message, refused: true };
+  }
+  const edxJwt = await resolveEdxJwt(ports.env ?? process.env, { accountId: ports.accountId });
+  if (edxJwt == null || edxJwt.length === 0) {
+    return {
+      completed: 0,
+      taskIds: [],
+      stoppedReason: missingEdxJwtDetail(ports.accountId, ports.accountNote),
+    };
   }
   const appScores: number[] = [];
   const speakPorts = { ...ports, answerCache: ports.answerCache ?? new Map(), speechCache: ports.speechCache ?? new Map() };

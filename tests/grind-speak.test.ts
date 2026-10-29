@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 import {
   classifyAppReadiness,
@@ -8,6 +9,58 @@ import {
 } from "../src/grind-speak.js";
 import type { UnipusHttp, UnipusHttpRequest } from "../src/http.js";
 import type { SpeechRecordType } from "../src/scored-speech.js";
+import {
+  STUDY_DURATION_NAMESPACE,
+  type StudyDurationWebSocketLike,
+} from "../src/study-duration.js";
+
+function jwtOid(openId: string, claim: "openId" | "open_id" = "openId"): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ [claim]: openId })).toString("base64url");
+  return `${header}.${payload}.x`;
+}
+
+class CreditWs extends EventEmitter implements StudyDurationWebSocketLike {
+  sent: string[] = [];
+  constructor(public url: string) {
+    super();
+    queueMicrotask(() => {
+      this.emit("open");
+      this.emit("message", Buffer.from('0{"sid":"t"}'));
+    });
+  }
+  send(data: string | Buffer | Uint8Array): void {
+    const text = typeof data === "string" ? data : Buffer.from(data as Buffer).toString("utf8");
+    this.sent.push(text);
+    if (text.startsWith(`40${STUDY_DURATION_NAMESPACE}?`)) {
+      queueMicrotask(() => this.emit("message", Buffer.from(`40${STUDY_DURATION_NAMESPACE},`)));
+    }
+    if (text.includes('["kick-v2"')) {
+      queueMicrotask(() => {
+        this.emit(
+          "message",
+          Buffer.from(
+            `42${STUDY_DURATION_NAMESPACE},${JSON.stringify(["r_set", { delta: 1, module: "uls_x" }])}`,
+          ),
+        );
+      });
+    }
+  }
+  close(): void {
+    this.emit("close");
+  }
+}
+
+function durationGate(env: Record<string, string> = {}) {
+  return {
+    env: { UNIPUS_EDX_JWT: jwtOid("oid", "open_id"), ...env } as NodeJS.ProcessEnv,
+    createStudyDurationWebSocket: (url: string) => new CreditWs(url),
+    studyDurationReadyTimeoutMs: 2000,
+    studyDurationCreditTimeoutMs: 2000,
+  };
+}
+
+const JWT = jwtOid("oid");
 
 const FREE_TALK = Array.from({ length: 220 }, (_, i) => (i % 10 === 9 ? "music." : "music")).join(" ");
 const okAsk = async () => FREE_TALK;
@@ -179,9 +232,9 @@ describe("completeOneSpeak", () => {
     });
 
     const result = await completeOneSpeak({
-      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      credentials: { getJwt: async () => JWT },
       http,
-      env: {},
+      ...durationGate(),
       llmAsk: okAsk,
       speechRecord,
       sleep: async () => {},
@@ -259,9 +312,9 @@ describe("completeOneSpeak", () => {
       return { statusCode: 404, body: "{}" };
     });
     const result = await completeOneSpeak({
-      credentials: { getJwt: async () => "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t" },
+      credentials: { getJwt: async () => JWT },
       http,
-      env: {},
+      ...durationGate(),
       llmAsk: okAsk,
       speechRecord: async () => ({
         type: "EN_SENT_SCORE",
@@ -276,7 +329,6 @@ describe("completeOneSpeak", () => {
   });
 });
 
-const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.t";
 const okSpeech = async (_t: string, _g: string, type: SpeechRecordType) => ({
   type, url: "u", recordDetail: { score: 90 },
 });
@@ -333,7 +385,15 @@ const run = (
   llmAsk: ((p: string) => Promise<string>) | null = okAsk,
   env: Record<string, string> = {},
 ) =>
-  completeOneSpeak({ credentials: { getJwt: async () => JWT }, http, env, llmAsk: llmAsk ?? undefined, speechRecord, sleep: async () => {}, appReadyPollTries: 3 });
+  completeOneSpeak({
+    credentials: { getJwt: async () => JWT },
+    http,
+    ...durationGate(env),
+    llmAsk: llmAsk ?? undefined,
+    speechRecord,
+    sleep: async () => {},
+    appReadyPollTries: 3,
+  });
 const submitCalls = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("part/submit"));
 
 describe("speak answers survive a failed paper attempt (#119)", () => {
@@ -343,7 +403,7 @@ describe("speak answers survive a failed paper attempt (#119)", () => {
     let fail = true;
     const http = scenario({ submit: (b) => (b.partId === "p2" && fail ? { code: 500, msg: "boom" } : { code: 1 }) });
     const answerCache = new Map();
-    const ports = { credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 3, answerCache };
+    const ports = { credentials: { getJwt: async () => JWT }, http, ...durationGate(), llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 3, answerCache };
     const first = await completeOneSpeak(ports as never);
     assert.equal(first.ok, false);
     const afterFirst = voiced;
@@ -547,7 +607,7 @@ describe("completeOneSpeak review (#62)", () => {
     const r = await completeOneSpeak({
       credentials: { getJwt: async () => JWT },
       http,
-      env: {},
+      ...durationGate(),
       llmAsk: okAsk,
       speechRecord: okSpeech,
       sleep: async () => {},
@@ -573,10 +633,20 @@ describe("per-paper results + no silent LLM fallback (#88)", () => {
       isSubmitted: (skill: string, taskId: string, v: number) => submittedKeys.includes(`${skill}|${taskId}|${v}`),
     };
   };
-  const ports = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) => ({
-    credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: okSpeech,
-    sleep: async () => {}, appReadyPollTries: 2, ...extra,
-  });
+  const ports = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) => {
+    const extraEnv = (extra.env as Record<string, string> | undefined) ?? {};
+    const { env: _e, ...rest } = extra;
+    return {
+      credentials: { getJwt: async () => JWT },
+      http,
+      ...durationGate(extraEnv),
+      llmAsk: okAsk,
+      speechRecord: okSpeech,
+      sleep: async () => {},
+      appReadyPollTries: 2,
+      ...rest,
+    };
+  };
 
   test("ok paper → status ok with App score + ansVersion", async () => {
     const results = recorder();
@@ -649,7 +719,7 @@ describe("grindSpeakGaps rounds (#88)", () => {
       return inner.request(call);
     });
     const r = await grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 1,
+      credentials: { getJwt: async () => JWT }, http, ...durationGate(), llmAsk: okAsk, speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 1,
     } as never, 7);
     assert.equal(r.completed, 7, String(r.stoppedReason));
   });
@@ -715,7 +785,7 @@ describe("no template submit (Sein: 没答案不要用模板交)", () => {
   test("grindSpeakGaps: refusal counts as failure and stops (no next paper)", async () => {
     const http = scenario({});
     const r = await grindSpeakGaps(
-      { credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: async () => { throw new Error("down"); }, speechRecord: okSpeech, sleep: async () => {} },
+      { credentials: { getJwt: async () => JWT }, http, ...durationGate(), llmAsk: async () => { throw new Error("down"); }, speechRecord: okSpeech, sleep: async () => {} },
       3,
       5,
     );
@@ -727,7 +797,7 @@ describe("no template submit (Sein: 没答案不要用模板交)", () => {
 
   test("grindSpeakGaps without LLM config → refused before loading any paper", async () => {
     const http = scenario({});
-    const r = await grindSpeakGaps({ credentials: { getJwt: async () => JWT }, http, env: {}, speechRecord: okSpeech }, 2);
+    const r = await grindSpeakGaps({ credentials: { getJwt: async () => JWT }, http, ...durationGate(), speechRecord: okSpeech }, 2);
     assert.equal(r.refused, true);
     assert.equal(http.calls.filter((c) => c.url.includes("loadPaper")).length, 0);
   });
@@ -772,19 +842,26 @@ function aiScenario(opts: { aiReportOut?: boolean; submit?: (b: { action: string
   });
 }
 const dialogReply = "I like pop music the most because the melodies are catchy and they help me relax after a long day of classes.";
-const aiRun = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) =>
-  completeOneSpeak({
-    credentials: { getJwt: async () => JWT }, http, env: { UNIPUS_AI_TURN_MIN_MS: "0" },
-    llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech,
-    sleep: async () => {}, appReadyPollTries: 2,
+const aiRun = (http: ReturnType<typeof mockHttp>, extra: Record<string, unknown> = {}) => {
+  const extraEnv = (extra.env as Record<string, string> | undefined) ?? {};
+  const { env: _e, ...rest } = extra;
+  return completeOneSpeak({
+    credentials: { getJwt: async () => JWT },
+    http,
+    ...durationGate({ UNIPUS_AI_TURN_MIN_MS: "0", ...extraEnv }),
+    llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK),
+    speechRecord: okSpeech,
+    sleep: async () => {},
+    appReadyPollTries: 2,
     uploadFetch: async () => new Response("{}", { status: 200 }),
     synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
     openDialogSocket: () => ({
       nextReply: async () => ({ asr: "I like pop.", text: "Nice! Why?", audio: Buffer.alloc(32000 * 3) }),
       sendAudio() {}, close() {},
     }),
-    ...extra,
+    ...rest,
   } as never);
+};
 
 describe("#92 speak paper", () => {
   test("AI part: ONE part/submit (no snapshot), no instStatus, no u-app-id; other parts keep snapshot→submit+instStatus", async () => {
@@ -824,7 +901,7 @@ describe("#92 speak paper", () => {
     const lines: Array<Record<string, unknown>> = [];
     const results = { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false };
     const r = await grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: false }), env: { UNIPUS_AI_TURN_MIN_MS: "0", UNIPUS_AI_REPORT_MAX_MS: "60000" },
+      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: false }), ...durationGate({ UNIPUS_AI_TURN_MIN_MS: "0", UNIPUS_AI_REPORT_MAX_MS: "60000" }),
       llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 2,
       uploadFetch: async () => new Response("{}", { status: 200 }),
       synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
@@ -845,7 +922,7 @@ describe("#92 speak paper", () => {
   test("AI report generated → AI score recorded, no flag", async () => {
     const lines: Array<Record<string, unknown>> = [];
     await grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: true }), env: { UNIPUS_AI_TURN_MIN_MS: "0" },
+      credentials: { getJwt: async () => JWT }, http: aiScenario({ aiReportOut: true }), ...durationGate({ UNIPUS_AI_TURN_MIN_MS: "0" }),
       llmAsk: async (p: string) => (/AI just said/.test(p) ? dialogReply : FREE_TALK), speechRecord: okSpeech, sleep: async () => {}, appReadyPollTries: 2,
       uploadFetch: async () => new Response("{}", { status: 200 }),
       synthesizeLocalWav: async (_t: string, wav: string) => writeFileGs(wav, Buffer.alloc(44 + 32000 * 5)),
@@ -865,7 +942,7 @@ describe("#92 speak paper", () => {
     };
     const lines: Array<Record<string, unknown>> = [];
     await grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http: scenario({}), env: {}, llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 1,
+      credentials: { getJwt: async () => JWT }, http: scenario({}), ...durationGate(), llmAsk: okAsk, speechRecord: speech, sleep: async () => {}, appReadyPollTries: 1,
       results: { report: async (l: Record<string, unknown>) => void lines.push(l), isSubmitted: () => false },
     } as never, 1, 1);
     const free = seen.find((o) => o?.minSec != null)!;
@@ -894,7 +971,7 @@ describe("#92 speak paper", () => {
     const http = scenario({});
     let t = 0;
     const r = await completeOneSpeak({
-      credentials: { getJwt: async () => JWT }, http, env: { UNIPUS_PAPER_MAX_MS: "60000" }, llmAsk: okAsk,
+      credentials: { getJwt: async () => JWT }, http, ...durationGate({ UNIPUS_PAPER_MAX_MS: "60000" }), llmAsk: okAsk,
       speechRecord: (async (_x: string, _g: string, type: SpeechRecordType) => { t += 70_000; return { type, url: "u", recordDetail: { score: 90 } }; }) as never,
       sleep: async () => {}, appReadyPollTries: 1, clockMs: () => t,
     } as never);
@@ -911,8 +988,18 @@ describe("grindSpeakGaps per-paper skip + consecutive-failure stop (#98)", () =>
   };
   const gaps = (http: ReturnType<typeof mockHttp>, speechRecord: unknown, need: number, extra: Record<string, unknown> = {}) => {
     const results = recorder();
+    const extraEnv = (extra.env as Record<string, string> | undefined) ?? {};
+    const { env: _e, ...rest } = extra;
     return grindSpeakGaps({
-      credentials: { getJwt: async () => JWT }, http, env: {}, llmAsk: okAsk, speechRecord, sleep: async () => {}, appReadyPollTries: 1, results, ...extra,
+      credentials: { getJwt: async () => JWT },
+      http,
+      ...durationGate(extraEnv),
+      llmAsk: okAsk,
+      speechRecord,
+      sleep: async () => {},
+      appReadyPollTries: 1,
+      results,
+      ...rest,
     } as never, need).then((r) => ({ r, lines: results.lines }));
   };
   const loads = (h: ReturnType<typeof mockHttp>) => h.calls.filter((c) => c.url.includes("loadPaper")).length;
@@ -967,8 +1054,13 @@ describe("speak part/submit 4021 (#98)", () => {
   const runWith = (http: ReturnType<typeof mockHttp>, env: Record<string, string> = {}) => {
     const sleeps: number[] = [];
     return completeOneSpeak({
-      credentials: { getJwt: async () => JWT }, http, env, llmAsk: okAsk, speechRecord: okSpeech,
-      sleep: async (ms: number) => void sleeps.push(ms), appReadyPollTries: 1,
+      credentials: { getJwt: async () => JWT },
+      http,
+      ...durationGate(env),
+      llmAsk: okAsk,
+      speechRecord: okSpeech,
+      sleep: async (ms: number) => void sleeps.push(ms),
+      appReadyPollTries: 1,
     }).then((r) => ({ r, sleeps }));
   };
 
